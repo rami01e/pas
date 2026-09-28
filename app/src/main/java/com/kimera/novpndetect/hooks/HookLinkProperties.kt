@@ -35,7 +35,7 @@ class HookLinkProperties : XHook {
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
                 module.log(Log.INFO, TAG, "$targetKlass.getInterfaceName () -> $result")
-                if (result is String && result.startsWith("tun")) {
+                if (result is String && vpnInterfacePattern.matches(result)) {
                     var replacement: String? = null
                     val interfaces = NetworkInterface.getNetworkInterfaces()
                     if (interfaces != null) {

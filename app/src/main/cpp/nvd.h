@@ -47,5 +47,6 @@ bool UnregisterCopy(void* head);
 void InstallIfaceHooks();
 void InstallFsHooks();
 void InstallNetHooks();
+void InstallNetlinkHooks();
 
 }  // namespace nvd

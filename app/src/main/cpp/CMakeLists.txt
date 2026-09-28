@@ -10,7 +10,8 @@ add_library(nvd SHARED
     nvd.cpp
     hide_iface.cpp
     hide_fs.cpp
-    hide_net.cpp)
+    hide_net.cpp
+    hide_netlink.cpp)
 
 target_compile_options(nvd PRIVATE -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden)
 
