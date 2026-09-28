@@ -33,7 +33,7 @@ static bool IsNameQuery(unsigned long req) {
            req == SIOCGIFMETRIC || req == SIOCGIFMAP || req == SIOCGIFPFLAGS;
 }
 
-static void FilterIfConf(struct ifconf* ifc) {
+static void FilterIfConf(struct ifconf* ifc, int capacity) {
     if (!ifc || !ifc->ifc_buf || ifc->ifc_len <= 0) return;
     const size_t ent = sizeof(struct ifreq);
     int count = (int)((size_t)ifc->ifc_len / ent);
@@ -51,14 +51,24 @@ static void FilterIfConf(struct ifconf* ifc) {
         kept++;
     }
     ifc->ifc_len = kept * (int)ent;
+    // Zero everything after the kept entries up to the caller's original buffer
+    // capacity: detector probes scan the whole buffer and flag non-zero "stale"
+    // slots as a hooking artifact when leftovers are still visible there.
+    size_t used = (size_t)ifc->ifc_len;
+    size_t cap = capacity > 0 ? (size_t)capacity : (size_t)count * ent;
+    size_t written = (size_t)count * ent;
+    if (cap < written) cap = written;
+    if (cap > used) memset(buf + used, 0, cap - used);
 }
 
 int HideIoctl(int fd, unsigned long request, void* arg) {
     BYTEHOOK_STACK_SCOPE();
     if (arg != nullptr) {
         if (request == SIOCGIFCONF) {
+            struct ifconf* ifc = (struct ifconf*)arg;
+            int cap = (ifc != nullptr && ifc->ifc_len > 0) ? ifc->ifc_len : -1;
             int rc = BYTEHOOK_CALL_PREV(HideIoctl, fd, request, arg);
-            if (rc == 0) FilterIfConf((struct ifconf*)arg);
+            if (rc == 0) FilterIfConf(ifc, cap);
             return rc;
         }
         if (request == SIOCGIFNAME) {
