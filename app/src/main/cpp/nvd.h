@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ifaddrs.h>
+#include <net/if.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -28,6 +30,12 @@ void Log(const char* fmt, ...);
 
 void* RealSym(const char* sym);
 void HookLibcSym(const char* sym, void* proxy);
+void ResolveRealSymbols();
+
+// Real libc symbols resolved once at init (never via dlopen inside hooks).
+extern struct if_nameindex* (*g_real_if_nameindex)();
+extern void (*g_real_if_freenameindex)(struct if_nameindex*);
+extern void (*g_real_freeifaddrs)(struct ifaddrs*);
 
 bool IsHiddenIfaceName(const char* name);
 bool IsHiddenPath(const char* path);

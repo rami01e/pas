@@ -70,12 +70,6 @@ static void FreeChain(struct ifaddrs* head) {
     }
 }
 
-static void (*RealFreeIfaddrsFn())(struct ifaddrs*) {
-    static void (*fn)(struct ifaddrs*) = nullptr;
-    if (!fn) fn = (void (*)(struct ifaddrs*))RealSym("freeifaddrs");
-    return fn;
-}
-
 int HideGetIfaddrs(struct ifaddrs** out) {
     BYTEHOOK_STACK_SCOPE();
     struct ifaddrs* list = nullptr;
@@ -104,8 +98,7 @@ int HideGetIfaddrs(struct ifaddrs** out) {
         *tail = n;
         tail = &n->ifa_next;
     }
-    auto rf = RealFreeIfaddrsFn();
-    if (rf) rf(list);
+    if (g_real_freeifaddrs) g_real_freeifaddrs(list);
     RegisterCopy(head);
     if (out) *out = head;
     return 0;
@@ -123,12 +116,6 @@ void HideFreeIfaddrs(struct ifaddrs* p) {
 // ---------------------------------------------------------------------------
 // if_nameindex / if_freenameindex
 // ---------------------------------------------------------------------------
-
-static void (*RealIfFreeNameIndexFn())(struct if_nameindex*) {
-    static void (*fn)(struct if_nameindex*) = nullptr;
-    if (!fn) fn = (void (*)(struct if_nameindex*))RealSym("if_freenameindex");
-    return fn;
-}
 
 struct if_nameindex* HideIfNameIndex() {
     BYTEHOOK_STACK_SCOPE();
@@ -155,8 +142,7 @@ struct if_nameindex* HideIfNameIndex() {
         kept++;
     }
     RegisterCopy(copy);
-    auto rf = RealIfFreeNameIndexFn();
-    if (rf) rf(arr);
+    if (g_real_if_freenameindex) g_real_if_freenameindex(arr);
     return copy;
 }
 

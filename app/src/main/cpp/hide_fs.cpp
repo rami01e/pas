@@ -4,7 +4,6 @@
 
 #include "nvd.h"
 
-#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -12,268 +11,110 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
-#include <mutex>
 #include <string>
-#include <unordered_map>
 
 #include "bytehook.h"
 
 namespace nvd {
 
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+
 // ---------------------------------------------------------------------------
-// fd / FILE* tracking
+// watched files: /proc/net/* whose content must be filtered.
+// Filtering is done by materializing a filtered copy in a memfd at open()
+// time - no read/pread/lseek/dup/close interception is needed at all.
 // ---------------------------------------------------------------------------
 
-enum class FdKind { None = 0, ReadGen, ReadNet, DirList };
-
-static std::mutex g_fd_mtx;
-static std::unordered_map<int, FdKind> g_fd_kinds;
-static std::unordered_map<int, std::string> g_read_cache;
-static std::unordered_map<int, size_t> g_read_pos;
-static std::unordered_map<FILE*, FdKind> g_file_kinds;
-
-static FdKind ClassifyReadFile(const char* path) {
-    if (!path) return FdKind::None;
-    char buf[256];
-    size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(buf)) return FdKind::None;
-    memcpy(buf, path, n + 1);
-    while (n > 1 && buf[n - 1] == '/') buf[--n] = '\0';
-    static const struct {
-        const char* p;
-        FdKind k;
-    } kFiles[] = {
-        {"/proc/net/dev", FdKind::ReadGen},
-        {"/proc/net/if_inet6", FdKind::ReadGen},
-        {"/proc/net/ipv6_route", FdKind::ReadGen},
-        {"/proc/net/route", FdKind::ReadGen},
-        {"/proc/net/arp", FdKind::ReadGen},
-        {"/proc/net/tcp", FdKind::ReadNet},
-        {"/proc/net/tcp6", FdKind::ReadNet},
-        {"/proc/net/udp", FdKind::ReadNet},
-        {"/proc/net/udp6", FdKind::ReadNet},
-    };
-    for (const auto& e : kFiles) {
-        if (strcmp(buf, e.p) == 0) return e.k;
-    }
-    return FdKind::None;
+static bool PathIs(const char* path, const char* target) {
+    return path && strcmp(path, target) == 0;
 }
 
-static bool IsDirWatch(const char* path) {
+static bool IsWatchedReadFile(const char* path, bool* net) {
     if (!path) return false;
-    char buf[256];
-    size_t n = strlen(path);
-    if (n == 0 || n >= sizeof(buf)) return false;
-    memcpy(buf, path, n + 1);
-    while (n > 1 && buf[n - 1] == '/') buf[--n] = '\0';
-    static const char* kDirs[] = {
-        "/sys/class/net",
-        "/sys/devices/virtual/net",
-        "/proc/sys/net/ipv4/conf",
-        "/proc/sys/net/ipv6/conf",
-        "/proc/sys/net/ipv4/neigh",
-        "/proc/sys/net/ipv6/neigh",
-    };
-    for (const char* d : kDirs) {
-        if (strcmp(buf, d) == 0) return true;
+    *net = false;
+    if (PathIs(path, "/proc/net/tcp") || PathIs(path, "/proc/net/tcp6") ||
+        PathIs(path, "/proc/net/udp") || PathIs(path, "/proc/net/udp6")) {
+        *net = true;
+        return true;
+    }
+    if (PathIs(path, "/proc/net/dev") || PathIs(path, "/proc/net/route") ||
+        PathIs(path, "/proc/net/if_inet6") || PathIs(path, "/proc/net/ipv6_route") ||
+        PathIs(path, "/proc/net/arp")) {
+        return true;
     }
     return false;
 }
 
-static void TrackFd(int fd, const char* path) {
-    if (fd < 0) return;
-    FdKind k = ClassifyReadFile(path);
-    if (k == FdKind::None && IsDirWatch(path)) k = FdKind::DirList;
-    if (k == FdKind::None) return;
-    std::lock_guard<std::mutex> lk(g_fd_mtx);
-    g_fd_kinds[fd] = k;
-    g_read_cache.erase(fd);
-    g_read_pos.erase(fd);
-}
-
-static void UntrackFd(int fd) {
-    std::lock_guard<std::mutex> lk(g_fd_mtx);
-    g_fd_kinds.erase(fd);
-    g_read_cache.erase(fd);
-    g_read_pos.erase(fd);
-}
-
-static FdKind KindOfFd(int fd) {
-    if (g_fd_kinds.empty()) return FdKind::None;
-    std::lock_guard<std::mutex> lk(g_fd_mtx);
-    auto it = g_fd_kinds.find(fd);
-    return it == g_fd_kinds.end() ? FdKind::None : it->second;
-}
-
-static FdKind KindOfFile(FILE* f) {
-    if (g_file_kinds.empty() || !f) return FdKind::None;
-    std::lock_guard<std::mutex> lk(g_fd_mtx);
-    auto it = g_file_kinds.find(f);
-    return it == g_file_kinds.end() ? FdKind::None : it->second;
-}
-
-static bool LineBlocked(const char* line, FdKind kind) {
-    if (!line) return false;
-    if (kind == FdKind::ReadNet && LineContainsProxyPortToken(line)) return true;
-    return LineContainsHiddenName(line);
-}
-
-static void CopyKind(int from, int to) {
-    if (to < 0) return;
-    std::lock_guard<std::mutex> lk(g_fd_mtx);
-    auto it = g_fd_kinds.find(from);
-    if (it == g_fd_kinds.end()) {
-        g_fd_kinds.erase(to);
-    } else {
-        g_fd_kinds[to] = it->second;
-    }
-    g_read_cache.erase(to);
-    g_read_pos.erase(to);
-}
-
-// ---------------------------------------------------------------------------
-// filtered read cache
-// ---------------------------------------------------------------------------
-
-static ssize_t (*RealPread64Fn())(int, void*, size_t, off64_t) {
-    static ssize_t (*fn)(int, void*, size_t, off64_t) = nullptr;
-    if (!fn) fn = (ssize_t (*)(int, void*, size_t, off64_t))RealSym("pread64");
-    return fn;
-}
-
-static bool BuildCache(int fd, FdKind kind) {
-    auto rp = RealPread64Fn();
-    if (!rp) return false;
-    std::string raw;
-    raw.reserve(8192);
+static bool ReadWholeFile(const char* path, std::string* out) {
+#ifdef SYS_openat
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+#else
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+#endif
+    if (fd < 0) return false;
     char buf[16384];
-    off64_t off = 0;
     for (;;) {
-        ssize_t n = rp(fd, buf, sizeof(buf), off);
+        ssize_t n = syscall(SYS_read, fd, buf, sizeof(buf));
         if (n < 0) {
             if (errno == EINTR) continue;
-            return false;
+            break;
         }
         if (n == 0) break;
-        raw.append(buf, (size_t)n);
-        off += n;
-        if (raw.size() > (4u << 20)) break;
+        out->append(buf, (size_t)n);
+        if (out->size() > (4u << 20)) break;
     }
-    std::string out;
+    syscall(SYS_close, fd);
+    return true;
+}
+
+static void FilterLines(const std::string& raw, bool net, std::string* out) {
     size_t i = 0;
     while (i < raw.size()) {
         size_t j = raw.find('\n', i);
         j = (j == std::string::npos) ? raw.size() : j + 1;
         std::string line(raw, i, j - i);
-        if (!LineBlocked(line.c_str(), kind)) out.append(line);
+        bool blocked = LineContainsHiddenName(line.c_str()) ||
+                       (net && LineContainsProxyPortToken(line.c_str()));
+        if (!blocked) out->append(line);
         i = j;
     }
-    std::lock_guard<std::mutex> lk(g_fd_mtx);
-    g_read_cache[fd] = std::move(out);
-    if (g_read_pos.find(fd) == g_read_pos.end()) g_read_pos[fd] = 0;
-    return true;
 }
 
-static bool CacheExists(int fd) {
-    std::lock_guard<std::mutex> lk(g_fd_mtx);
-    return g_read_cache.find(fd) != g_read_cache.end();
-}
-
-ssize_t HideRead(int fd, void* buf, size_t count) {
-    BYTEHOOK_STACK_SCOPE();
-    FdKind kind = KindOfFd(fd);
-    if (kind != FdKind::ReadGen && kind != FdKind::ReadNet) {
-        return BYTEHOOK_CALL_PREV(HideRead, fd, buf, count);
-    }
-    if (!CacheExists(fd)) BuildCache(fd, kind);
-    bool served = false;
-    ssize_t out = -1;
-    {
-        std::lock_guard<std::mutex> lk(g_fd_mtx);
-        auto it = g_read_cache.find(fd);
-        if (it != g_read_cache.end()) {
-            size_t pos = g_read_pos[fd];
-            if (pos >= it->second.size()) {
-                out = 0;
-            } else {
-                size_t n = count < (it->second.size() - pos) ? count : (it->second.size() - pos);
-                memcpy(buf, it->second.data() + pos, n);
-                g_read_pos[fd] = pos + n;
-                out = (ssize_t)n;
-            }
-            served = true;
+// Returns a filtered memfd, -1 for a real error, or -2 to fall through to the
+// original function.
+static int CreateFilteredFd(const char* path, int flags) {
+    bool net = false;
+    if (!IsWatchedReadFile(path, &net)) return -2;
+    if ((flags & O_ACCMODE) != O_RDONLY) return -2;
+    std::string raw;
+    if (!ReadWholeFile(path, &raw)) return -2;
+    std::string out;
+    FilterLines(raw, net, &out);
+#ifdef SYS_memfd_create
+    int mfd = (int)syscall(SYS_memfd_create, "nvd-file",
+                           (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0);
+#else
+    int mfd = -1;
+#endif
+    if (mfd < 0) return -2;
+    ssize_t total = (ssize_t)out.size();
+    ssize_t off = 0;
+    while (off < total) {
+        ssize_t w = syscall(SYS_write, mfd, out.data() + off, (size_t)(total - off));
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            syscall(SYS_close, mfd);
+            return -2;
         }
+        off += w;
     }
-    if (served) return out;
-    return BYTEHOOK_CALL_PREV(HideRead, fd, buf, count);
-}
-
-ssize_t HidePread64(int fd, void* buf, size_t count, off64_t offset) {
-    BYTEHOOK_STACK_SCOPE();
-    FdKind kind = KindOfFd(fd);
-    if (kind != FdKind::ReadGen && kind != FdKind::ReadNet) {
-        return BYTEHOOK_CALL_PREV(HidePread64, fd, buf, count, offset);
-    }
-    if (!CacheExists(fd)) BuildCache(fd, kind);
-    bool served = false;
-    ssize_t out = -1;
-    {
-        std::lock_guard<std::mutex> lk(g_fd_mtx);
-        auto it = g_read_cache.find(fd);
-        if (it != g_read_cache.end()) {
-            if ((size_t)offset >= it->second.size()) {
-                out = 0;
-            } else {
-                size_t avail = it->second.size() - (size_t)offset;
-                size_t n = count < avail ? count : avail;
-                memcpy(buf, it->second.data() + offset, n);
-                out = (ssize_t)n;
-            }
-            served = true;
-        }
-    }
-    if (served) return out;
-    return BYTEHOOK_CALL_PREV(HidePread64, fd, buf, count, offset);
-}
-
-ssize_t HidePread(int fd, void* buf, size_t count, off_t offset) {
-    BYTEHOOK_STACK_SCOPE();
-    FdKind kind = KindOfFd(fd);
-    if (kind != FdKind::ReadGen && kind != FdKind::ReadNet) {
-        return BYTEHOOK_CALL_PREV(HidePread, fd, buf, count, offset);
-    }
-    if (!CacheExists(fd)) BuildCache(fd, kind);
-    bool served = false;
-    ssize_t out = -1;
-    {
-        std::lock_guard<std::mutex> lk(g_fd_mtx);
-        auto it = g_read_cache.find(fd);
-        if (it != g_read_cache.end()) {
-            if ((size_t)offset >= it->second.size()) {
-                out = 0;
-            } else {
-                size_t avail = it->second.size() - (size_t)offset;
-                size_t n = count < avail ? count : avail;
-                memcpy(buf, it->second.data() + offset, n);
-                out = (ssize_t)n;
-            }
-            served = true;
-        }
-    }
-    if (served) return out;
-    return BYTEHOOK_CALL_PREV(HidePread, fd, buf, count, offset);
-}
-
-off_t HideLseek(int fd, off_t offset, int whence) {
-    BYTEHOOK_STACK_SCOPE();
-    off_t r = BYTEHOOK_CALL_PREV(HideLseek, fd, offset, whence);
-    if (r >= 0 && KindOfFd(fd) != FdKind::None) {
-        std::lock_guard<std::mutex> lk(g_fd_mtx);
-        g_read_pos[fd] = (size_t)r;
-    }
-    return r;
+    syscall(SYS_lseek, mfd, 0, SEEK_SET);
+    return mfd;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,9 +138,9 @@ int HideOpen(const char* path, int flags, ...) {
         errno = ENOENT;
         return -1;
     }
-    int fd = BYTEHOOK_CALL_PREV(HideOpen, path, flags, mode);
-    if (fd >= 0) TrackFd(fd, path);
-    return fd;
+    int mfd = CreateFilteredFd(path, flags);
+    if (mfd >= 0) return mfd;
+    return BYTEHOOK_CALL_PREV(HideOpen, path, flags, mode);
 }
 
 int HideOpen64(const char* path, int flags, ...) {
@@ -319,9 +160,9 @@ int HideOpen64(const char* path, int flags, ...) {
         errno = ENOENT;
         return -1;
     }
-    int fd = BYTEHOOK_CALL_PREV(HideOpen64, path, flags, mode);
-    if (fd >= 0) TrackFd(fd, path);
-    return fd;
+    int mfd = CreateFilteredFd(path, flags);
+    if (mfd >= 0) return mfd;
+    return BYTEHOOK_CALL_PREV(HideOpen64, path, flags, mode);
 }
 
 int HideOpen2(const char* path, int flags) {
@@ -330,9 +171,9 @@ int HideOpen2(const char* path, int flags) {
         errno = ENOENT;
         return -1;
     }
-    int fd = BYTEHOOK_CALL_PREV(HideOpen2, path, flags);
-    if (fd >= 0) TrackFd(fd, path);
-    return fd;
+    int mfd = CreateFilteredFd(path, flags);
+    if (mfd >= 0) return mfd;
+    return BYTEHOOK_CALL_PREV(HideOpen2, path, flags);
 }
 
 int HideOpenAt(int dirfd, const char* path, int flags, ...) {
@@ -348,13 +189,15 @@ int HideOpenAt(int dirfd, const char* path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    if (path && path[0] == '/' && IsHiddenPath(path)) {
-        errno = ENOENT;
-        return -1;
+    if (path && path[0] == '/') {
+        if (IsHiddenPath(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+        int mfd = CreateFilteredFd(path, flags);
+        if (mfd >= 0) return mfd;
     }
-    int fd = BYTEHOOK_CALL_PREV(HideOpenAt, dirfd, path, flags, mode);
-    if (fd >= 0 && path && path[0] == '/') TrackFd(fd, path);
-    return fd;
+    return BYTEHOOK_CALL_PREV(HideOpenAt, dirfd, path, flags, mode);
 }
 
 int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
@@ -370,24 +213,28 @@ int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    if (path && path[0] == '/' && IsHiddenPath(path)) {
-        errno = ENOENT;
-        return -1;
+    if (path && path[0] == '/') {
+        if (IsHiddenPath(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+        int mfd = CreateFilteredFd(path, flags);
+        if (mfd >= 0) return mfd;
     }
-    int fd = BYTEHOOK_CALL_PREV(HideOpenAt64, dirfd, path, flags, mode);
-    if (fd >= 0 && path && path[0] == '/') TrackFd(fd, path);
-    return fd;
+    return BYTEHOOK_CALL_PREV(HideOpenAt64, dirfd, path, flags, mode);
 }
 
 int HideOpenAt2(int dirfd, const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
-    if (path && path[0] == '/' && IsHiddenPath(path)) {
-        errno = ENOENT;
-        return -1;
+    if (path && path[0] == '/') {
+        if (IsHiddenPath(path)) {
+            errno = ENOENT;
+            return -1;
+        }
+        int mfd = CreateFilteredFd(path, flags);
+        if (mfd >= 0) return mfd;
     }
-    int fd = BYTEHOOK_CALL_PREV(HideOpenAt2, dirfd, path, flags);
-    if (fd >= 0 && path && path[0] == '/') TrackFd(fd, path);
-    return fd;
+    return BYTEHOOK_CALL_PREV(HideOpenAt2, dirfd, path, flags);
 }
 
 FILE* HideFopen(const char* path, const char* mode) {
@@ -396,15 +243,15 @@ FILE* HideFopen(const char* path, const char* mode) {
         errno = ENOENT;
         return nullptr;
     }
-    FILE* f = BYTEHOOK_CALL_PREV(HideFopen, path, mode);
-    if (f) {
-        FdKind k = ClassifyReadFile(path);
-        if (k != FdKind::None) {
-            std::lock_guard<std::mutex> lk(g_fd_mtx);
-            g_file_kinds[f] = k;
+    if (mode && mode[0] == 'r' && strchr(mode, '+') == nullptr) {
+        int mfd = CreateFilteredFd(path, O_RDONLY);
+        if (mfd >= 0) {
+            FILE* f = fdopen(mfd, "r");
+            if (f) return f;
+            syscall(SYS_close, mfd);
         }
     }
-    return f;
+    return BYTEHOOK_CALL_PREV(HideFopen, path, mode);
 }
 
 FILE* HideFopen64(const char* path, const char* mode) {
@@ -413,99 +260,20 @@ FILE* HideFopen64(const char* path, const char* mode) {
         errno = ENOENT;
         return nullptr;
     }
-    FILE* f = BYTEHOOK_CALL_PREV(HideFopen64, path, mode);
-    if (f) {
-        FdKind k = ClassifyReadFile(path);
-        if (k != FdKind::None) {
-            std::lock_guard<std::mutex> lk(g_fd_mtx);
-            g_file_kinds[f] = k;
+    if (mode && mode[0] == 'r' && strchr(mode, '+') == nullptr) {
+        int mfd = CreateFilteredFd(path, O_RDONLY);
+        if (mfd >= 0) {
+            FILE* f = fdopen(mfd, "r");
+            if (f) return f;
+            syscall(SYS_close, mfd);
         }
     }
-    return f;
-}
-
-int HideFClose(FILE* f) {
-    BYTEHOOK_STACK_SCOPE();
-    if (!g_file_kinds.empty() && f) {
-        std::lock_guard<std::mutex> lk(g_fd_mtx);
-        g_file_kinds.erase(f);
-    }
-    return BYTEHOOK_CALL_PREV(HideFClose, f);
+    return BYTEHOOK_CALL_PREV(HideFopen64, path, mode);
 }
 
 // ---------------------------------------------------------------------------
-// fgets / getline
-// ---------------------------------------------------------------------------
-
-char* HideFgets(char* s, int size, FILE* stream) {
-    BYTEHOOK_STACK_SCOPE();
-    FdKind kind = KindOfFile(stream);
-    if (kind == FdKind::None) return BYTEHOOK_CALL_PREV(HideFgets, s, size, stream);
-    for (int i = 0; i < 4096; i++) {
-        char* r = BYTEHOOK_CALL_PREV(HideFgets, s, size, stream);
-        if (!r) return nullptr;
-        if (!LineBlocked(r, kind)) return r;
-    }
-    return nullptr;
-}
-
-char* HideFgetsUnlocked(char* s, int size, FILE* stream) {
-    BYTEHOOK_STACK_SCOPE();
-    FdKind kind = KindOfFile(stream);
-    if (kind == FdKind::None) return BYTEHOOK_CALL_PREV(HideFgetsUnlocked, s, size, stream);
-    for (int i = 0; i < 4096; i++) {
-        char* r = BYTEHOOK_CALL_PREV(HideFgetsUnlocked, s, size, stream);
-        if (!r) return nullptr;
-        if (!LineBlocked(r, kind)) return r;
-    }
-    return nullptr;
-}
-
-ssize_t HideGetline(char** lineptr, size_t* n, FILE* stream) {
-    BYTEHOOK_STACK_SCOPE();
-    FdKind kind = KindOfFile(stream);
-    if (kind == FdKind::None) return BYTEHOOK_CALL_PREV(HideGetline, lineptr, n, stream);
-    for (int i = 0; i < 4096; i++) {
-        ssize_t r = BYTEHOOK_CALL_PREV(HideGetline, lineptr, n, stream);
-        if (r < 0) return r;
-        if (!LineBlocked(*lineptr, kind)) return r;
-    }
-    return -1;
-}
-
-// ---------------------------------------------------------------------------
-// close / dup
-// ---------------------------------------------------------------------------
-
-int HideClose(int fd) {
-    BYTEHOOK_STACK_SCOPE();
-    if (!g_fd_kinds.empty()) UntrackFd(fd);
-    return BYTEHOOK_CALL_PREV(HideClose, fd);
-}
-
-int HideDup(int oldfd) {
-    BYTEHOOK_STACK_SCOPE();
-    int nf = BYTEHOOK_CALL_PREV(HideDup, oldfd);
-    CopyKind(oldfd, nf);
-    return nf;
-}
-
-int HideDup2(int oldfd, int newfd) {
-    BYTEHOOK_STACK_SCOPE();
-    int r = BYTEHOOK_CALL_PREV(HideDup2, oldfd, newfd);
-    CopyKind(oldfd, r);
-    return r;
-}
-
-int HideDup3(int oldfd, int newfd, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    int r = BYTEHOOK_CALL_PREV(HideDup3, oldfd, newfd, flags);
-    CopyKind(oldfd, r);
-    return r;
-}
-
-// ---------------------------------------------------------------------------
-// getdents64
+// getdents64: drop VPN-named entries from every directory listing.
+// (Stateless: entry names matching VPN interface patterns are simply omitted.)
 // ---------------------------------------------------------------------------
 
 struct NvdLinuxDirent64 {
@@ -520,7 +288,6 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
     BYTEHOOK_STACK_SCOPE();
     ssize_t total = BYTEHOOK_CALL_PREV(HideGetDents64, fd, dirp, count);
     if (total <= 0) return total;
-    if (KindOfFd(fd) != FdKind::DirList) return total;
     char* base = (char*)dirp;
     char* p = base;
     char* end = base + total;
@@ -598,18 +365,6 @@ void InstallFsHooks() {
     HookLibcSym("__openat_2", (void*)HideOpenAt2);
     HookLibcSym("fopen", (void*)HideFopen);
     HookLibcSym("fopen64", (void*)HideFopen64);
-    HookLibcSym("fclose", (void*)HideFClose);
-    HookLibcSym("fgets", (void*)HideFgets);
-    HookLibcSym("fgets_unlocked", (void*)HideFgetsUnlocked);
-    HookLibcSym("getline", (void*)HideGetline);
-    HookLibcSym("read", (void*)HideRead);
-    HookLibcSym("pread", (void*)HidePread);
-    HookLibcSym("pread64", (void*)HidePread64);
-    HookLibcSym("lseek", (void*)HideLseek);
-    HookLibcSym("close", (void*)HideClose);
-    HookLibcSym("dup", (void*)HideDup);
-    HookLibcSym("dup2", (void*)HideDup2);
-    HookLibcSym("dup3", (void*)HideDup3);
     HookLibcSym("getdents64", (void*)HideGetDents64);
     HookLibcSym("access", (void*)HideAccess);
     HookLibcSym("faccessat", (void*)HideFAccessAt);

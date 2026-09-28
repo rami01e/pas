@@ -4,8 +4,10 @@
 // supported ABIs, including x86_64 emulators. PLT/GOT hooking is provided by
 // ByteHook (https://github.com/bytedance/bhook, MIT).
 //
-// Loaded by LSPosed/Vector via META-INF/xposed/native_init.list ->
-// System.loadLibrary("nvd") -> native_init().
+// Design notes (v1.2.3): all hooks are stateless. File-content filtering is
+// done by materializing a filtered copy in a memfd at open()/fopen() time so
+// that no read/pread/lseek/dup/close interception is required. Real symbols
+// used internally are resolved once during native_init.
 
 #include "nvd.h"
 
@@ -24,6 +26,10 @@
 
 namespace nvd {
 
+struct if_nameindex* (*g_real_if_nameindex)() = nullptr;
+void (*g_real_if_freenameindex)(struct if_nameindex*) = nullptr;
+void (*g_real_freeifaddrs)(struct ifaddrs*) = nullptr;
+
 void Log(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -35,6 +41,14 @@ void* RealSym(const char* sym) {
     void* h = dlopen("libc.so", RTLD_NOW);
     if (!h) return nullptr;
     return dlsym(h, sym);
+}
+
+void ResolveRealSymbols() {
+    g_real_if_nameindex = (struct if_nameindex* (*)())RealSym("if_nameindex");
+    g_real_if_freenameindex = (void (*)(struct if_nameindex*))RealSym("if_freenameindex");
+    g_real_freeifaddrs = (void (*)(struct ifaddrs*))RealSym("freeifaddrs");
+    Log("native: real syms resolved: if_nameindex=%p if_freenameindex=%p freeifaddrs=%p",
+        (void*)g_real_if_nameindex, (void*)g_real_if_freenameindex, (void*)g_real_freeifaddrs);
 }
 
 // ---------------------------------------------------------------------------
@@ -96,11 +110,8 @@ bool IsHiddenPath(const char* path) {
 }
 
 // ---------------------------------------------------------------------------
-// hidden-name cache (resolved through the real libc, bypassing our hooks)
+// hidden-name cache (rebuilt through the real libc symbols)
 // ---------------------------------------------------------------------------
-
-using if_nameindex_fn = struct if_nameindex* (*)();
-using if_freenameindex_fn = void (*)(struct if_nameindex*);
 
 static std::mutex g_names_mtx;
 static std::vector<std::string> g_names;
@@ -121,10 +132,8 @@ void RefreshHiddenNames(bool force) {
     g_names.clear();
     g_indices.clear();
 
-    auto ni = (if_nameindex_fn)RealSym("if_nameindex");
-    auto nf = (if_freenameindex_fn)RealSym("if_freenameindex");
-    if (!ni) return;
-    struct if_nameindex* arr = ni();
+    if (!g_real_if_nameindex) return;
+    struct if_nameindex* arr = g_real_if_nameindex();
     if (!arr) return;
     for (struct if_nameindex* it = arr; it->if_index != 0 && it->if_name != nullptr; ++it) {
         if (IsHiddenIfaceName(it->if_name)) {
@@ -132,7 +141,7 @@ void RefreshHiddenNames(bool force) {
             g_indices.push_back(it->if_index);
         }
     }
-    if (nf) nf(arr);
+    if (g_real_if_freenameindex) g_real_if_freenameindex(arr);
     if (!g_names.empty()) {
         Log("native: hidden interfaces: %zu (first: %s)", g_names.size(), g_names[0].c_str());
     }
@@ -218,13 +227,20 @@ static void OnModuleLoadedCb(const char* name, void* handle) {
 extern "C" __attribute__((visibility("default"))) __attribute__((used))
 NativeOnModuleLoaded native_init(const NativeAPIEntries* entries) {
     (void)entries;
+    nvd::Log("native: stage1 - bytehook init");
     int rc = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
-    nvd::Log("native: init rc=%d version=%s mode=%d", rc, bytehook_get_version(),
+    nvd::Log("native: stage1 done rc=%d version=%s mode=%d", rc, bytehook_get_version(),
              bytehook_get_mode());
+    nvd::Log("native: stage2 - resolve real symbols");
+    nvd::ResolveRealSymbols();
+    nvd::Log("native: stage3 - refresh interface names");
     nvd::RefreshHiddenNames(true);
+    nvd::Log("native: stage4 - iface hooks");
     nvd::InstallIfaceHooks();
+    nvd::Log("native: stage5 - fs hooks");
     nvd::InstallFsHooks();
+    nvd::Log("native: stage6 - net hooks");
     nvd::InstallNetHooks();
-    nvd::Log("native: hooks installed");
+    nvd::Log("native: all hooks installed");
     return nvd::OnModuleLoadedCb;
 }
