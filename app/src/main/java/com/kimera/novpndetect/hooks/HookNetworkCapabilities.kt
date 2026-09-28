@@ -18,6 +18,8 @@ class HookNetworkCapabilities : XHook {
         hookHasTransport(module)
         hookGetCapabilities(module)
         hookHasCapability(module)
+        hookToString(module)
+        hookGetTransportInfo(module)
     }
 
     private fun hookHasTransport(module: XposedModule) {
@@ -94,6 +96,42 @@ class HookNetworkCapabilities : XHook {
                 val result = forced ?: chain.proceed()
                 module.log(Log.INFO, TAG, "NetworkCapabilities.hasCapability($capability) -> $result")
                 result
+            }
+        }
+    }
+
+    private fun hookToString(module: XposedModule) {
+        hookSafe(module, "NetworkCapabilities.toString") {
+            val method = NetworkCapabilities::class.java.getMethod("toString")
+            module.hook(method).intercept { chain ->
+                var s = chain.proceed() as? String
+                if (s != null) {
+                    if (s.contains("IS_VPN")) {
+                        s = s.replace("IS_VPN", "NOT_VPN")
+                    }
+                    if (s.contains("VpnTransportInfo")) {
+                        s = s.replace("VpnTransportInfo", "WifiInfo")
+                    }
+                    if (!s.contains("NOT_VPN")) {
+                        s =
+                            when {
+                                s.contains("capabilities: ") -> s.replaceFirst("capabilities: ", "capabilities: NOT_VPN&")
+                                s.contains("Capabilities: ") -> s.replaceFirst("Capabilities: ", "Capabilities: NOT_VPN&")
+                                else -> "$s NOT_VPN"
+                            }
+                    }
+                }
+                s
+            }
+        }
+    }
+
+    private fun hookGetTransportInfo(module: XposedModule) {
+        hookSafe(module, "NetworkCapabilities.getTransportInfo") {
+            val method = NetworkCapabilities::class.java.getMethod("getTransportInfo")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                if (result != null && result.javaClass.name.contains("VpnTransportInfo")) null else result
             }
         }
     }

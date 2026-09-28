@@ -3,6 +3,7 @@ package com.kimera.novpndetect.hooks
 import android.net.LinkProperties
 import android.util.Log
 import io.github.libxposed.api.XposedModule
+import java.net.InetAddress
 import java.net.NetworkInterface
 import kotlin.collections.iterator
 import com.kimera.novpndetect.TAG
@@ -11,11 +12,21 @@ import com.kimera.novpndetect.hookSafe
 
 class HookLinkProperties : XHook {
 
+    private val vpnInterfacePattern = Regex(
+        "^(tun\\d+|tap\\d+|wg\\d+|ppp\\d+|pptp.*|utun\\d*|zt.*|tailscale\\d*|svpn\\d*|gre\\d+|l2tp\\d+|he-ipv6.*|ipsec.*|xfrm.*)$"
+    )
+
+    private val routeInterfaceMethod by lazy {
+        runCatching { Class.forName("android.net.RouteInfo").getMethod("getInterface") }.getOrNull()
+    }
+
     override val targetKlass: String
         get() = "android.net.LinkProperties"
 
     override fun injectHook(module: XposedModule) {
         hookGetInterfaceName(module)
+        hookGetRoutes(module)
+        hookGetDnsServers(module)
     }
 
     private fun hookGetInterfaceName(module: XposedModule) {
@@ -48,5 +59,59 @@ class HookLinkProperties : XHook {
                 }
             }
         }
+    }
+
+    private fun hookGetRoutes(module: XposedModule) {
+        hookSafe(module, "LinkProperties.getRoutes") {
+            val method = LinkProperties::class.java.getMethod("getRoutes")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                val routes = result as? List<*>
+                if (routes == null) {
+                    result
+                } else {
+                    routes.filter { route ->
+                        val iface = routeInterfaceMethod?.let { m ->
+                            runCatching { m.invoke(route) as? String }.getOrNull()
+                        }
+                        iface == null || !vpnInterfacePattern.matches(iface)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hookGetDnsServers(module: XposedModule) {
+        hookSafe(module, "LinkProperties.getDnsServers") {
+            val method = LinkProperties::class.java.getMethod("getDnsServers")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                val servers = result as? List<*>
+                if (servers == null) {
+                    result
+                } else {
+                    servers.map { address ->
+                        val inet = address as? InetAddress
+                        if (inet != null && isPrivateDnsAddress(inet)) PUBLIC_DNS else address
+                    }
+                }
+            }
+        }
+    }
+
+    private fun isPrivateDnsAddress(address: InetAddress): Boolean {
+        if (address.isLoopbackAddress || address.isSiteLocalAddress || address.isLinkLocalAddress || address.isAnyLocalAddress) {
+            return true
+        }
+        val bytes = address.address
+        return when (bytes.size) {
+            4 -> bytes[0].toInt() == 100 && (bytes[1].toInt() and 0xFF) in 64..127
+            16 -> (bytes[0].toInt() and 0xFE) == 0xFC
+            else -> false
+        }
+    }
+
+    companion object {
+        private val PUBLIC_DNS: InetAddress = InetAddress.getByName("8.8.8.8")
     }
 }
