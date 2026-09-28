@@ -1,3 +1,7 @@
+#ifndef _LARGEFILE64_SOURCE
+#define _LARGEFILE64_SOURCE 1
+#endif
+
 #include "nvd.h"
 
 #include <dlfcn.h>
