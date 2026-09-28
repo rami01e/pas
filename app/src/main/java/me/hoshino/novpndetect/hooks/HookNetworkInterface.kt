@@ -1,12 +1,12 @@
 package me.hoshino.novpndetect.hooks
 
 import android.util.Log
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedHelpers
+import io.github.libxposed.api.XposedModule
+import java.net.NetworkInterface
 import me.hoshino.novpndetect.TAG
 import me.hoshino.novpndetect.XHook
+import me.hoshino.novpndetect.hookSafe
 import me.hoshino.novpndetect.util.getRandomString
-import java.net.NetworkInterface
 
 class HookNetworkInterface : XHook {
 
@@ -15,63 +15,73 @@ class HookNetworkInterface : XHook {
     override val targetKlass: String
         get() = "android.net.NetworkInterface"
 
-    override fun injectHook() {
-        hookGetName()
-        hookIsVirtual()
-        hookGetByName()
-        hookIsUp()
+    override fun injectHook(module: XposedModule) {
+        hookGetName(module)
+        hookIsVirtual(module)
+        hookGetByName(module)
+        hookIsUp(module)
     }
 
-    private fun hookIsVirtual() {
-        XposedHelpers.findAndHookMethod(NetworkInterface::class.java, "isVirtual", object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInterface.isVirtual")
+    private fun hookIsVirtual(module: XposedModule) {
+        hookSafe(module, "NetworkInterface.isVirtual") {
+            val method = NetworkInterface::class.java.getMethod("isVirtual")
+            module.hook(method).intercept { chain ->
+                module.log(Log.INFO, TAG, "NetworkInterface.isVirtual")
                 // VPNs are always virtual
-                param.result = false
+                false
             }
-        })
+        }
     }
 
-    private fun hookGetName() {
-        XposedHelpers.findAndHookMethod(NetworkInterface::class.java, "getName", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInterface.getName (${param.result})")
+    private fun hookGetName(module: XposedModule) {
+        hookSafe(module, "NetworkInterface.getName") {
+            val method = NetworkInterface::class.java.getMethod("getName")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkInterface.getName ($result)")
                 // breaks VPN name detection
-                if (param.result is String) {
-                    val name = param.result as String
-                    if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp")) {
-                        if(!renamedInterfaces.contains(name))
-                            renamedInterfaces[name] = getRandomString(name.length)
-                        param.result = renamedInterfaces[name]
+                if (result is String) {
+                    if (result.startsWith("tun") || result.startsWith("ppp") || result.startsWith("pptp")) {
+                        if (!renamedInterfaces.contains(result))
+                            renamedInterfaces[result] = getRandomString(result.length)
+                        renamedInterfaces[result]
+                    } else {
+                        result
                     }
                 } else {
-                    Log.e(TAG, "NetworkInterface.getName: result is not String")
+                    module.log(Log.ERROR, TAG, "NetworkInterface.getName: result is not String")
+                    result
                 }
             }
-        })
+        }
     }
 
-    private fun hookGetByName() {
-        XposedHelpers.findAndHookMethod(NetworkInterface::class.java, "getByName", String::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInterface.getByName (${param.args[0]})")
-                val name = param.args[0] as String
-                if(!renamedInterfaces.contains(name))
-                    param.args[0] = renamedInterfaces[name]
-                else if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp"))
-                    param.result = null
+    private fun hookGetByName(module: XposedModule) {
+        hookSafe(module, "NetworkInterface.getByName") {
+            val method = NetworkInterface::class.java.getMethod("getByName", String::class.java)
+            module.hook(method).intercept { chain ->
+                val name = chain.getArg(0) as String
+                module.log(Log.INFO, TAG, "NetworkInterface.getByName ($name)")
+                // Note: the inverted contains check below is preserved verbatim from upstream.
+                if (!renamedInterfaces.contains(name)) {
+                    chain.proceed(arrayOf<Any?>(renamedInterfaces[name]))
+                } else if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp")) {
+                    null
+                } else {
+                    chain.proceed()
+                }
             }
-        })
+        }
     }
 
-    private fun hookIsUp() {
-        XposedHelpers.findAndHookMethod(NetworkInterface::class.java, "isUp", object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                val name = (param.thisObject as NetworkInterface).name
-                Log.i(TAG, "NetworkInterface.isUp() on interface $name")
-                if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp"))
-                    param.result = false
+    private fun hookIsUp(module: XposedModule) {
+        hookSafe(module, "NetworkInterface.isUp") {
+            val method = NetworkInterface::class.java.getMethod("isUp")
+            module.hook(method).intercept { chain ->
+                val name = (chain.getThisObject() as NetworkInterface).name
+                module.log(Log.INFO, TAG, "NetworkInterface.isUp() on interface $name")
+                if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp")) false else chain.proceed()
             }
-        })
+        }
     }
 }

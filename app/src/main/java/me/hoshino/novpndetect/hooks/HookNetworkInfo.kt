@@ -3,75 +3,59 @@ package me.hoshino.novpndetect.hooks
 import android.net.ConnectivityManager
 import android.net.NetworkInfo
 import android.util.Log
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedHelpers
+import io.github.libxposed.api.XposedModule
 import me.hoshino.novpndetect.TAG
 import me.hoshino.novpndetect.XHook
+import me.hoshino.novpndetect.hookSafe
 
 class HookNetworkInfo : XHook {
 
     override val targetKlass: String
         get() = "android.net.NetworkInfo"
 
-    override fun injectHook() {
-        hookGetType()
-        hookGetTypeName()
-//        hookIsConnected()
+    override fun injectHook(module: XposedModule) {
+        hookGetType(module)
+        hookGetTypeName(module)
+        // hookIsConnected(module) // TODO: find a better way to patch https://stackoverflow.com/a/43967558/16676567
     }
 
-    private fun hookGetType() {
-        XposedHelpers.findAndHookMethod(NetworkInfo::class.java, "getType", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInfo.getType() -> ${param.result}")
-                if (param.result == ConnectivityManager.TYPE_VPN) {
-                    param.result = ConnectivityManager.TYPE_WIFI
-                }
+    private fun hookGetType(module: XposedModule) {
+        hookSafe(module, "NetworkInfo.getType") {
+            val method = NetworkInfo::class.java.getMethod("getType")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkInfo.getType() -> $result")
+                if (result == ConnectivityManager.TYPE_VPN) ConnectivityManager.TYPE_WIFI else result
             }
-        })
-        XposedHelpers.findAndHookMethod(NetworkInfo::class.java, "getSubtype", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInfo.getSubtype() -> ${param.result}")
-                if (param.result == ConnectivityManager.TYPE_VPN) {
-                    param.result = ConnectivityManager.TYPE_WIFI
-                }
+        }
+
+        hookSafe(module, "NetworkInfo.getSubtype") {
+            val method = NetworkInfo::class.java.getMethod("getSubtype")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkInfo.getSubtype() -> $result")
+                if (result == ConnectivityManager.TYPE_VPN) ConnectivityManager.TYPE_WIFI else result
             }
-        })
+        }
     }
 
-    private fun hookGetTypeName() {
-        XposedHelpers.findAndHookMethod(NetworkInfo::class.java, "getTypeName", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInfo.getTypeName() -> ${param.result}")
-                val res = param.result
-                if (res is String && res.contains("VPN", ignoreCase = true)) {
-                    param.result = "WIFI"
-                }
+    private fun hookGetTypeName(module: XposedModule) {
+        hookSafe(module, "NetworkInfo.getTypeName") {
+            val method = NetworkInfo::class.java.getMethod("getTypeName")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkInfo.getTypeName() -> $result")
+                if (result is String && result.contains("VPN", ignoreCase = true)) "WIFI" else result
             }
-        })
-        XposedHelpers.findAndHookMethod(NetworkInfo::class.java, "getSubtypeName", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInfo.getSubtypeName() -> ${param.result}")
-                val res = param.result
-                if (res is String && res.contains("VPN", ignoreCase = true)) {
-                    param.result = "WIFI"
-                }
-            }
-        })
-    }
+        }
 
-    private fun hookIsConnected() {
-        // TODO: find a better way to patch https://stackoverflow.com/a/43967558/16676567
-        XposedHelpers.findAndHookMethod(NetworkInfo::class.java, "isConnected", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInfo.isConnected (${param.result})")
-                param.result = false
+        hookSafe(module, "NetworkInfo.getSubtypeName") {
+            val method = NetworkInfo::class.java.getMethod("getSubtypeName")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkInfo.getSubtypeName() -> $result")
+                if (result is String && result.contains("VPN", ignoreCase = true)) "WIFI" else result
             }
-        })
-        XposedHelpers.findAndHookMethod(NetworkInfo::class.java, "isConnectedOrConnecting", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkInfo.isConnectedOrConnecting (${param.result})")
-                param.result = false
-            }
-        })
+        }
     }
 }

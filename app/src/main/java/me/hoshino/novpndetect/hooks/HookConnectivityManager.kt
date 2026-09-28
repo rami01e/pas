@@ -5,64 +5,77 @@ import android.net.ConnectivityManager
 import android.net.NetworkRequest
 import android.os.Handler
 import android.util.Log
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedHelpers
+import io.github.libxposed.api.XposedModule
 import me.hoshino.novpndetect.TAG
 import me.hoshino.novpndetect.XHook
+import me.hoshino.novpndetect.hookSafe
 
 class HookConnectivityManager : XHook {
 
     override val targetKlass: String
         get() = "android.net.ConnectivityManager"
 
-    override fun injectHook() {
-        hookNetworkInfo()
-        hookRequestNetwork()
+    override fun injectHook(module: XposedModule) {
+        hookNetworkInfo(module)
+        hookRequestNetwork(module)
         // TODO: will apps detect VPN from isVpnLockdownEnabled?
     }
 
-    private fun hookNetworkInfo() {
-        XposedHelpers.findAndHookMethod(ConnectivityManager::class.java, "getNetworkInfo", Int::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "ConnectivityManager.getNetworkInfo (${param.args[0]})")
-                if (param.args[0] == ConnectivityManager.TYPE_VPN) {
-                    param.result = null
-                }
+    private fun hookNetworkInfo(module: XposedModule) {
+        hookSafe(module, "ConnectivityManager.getNetworkInfo") {
+            val method = ConnectivityManager::class.java.getMethod("getNetworkInfo", java.lang.Integer.TYPE)
+            module.hook(method).intercept { chain ->
+                val type = chain.getArg(0)
+                module.log(Log.INFO, TAG, "ConnectivityManager.getNetworkInfo ($type)")
+                if (type == ConnectivityManager.TYPE_VPN) null else chain.proceed()
             }
-        })
+        }
     }
 
-    private fun hookRequestNetwork() {
+    private fun hookRequestNetwork(module: XposedModule) {
         // For debug purposes only
+        val cm = ConnectivityManager::class.java
+        val request = NetworkRequest::class.java
+        val callback = ConnectivityManager.NetworkCallback::class.java
 
-        XposedHelpers.findAndHookMethod(ConnectivityManager::class.java, "requestNetwork", NetworkRequest::class.java, ConnectivityManager.NetworkCallback::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "ConnectivityManager.requestNetwork (${param.args[0]}, ${param.args[1]})")
+        hookSafe(module, "ConnectivityManager.requestNetwork(NetworkRequest, NetworkCallback)") {
+            val method = cm.getMethod("requestNetwork", request, callback)
+            module.hook(method).intercept { chain ->
+                module.log(Log.INFO, TAG, "ConnectivityManager.requestNetwork (${chain.getArg(0)}, ${chain.getArg(1)})")
+                chain.proceed()
             }
-        })
+        }
 
-        XposedHelpers.findAndHookMethod(ConnectivityManager::class.java, "requestNetwork", NetworkRequest::class.java, ConnectivityManager.NetworkCallback::class.java, Int::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "ConnectivityManager.requestNetwork (${param.args[0]}, ${param.args[1]}, ${param.args[2]})")
+        hookSafe(module, "ConnectivityManager.requestNetwork(NetworkRequest, NetworkCallback, int)") {
+            val method = cm.getMethod("requestNetwork", request, callback, java.lang.Integer.TYPE)
+            module.hook(method).intercept { chain ->
+                module.log(Log.INFO, TAG, "ConnectivityManager.requestNetwork (${chain.getArg(0)}, ${chain.getArg(1)}, ${chain.getArg(2)})")
+                chain.proceed()
             }
-        })
+        }
 
-        XposedHelpers.findAndHookMethod(ConnectivityManager::class.java, "requestNetwork", NetworkRequest::class.java, ConnectivityManager.NetworkCallback::class.java, Handler::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "ConnectivityManager.requestNetwork (${param.args[0]}, ${param.args[1]}, ${param.args[2]})")
+        hookSafe(module, "ConnectivityManager.requestNetwork(NetworkRequest, NetworkCallback, Handler)") {
+            val method = cm.getMethod("requestNetwork", request, callback, Handler::class.java)
+            module.hook(method).intercept { chain ->
+                module.log(Log.INFO, TAG, "ConnectivityManager.requestNetwork (${chain.getArg(0)}, ${chain.getArg(1)}, ${chain.getArg(2)})")
+                chain.proceed()
             }
-        })
+        }
 
-        XposedHelpers.findAndHookMethod(ConnectivityManager::class.java, "requestNetwork", NetworkRequest::class.java, PendingIntent::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "ConnectivityManager.requestNetwork (${param.args[0]}, ${param.args[1]})")
+        hookSafe(module, "ConnectivityManager.requestNetwork(NetworkRequest, PendingIntent)") {
+            val method = cm.getMethod("requestNetwork", request, PendingIntent::class.java)
+            module.hook(method).intercept { chain ->
+                module.log(Log.INFO, TAG, "ConnectivityManager.requestNetwork (${chain.getArg(0)}, ${chain.getArg(1)})")
+                chain.proceed()
             }
-        })
+        }
 
-        XposedHelpers.findAndHookMethod(ConnectivityManager::class.java, "requestNetwork", NetworkRequest::class.java, ConnectivityManager.NetworkCallback::class.java, Handler::class.java, Int::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "ConnectivityManager.requestNetwork (${param.args[0]}, ${param.args[1]}, ${param.args[2]}, ${param.args[3]})")
+        hookSafe(module, "ConnectivityManager.requestNetwork(NetworkRequest, NetworkCallback, Handler, int)") {
+            val method = cm.getMethod("requestNetwork", request, callback, Handler::class.java, java.lang.Integer.TYPE)
+            module.hook(method).intercept { chain ->
+                module.log(Log.INFO, TAG, "ConnectivityManager.requestNetwork (${chain.getArg(0)}, ${chain.getArg(1)}, ${chain.getArg(2)}, ${chain.getArg(3)})")
+                chain.proceed()
             }
-        })
+        }
     }
 }

@@ -2,31 +2,34 @@ package me.hoshino.novpndetect.hooks
 
 import android.net.NetworkCapabilities
 import android.util.Log
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedHelpers
+import io.github.libxposed.api.XposedModule
+import java.net.NetworkInterface
+import kotlin.collections.iterator
 import me.hoshino.novpndetect.TAG
 import me.hoshino.novpndetect.XHook
-import java.net.NetworkInterface
+import me.hoshino.novpndetect.hookSafe
 
 class HookNetworkCapabilities : XHook {
 
     override val targetKlass: String
         get() = "android.os.NetworkCapabilities"
 
-    override fun injectHook() {
-        hookHasTransport()
-        hookGetCapabilities()
-        hookHasCapability()
+    override fun injectHook(module: XposedModule) {
+        hookHasTransport(module)
+        hookGetCapabilities(module)
+        hookHasCapability(module)
     }
 
-    private fun hookHasTransport() {
-        XposedHelpers.findAndHookMethod(NetworkCapabilities::class.java, "hasTransport", Int::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkCapabilities.hasTransport(${param.args[0]})")
+    private fun hookHasTransport(module: XposedModule) {
+        hookSafe(module, "NetworkCapabilities.hasTransport") {
+            val method = NetworkCapabilities::class.java.getMethod("hasTransport", java.lang.Integer.TYPE)
+            module.hook(method).intercept { chain ->
+                val transport = chain.getArg(0)
+                module.log(Log.INFO, TAG, "NetworkCapabilities.hasTransport($transport)")
 
                 var probablyTransport = NetworkCapabilities.TRANSPORT_WIFI
                 val interfaces = NetworkInterface.getNetworkInterfaces()
-                if(interfaces != null) {
+                if (interfaces != null) {
                     for (iface in interfaces) {
                         if (!iface.isUp || iface.isLoopback)
                             continue
@@ -44,51 +47,54 @@ class HookNetworkCapabilities : XHook {
                     }
                 }
 
-                if (param.args[0] == NetworkCapabilities.TRANSPORT_VPN)
-                    param.result = false
-                else if(param.args[0] == probablyTransport)
-                    param.result = true
+                val forced: Boolean? =
+                    when {
+                        transport == NetworkCapabilities.TRANSPORT_VPN -> false
+                        transport == probablyTransport -> true
+                        else -> null
+                    }
+                val result = forced ?: chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkCapabilities.hasTransport($transport) -> $result")
+                result
             }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkCapabilities.hasTransport(${param.args[0]}) -> ${param.result}")
-            }
-        })
+        }
     }
 
-    private fun hookGetCapabilities() {
-        XposedHelpers.findAndHookMethod(NetworkCapabilities::class.java, "getCapabilities", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkCapabilities.getCapabilities() -> ${param.result}")
-                param.result ?: return
-                val result = param.result as IntArray
-                if (!result.contains(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+    private fun hookGetCapabilities(module: XposedModule) {
+        hookSafe(module, "NetworkCapabilities.getCapabilities") {
+            val method = NetworkCapabilities::class.java.getMethod("getCapabilities")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkCapabilities.getCapabilities() -> $result")
+                if (result !is IntArray || result.contains(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)) {
+                    result
+                } else {
                     val newResult = IntArray(result.size + 1)
-                    result.forEachIndexed { index, i ->
-                        newResult[index] = i
-                    }
+                    result.forEachIndexed { index, i -> newResult[index] = i }
                     newResult[newResult.size - 1] = NetworkCapabilities.NET_CAPABILITY_NOT_VPN
-                    param.result = newResult
+                    newResult
                 }
             }
-        })
+        }
     }
 
-    private fun hookHasCapability() {
-        XposedHelpers.findAndHookMethod(NetworkCapabilities::class.java, "hasCapability", Int::class.java, object : XC_MethodHook() {
-            override fun beforeHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkCapabilities.hasCapability(${param.args[0]})")
-                if (param.args[0] == NetworkCapabilities.NET_CAPABILITY_NOT_VPN)
-                    param.result = true
-                else if(param.args[0] == NetworkCapabilities.NET_CAPABILITY_INTERNET)
-                    param.result = true
-                else if(param.args[0] == NetworkCapabilities.NET_CAPABILITY_VALIDATED)
-                    param.result = true
+    private fun hookHasCapability(module: XposedModule) {
+        hookSafe(module, "NetworkCapabilities.hasCapability") {
+            val method = NetworkCapabilities::class.java.getMethod("hasCapability", java.lang.Integer.TYPE)
+            module.hook(method).intercept { chain ->
+                val capability = chain.getArg(0)
+                module.log(Log.INFO, TAG, "NetworkCapabilities.hasCapability($capability)")
+                val forced: Boolean? =
+                    when {
+                        capability == NetworkCapabilities.NET_CAPABILITY_NOT_VPN -> true
+                        capability == NetworkCapabilities.NET_CAPABILITY_INTERNET -> true
+                        capability == NetworkCapabilities.NET_CAPABILITY_VALIDATED -> true
+                        else -> null
+                    }
+                val result = forced ?: chain.proceed()
+                module.log(Log.INFO, TAG, "NetworkCapabilities.hasCapability($capability) -> $result")
+                result
             }
-
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "NetworkCapabilities.hasCapability(${param.args[0]}) -> ${param.result}")
-            }
-        })
+        }
     }
 }

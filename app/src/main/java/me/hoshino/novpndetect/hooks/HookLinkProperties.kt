@@ -1,35 +1,33 @@
 package me.hoshino.novpndetect.hooks
 
-import android.app.PendingIntent
-import android.net.ConnectivityManager
 import android.net.LinkProperties
-import android.net.NetworkCapabilities
-import android.net.NetworkRequest
-import android.os.Handler
 import android.util.Log
-import de.robv.android.xposed.XC_MethodHook
-import de.robv.android.xposed.XposedHelpers
-import me.hoshino.novpndetect.TAG
-import me.hoshino.novpndetect.XHook
+import io.github.libxposed.api.XposedModule
 import java.net.NetworkInterface
 import kotlin.collections.iterator
+import me.hoshino.novpndetect.TAG
+import me.hoshino.novpndetect.XHook
+import me.hoshino.novpndetect.hookSafe
 
 class HookLinkProperties : XHook {
 
     override val targetKlass: String
         get() = "android.net.LinkProperties"
 
-    override fun injectHook() {
-        hookGetInterfaceName()
+    override fun injectHook(module: XposedModule) {
+        hookGetInterfaceName(module)
     }
 
-    private fun hookGetInterfaceName() {
-        XposedHelpers.findAndHookMethod(LinkProperties::class.java, "getInterfaceName", object : XC_MethodHook() {
-            override fun afterHookedMethod(param: MethodHookParam) {
-                Log.i(TAG, "$targetKlass.getInterfaceName () -> ${param.result}")
-                if (param.result != null && param.result is String && (param.result as String).startsWith("tun")) {
+    private fun hookGetInterfaceName(module: XposedModule) {
+        hookSafe(module, "LinkProperties.getInterfaceName") {
+            val method = LinkProperties::class.java.getMethod("getInterfaceName")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                module.log(Log.INFO, TAG, "$targetKlass.getInterfaceName () -> $result")
+                if (result is String && result.startsWith("tun")) {
+                    var replacement: String? = null
                     val interfaces = NetworkInterface.getNetworkInterfaces()
-                    if(interfaces != null) {
+                    if (interfaces != null) {
                         for (iface in interfaces) {
                             if (!iface.isUp || iface.isLoopback)
                                 continue
@@ -39,15 +37,16 @@ class HookLinkProperties : XHook {
                                 || iface.name.contains("rmnet_data")
                                 || iface.name.contains("eth")
                             ) {
-                                param.result = iface.name
-                                return
+                                replacement = iface.name
+                                break
                             }
                         }
                     }
-
-                    param.result = "wlan0"
+                    replacement ?: "wlan0"
+                } else {
+                    result
                 }
             }
-        })
+        }
     }
 }
