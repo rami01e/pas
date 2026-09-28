@@ -58,16 +58,26 @@ static struct ifaddrs* DeepCopyNode(const struct ifaddrs* s) {
     return n;
 }
 
-// Frees a chain the same way bionic's freeifaddrs does (name, addr, netmask,
-// broadaddr/dstaddr union, node). Used for our deep copies AND for original
-// chains returned by the real getifaddrs - no symbol lookup required.
-static void FreeChain(struct ifaddrs* head) {
+// Frees OUR deep copies: they allocate name/addr/netmask/broadaddr/node
+// separately (field-wise).
+static void FreeOwnChain(struct ifaddrs* head) {
     while (head) {
         struct ifaddrs* next = head->ifa_next;
         free(head->ifa_name);
         free(head->ifa_addr);
         free(head->ifa_netmask);
         free(head->ifa_broadaddr);  // union: same slot as ifa_dstaddr
+        free(head);
+        head = next;
+    }
+}
+
+// Frees a chain returned by the real bionic getifaddrs: bionic stores each
+// interface in ONE allocation (the public pointers point into its hidden
+// tail), so only the node itself may be freed. Mirrors bionic freeifaddrs.
+static void FreeBionicChain(struct ifaddrs* head) {
+    while (head) {
+        struct ifaddrs* next = head->ifa_next;
         free(head);
         head = next;
     }
@@ -101,7 +111,7 @@ int HideGetIfaddrs(struct ifaddrs** out) {
         *tail = n;
         tail = &n->ifa_next;
     }
-    FreeChain(list);
+    FreeBionicChain(list);
     RegisterCopy(head);
     if (out) *out = head;
     return 0;
@@ -110,7 +120,7 @@ int HideGetIfaddrs(struct ifaddrs** out) {
 void HideFreeIfaddrs(struct ifaddrs* p) {
     BYTEHOOK_STACK_SCOPE();
     if (p && UnregisterCopy(p)) {
-        FreeChain(p);
+        FreeOwnChain(p);
         return;
     }
     BYTEHOOK_CALL_PREV(HideFreeIfaddrs, p);
@@ -120,10 +130,21 @@ void HideFreeIfaddrs(struct ifaddrs* p) {
 // if_nameindex / if_freenameindex
 // ---------------------------------------------------------------------------
 
-// Frees an if_nameindex array the same way bionic's if_freenameindex does.
-static void FreeNameIndex(struct if_nameindex* arr) {
+// Frees an if_nameindex array the way bionic's if_freenameindex does for
+// arrays produced by the real if_nameindex(): the names are separate
+// allocations, the array itself was allocated with new[].
+static void FreeBionicNameIndex(struct if_nameindex* arr) {
     if (!arr) return;
-    for (struct if_nameindex* it = arr; it->if_name != nullptr; ++it) {
+    for (struct if_nameindex* it = arr; it->if_index != 0 || it->if_name != nullptr; ++it) {
+        free(it->if_name);
+    }
+    delete[] arr;
+}
+
+// Frees OUR copy: the array is calloc'd, names are strdup'd by us.
+static void FreeOwnNameIndex(struct if_nameindex* arr) {
+    if (!arr) return;
+    for (struct if_nameindex* it = arr; it->if_index != 0 || it->if_name != nullptr; ++it) {
         free(it->if_name);
     }
     free(arr);
@@ -154,14 +175,14 @@ struct if_nameindex* HideIfNameIndex() {
         kept++;
     }
     RegisterCopy(copy);
-    FreeNameIndex(arr);
+    FreeBionicNameIndex(arr);
     return copy;
 }
 
 void HideIfFreeNameIndex(struct if_nameindex* arr) {
     BYTEHOOK_STACK_SCOPE();
     if (arr && UnregisterCopy(arr)) {
-        FreeNameIndex(arr);
+        FreeOwnNameIndex(arr);
         return;
     }
     BYTEHOOK_CALL_PREV(HideIfFreeNameIndex, arr);
