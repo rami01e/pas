@@ -93,7 +93,7 @@ class MainActivity : Activity() {
             id = android.view.View.generateViewId()
             text = "arm64-v8a"
         }
-        abiGroup = RadioGroup().apply {
+        abiGroup = RadioGroup(this).apply {
             orientation = RadioGroup.HORIZONTAL
             addView(abiX86)
             addView(abiArm64)
