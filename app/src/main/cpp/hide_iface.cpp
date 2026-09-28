@@ -124,7 +124,7 @@ void HideFreeIfaddrs(struct ifaddrs* p) {
 // if_nameindex / if_freenameindex
 // ---------------------------------------------------------------------------
 
-static void (*RealIfFreeNameIndexFn)(struct if_nameindex*) {
+static void (*RealIfFreeNameIndexFn())(struct if_nameindex*) {
     static void (*fn)(struct if_nameindex*) = nullptr;
     if (!fn) fn = (void (*)(struct if_nameindex*))RealSym("if_freenameindex");
     return fn;
