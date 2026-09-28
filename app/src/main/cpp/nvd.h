@@ -48,5 +48,8 @@ void InstallIfaceHooks();
 void InstallFsHooks();
 void InstallNetHooks();
 void InstallNetlinkHooks();
+void InstallIoctlHooks();
+void InstallPropSpoofHooks();
+void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64);
 
 }  // namespace nvd

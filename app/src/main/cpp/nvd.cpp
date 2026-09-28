@@ -289,6 +289,8 @@ static void* InitWorker(void* arg) {
     Log("native: stage4 fs hooks");
     InstallNetHooks();
     InstallNetlinkHooks();
+    InstallIoctlHooks();
+    InstallPropSpoofHooks();
     Log("native: all hooks installed");
     return nullptr;
 }

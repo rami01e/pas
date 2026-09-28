@@ -37,6 +37,7 @@ class XposedInit : XposedModule() {
         log(Log.INFO, TAG, "[NVD] onPackageReady: ${param.packageName} - installing hooks")
 
         loadNativeLibrary()
+        runCatching { com.kimera.novpndetect.spoof.SpoofCore.init(this) }
 
         val hooks =
             arrayOf(

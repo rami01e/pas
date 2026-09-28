@@ -81,6 +81,64 @@ static WatchedFile ResolveWatchedFile(const char* path) {
     return WatchedFile::None;
 }
 
+// ---------------------------------------------------------------------------
+// Special files: a tiny allow/deny layer used together with the content
+// filters. /proc/net/fib_trie is denied with ENOENT (the checker's own code
+// treats that as "not available on this kernel"); /sys/fs/selinux/enforce is
+// served as "1\n" so the process sees an enforcing kernel.
+// ---------------------------------------------------------------------------
+
+enum class SpecialAction { None, NotFound, EnforceOne };
+
+static SpecialAction ResolveSpecial(const char* path) {
+    if (!path) return SpecialAction::None;
+    if (strcmp(path, "/proc/net/fib_trie") == 0 ||
+        strcmp(path, "/proc/self/net/fib_trie") == 0) {
+        return SpecialAction::NotFound;
+    }
+    if (strcmp(path, "/sys/fs/selinux/enforce") == 0) {
+        return SpecialAction::EnforceOne;
+    }
+    return SpecialAction::None;
+}
+
+static int CreateMemfdWith(const char* data, size_t len, int flags) {
+#ifdef SYS_memfd_create
+    int mfd = (int)syscall(SYS_memfd_create, "nvd-special",
+                           (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0);
+#else
+    int mfd = -1;
+#endif
+    if (mfd < 0) return -1;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = syscall(SYS_write, mfd, data + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            syscall(SYS_close, mfd);
+            return -1;
+        }
+        off += (size_t)w;
+    }
+    syscall(SYS_lseek, mfd, 0, SEEK_SET);
+    return mfd;
+}
+
+// Returns true when the call was fully handled by the special layer.
+// On NotFound: errno=ENOENT, *fdOut=-1. On EnforceOne: *fdOut is a memfd or -1.
+static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
+    SpecialAction sp = ResolveSpecial(path);
+    if (sp == SpecialAction::None) return false;
+    if ((flags & O_ACCMODE) != O_RDONLY) return false;
+    if (sp == SpecialAction::NotFound) {
+        errno = ENOENT;
+        *fdOut = -1;
+        return true;
+    }
+    *fdOut = CreateMemfdWith("1\n", 2, flags);
+    return true;
+}
+
 static bool ReadWholeFile(const char* path, std::string* out) {
 #ifdef SYS_openat
     int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
@@ -250,6 +308,10 @@ int HideOpen(const char* path, int flags, ...) {
         errno = ENOENT;
         return -1;
     }
+    {
+        int sfd = -2;
+        if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+    }
     int mfd = CreateFilteredFd(path, flags);
     if (mfd >= 0) return mfd;
     return BYTEHOOK_CALL_PREV(HideOpen, path, flags, mode);
@@ -272,6 +334,10 @@ int HideOpen64(const char* path, int flags, ...) {
         errno = ENOENT;
         return -1;
     }
+    {
+        int sfd = -2;
+        if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+    }
     int mfd = CreateFilteredFd(path, flags);
     if (mfd >= 0) return mfd;
     return BYTEHOOK_CALL_PREV(HideOpen64, path, flags, mode);
@@ -282,6 +348,10 @@ int HideOpen2(const char* path, int flags) {
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return -1;
+    }
+    {
+        int sfd = -2;
+        if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
     }
     int mfd = CreateFilteredFd(path, flags);
     if (mfd >= 0) return mfd;
@@ -305,6 +375,10 @@ int HideOpenAt(int dirfd, const char* path, int flags, ...) {
         if (IsHiddenPath(path)) {
             errno = ENOENT;
             return -1;
+        }
+        {
+            int sfd = -2;
+            if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
         }
         int mfd = CreateFilteredFd(path, flags);
         if (mfd >= 0) return mfd;
@@ -330,6 +404,10 @@ int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
             errno = ENOENT;
             return -1;
         }
+        {
+            int sfd = -2;
+            if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+        }
         int mfd = CreateFilteredFd(path, flags);
         if (mfd >= 0) return mfd;
     }
@@ -342,6 +420,10 @@ int HideOpenAt2(int dirfd, const char* path, int flags) {
         if (IsHiddenPath(path)) {
             errno = ENOENT;
             return -1;
+        }
+        {
+            int sfd = -2;
+            if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
         }
         int mfd = CreateFilteredFd(path, flags);
         if (mfd >= 0) return mfd;
@@ -356,6 +438,15 @@ FILE* HideFopen(const char* path, const char* mode) {
         return nullptr;
     }
     if (mode && mode[0] == 'r' && strchr(mode, '+') == nullptr) {
+        {
+            int sfd = -2;
+            if (HandleSpecialOpen(path, O_RDONLY, &sfd)) {
+                if (sfd < 0) return nullptr;
+                FILE* f = fdopen(sfd, "r");
+                if (f) return f;
+                syscall(SYS_close, sfd);
+            }
+        }
         int mfd = CreateFilteredFd(path, O_RDONLY);
         if (mfd >= 0) {
             FILE* f = fdopen(mfd, "r");
@@ -373,6 +464,15 @@ FILE* HideFopen64(const char* path, const char* mode) {
         return nullptr;
     }
     if (mode && mode[0] == 'r' && strchr(mode, '+') == nullptr) {
+        {
+            int sfd = -2;
+            if (HandleSpecialOpen(path, O_RDONLY, &sfd)) {
+                if (sfd < 0) return nullptr;
+                FILE* f = fdopen(sfd, "r");
+                if (f) return f;
+                syscall(SYS_close, sfd);
+            }
+        }
         int mfd = CreateFilteredFd(path, O_RDONLY);
         if (mfd >= 0) {
             FILE* f = fdopen(mfd, "r");
