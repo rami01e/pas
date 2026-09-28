@@ -1,12 +1,12 @@
-package me.hoshino.novpndetect.hooks
+package com.kimera.novpndetect.hooks
 
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.util.Log
 import io.github.libxposed.api.XposedModule
-import me.hoshino.novpndetect.TAG
-import me.hoshino.novpndetect.XHook
-import me.hoshino.novpndetect.hookSafe
+import com.kimera.novpndetect.TAG
+import com.kimera.novpndetect.XHook
+import com.kimera.novpndetect.hookSafe
 
 class HookNetworkRequestBuilder : XHook {
 

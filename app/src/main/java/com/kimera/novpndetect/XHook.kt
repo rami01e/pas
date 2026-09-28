@@ -1,4 +1,4 @@
-package me.hoshino.novpndetect
+package com.kimera.novpndetect
 
 import android.util.Log
 import io.github.libxposed.api.XposedModule

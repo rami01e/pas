@@ -1,13 +1,13 @@
-package me.hoshino.novpndetect.hooks
+package com.kimera.novpndetect.hooks
 
 import android.net.LinkProperties
 import android.util.Log
 import io.github.libxposed.api.XposedModule
 import java.net.NetworkInterface
 import kotlin.collections.iterator
-import me.hoshino.novpndetect.TAG
-import me.hoshino.novpndetect.XHook
-import me.hoshino.novpndetect.hookSafe
+import com.kimera.novpndetect.TAG
+import com.kimera.novpndetect.XHook
+import com.kimera.novpndetect.hookSafe
 
 class HookLinkProperties : XHook {
 

@@ -1,4 +1,4 @@
-package me.hoshino.novpndetect.hooks
+package com.kimera.novpndetect.hooks
 
 import android.app.PendingIntent
 import android.net.ConnectivityManager
@@ -6,9 +6,9 @@ import android.net.NetworkRequest
 import android.os.Handler
 import android.util.Log
 import io.github.libxposed.api.XposedModule
-import me.hoshino.novpndetect.TAG
-import me.hoshino.novpndetect.XHook
-import me.hoshino.novpndetect.hookSafe
+import com.kimera.novpndetect.TAG
+import com.kimera.novpndetect.XHook
+import com.kimera.novpndetect.hookSafe
 
 class HookConnectivityManager : XHook {
 

@@ -1,4 +1,4 @@
-package me.hoshino.novpndetect.util
+package com.kimera.novpndetect.util
 
 fun getRandomString(length: Int) : String {
     val allowedChars = ('a'..'z') + ('0'..'9')

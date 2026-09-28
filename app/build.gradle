@@ -8,7 +8,7 @@ android {
     buildToolsVersion = "34.0.0"
 
     defaultConfig {
-        applicationId "me.hoshino.novpndetect"
+        applicationId "com.kimera.novpndetect"
         minSdkVersion 25
         targetSdkVersion 34
         versionCode 3
@@ -55,7 +55,7 @@ android {
         jvmTarget = '1.8'
     }
 
-    namespace "me.hoshino.novpndetect"
+    namespace "com.kimera.novpndetect"
 }
 
 dependencies {

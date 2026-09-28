@@ -1,16 +1,16 @@
-package me.hoshino.novpndetect
+package com.kimera.novpndetect
 
 import android.util.Log
 import io.github.libxposed.api.XposedModule
 import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.util.concurrent.atomic.AtomicBoolean
-import me.hoshino.novpndetect.hooks.HookConnectivityManager
-import me.hoshino.novpndetect.hooks.HookLinkProperties
-import me.hoshino.novpndetect.hooks.HookNetworkCapabilities
-import me.hoshino.novpndetect.hooks.HookNetworkInfo
-import me.hoshino.novpndetect.hooks.HookNetworkInterface
-import me.hoshino.novpndetect.hooks.HookNetworkRequestBuilder
+import com.kimera.novpndetect.hooks.HookConnectivityManager
+import com.kimera.novpndetect.hooks.HookLinkProperties
+import com.kimera.novpndetect.hooks.HookNetworkCapabilities
+import com.kimera.novpndetect.hooks.HookNetworkInfo
+import com.kimera.novpndetect.hooks.HookNetworkInterface
+import com.kimera.novpndetect.hooks.HookNetworkRequestBuilder
 
 const val TAG = "NoVPNDetect"
 

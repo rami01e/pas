@@ -20,5 +20,5 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
--keep class me.hoshino.novpndetect.**
--keepclassmembers class me.hoshino.novpndetect.**
+-keep class com.kimera.novpndetect.**
+-keepclassmembers class com.kimera.novpndetect.**
