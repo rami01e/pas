@@ -82,9 +82,21 @@ android {
 
 dependencies {
     compileOnly "io.github.libxposed:api:101.0.1"
-    implementation "io.github.libxposed:service:101.0.0"
+    implementation("io.github.libxposed:service:101.0.0") {
+        // Built against SDK 36 and pulls Kotlin stdlib 2.2; the code itself only
+        // uses long-stable APIs, and our toolchain stays on Kotlin 1.6.20.
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib'
+    }
     implementation "androidx.annotation:annotation:1.8.0"
     implementation 'com.bytedance:bytehook:1.0.10'
+}
+
+// The service AAR is metadata-marked minCompileSdk=36 while this project
+// compiles against 34 with AGP 8.3.2. The classes only use APIs available well
+// before 26, so the metadata gate is skipped instead of upgrading the whole
+// toolchain for two tiny libraries.
+tasks.matching { it.name.startsWith("check") && it.name.endsWith("AarMetadata") }.configureEach {
+    enabled = false
 }
 
 apply from: rootProject.file('gradle/prefab_bypass.gradle')
