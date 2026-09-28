@@ -6,13 +6,24 @@ plugins {
 android {
     compileSdk 34
     buildToolsVersion = "34.0.0"
+    ndkVersion "27.0.12077973"
 
     defaultConfig {
         applicationId "com.kimera.novpndetect"
         minSdkVersion 25
         targetSdkVersion 34
-        versionCode 4
-        versionName "1.2.1"
+        versionCode 5
+        versionName "1.2.2"
+
+        ndk {
+            abiFilters 'x86_64', 'x86', 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
     }
 
     signingConfigs {
@@ -55,9 +66,23 @@ android {
         jvmTarget = '1.8'
     }
 
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
     namespace "com.kimera.novpndetect"
 }
 
 dependencies {
     compileOnly "io.github.libxposed:api:101.0.1"
+    implementation 'com.bytedance:bytehook:1.1.2'
 }
+
+apply from: rootProject.file('gradle/prefab_bypass.gradle')

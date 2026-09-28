@@ -36,6 +36,8 @@ class XposedInit : XposedModule() {
         }
         log(Log.INFO, TAG, "[NVD] onPackageReady: ${param.packageName} - installing hooks")
 
+        loadNativeLibrary()
+
         val hooks =
             arrayOf(
                 HookConnectivityManager(),
@@ -48,6 +50,15 @@ class XposedInit : XposedModule() {
 
         hooks.forEach {
             it.injectHook(this)
+        }
+    }
+
+    private fun loadNativeLibrary() {
+        try {
+            System.loadLibrary("nvd")
+            log(Log.INFO, TAG, "[NVD] native library loaded")
+        } catch (t: Throwable) {
+            log(Log.INFO, TAG, "[NVD] native library not loaded: $t")
         }
     }
 }

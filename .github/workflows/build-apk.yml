@@ -26,6 +26,8 @@ jobs:
       - name: Make Gradle executable
         run: chmod +x ./gradlew
 
+      - name: Set up NDK and CMake
+        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null 2>&1 || true
       - name: Use github keystore for release
         run: |
           echo 'RELEASE_STORE_FILE=github.keystore' >> gradle.properties
