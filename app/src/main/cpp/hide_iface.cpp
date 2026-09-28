@@ -58,6 +58,9 @@ static struct ifaddrs* DeepCopyNode(const struct ifaddrs* s) {
     return n;
 }
 
+// Frees a chain the same way bionic's freeifaddrs does (name, addr, netmask,
+// broadaddr/dstaddr union, node). Used for our deep copies AND for original
+// chains returned by the real getifaddrs - no symbol lookup required.
 static void FreeChain(struct ifaddrs* head) {
     while (head) {
         struct ifaddrs* next = head->ifa_next;
@@ -98,7 +101,7 @@ int HideGetIfaddrs(struct ifaddrs** out) {
         *tail = n;
         tail = &n->ifa_next;
     }
-    if (g_real_freeifaddrs) g_real_freeifaddrs(list);
+    FreeChain(list);
     RegisterCopy(head);
     if (out) *out = head;
     return 0;
@@ -116,6 +119,15 @@ void HideFreeIfaddrs(struct ifaddrs* p) {
 // ---------------------------------------------------------------------------
 // if_nameindex / if_freenameindex
 // ---------------------------------------------------------------------------
+
+// Frees an if_nameindex array the same way bionic's if_freenameindex does.
+static void FreeNameIndex(struct if_nameindex* arr) {
+    if (!arr) return;
+    for (struct if_nameindex* it = arr; it->if_name != nullptr; ++it) {
+        free(it->if_name);
+    }
+    free(arr);
+}
 
 struct if_nameindex* HideIfNameIndex() {
     BYTEHOOK_STACK_SCOPE();
@@ -142,17 +154,14 @@ struct if_nameindex* HideIfNameIndex() {
         kept++;
     }
     RegisterCopy(copy);
-    if (g_real_if_freenameindex) g_real_if_freenameindex(arr);
+    FreeNameIndex(arr);
     return copy;
 }
 
 void HideIfFreeNameIndex(struct if_nameindex* arr) {
     BYTEHOOK_STACK_SCOPE();
     if (arr && UnregisterCopy(arr)) {
-        for (size_t i = 0; arr[i].if_index != 0 || arr[i].if_name != nullptr; i++) {
-            free(arr[i].if_name);
-        }
-        free(arr);
+        FreeNameIndex(arr);
         return;
     }
     BYTEHOOK_CALL_PREV(HideIfFreeNameIndex, arr);
