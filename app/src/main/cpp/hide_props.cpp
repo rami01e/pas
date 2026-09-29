@@ -83,10 +83,20 @@ static bool IsSpoofTarget(const char* name) {
         "ro.build.version.sdk",
         "ro.build.version.release",
         "ro.build.version.release_or_codename",
+        "ro.system.build.version.sdk",
+        "ro.system.build.version.release",
+        "ro.vendor.build.version.sdk",
+        "ro.vendor.build.version.release",
+        "ro.product.build.version.sdk",
+        "ro.product.build.version.release",
     };
     static const char* const kAbi[] = {
-        "ro.product.cpu.abi",      "ro.product.cpu.abi2", "ro.product.cpu.abilist",
-        "ro.product.cpu.abilist64", "ro.product.cpu.abilist32", "ro.product.cpu.arch",
+        "ro.product.cpu.abi",           "ro.product.cpu.abi2",
+        "ro.product.cpu.abilist",       "ro.product.cpu.abilist64",
+        "ro.product.cpu.abilist32",     "ro.product.cpu.arch",
+        "ro.product.system.cpu.abi",    "ro.product.vendor.cpu.abi",
+        "ro.product.odm.cpu.abi",       "ro.product.system.cpu.abilist",
+        "ro.product.system.cpu.abilist64", "ro.product.system.cpu.abilist32",
     };
     if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0]))) return true;
     if (g_abi_on && NameIn(name, kAbi, sizeof(kAbi) / sizeof(kAbi[0]))) return true;
@@ -99,6 +109,21 @@ static bool SetStr(char* out, size_t cap, size_t* outLen, const char* v) {
     memcpy(out, v, n + 1);
     *outLen = n;
     return true;
+}
+
+bool SpoofActive() {
+    return g_sdk_on || g_abi_on;
+}
+
+static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_t cap,
+                            size_t* outLen);
+
+// Rewrites one "key=value" property pair for build.prop-style files. Returns
+// true with outVal filled when the key must present the spoofed value.
+bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, size_t cap) {
+    if (!key || !outVal || (!g_sdk_on && !g_abi_on)) return false;
+    size_t rl = 0;
+    return BuildSpoofValue(key, origVal ? origVal : "", outVal, cap, &rl);
 }
 
 // Returns true when the value was replaced (out/outLen filled).

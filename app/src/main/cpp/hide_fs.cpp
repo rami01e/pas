@@ -124,11 +124,81 @@ static int CreateMemfdWith(const char* data, size_t len, int flags) {
     return mfd;
 }
 
+// Raw build.prop-style files that integrity checkers read directly. When the
+// SDK/ABI spoof is active these are served with the spoof keys rewritten, so
+// the file view matches the hooked properties.
+static bool IsPropsFile(const char* path) {
+    if (!path) return false;
+    static const char* const kProps[] = {
+        "/system/build.prop",
+        "/vendor/build.prop",
+        "/odm/etc/build.prop",
+        "/product/build.prop",
+        "/system_ext/build.prop",
+        "/system/etc/prop.default",
+    };
+    for (const char* k : kProps) {
+        if (strcmp(path, k) == 0) return true;
+    }
+    return false;
+}
+
+static void RewritePropsContent(const std::string& raw, std::string* out) {
+    size_t i = 0;
+    while (i < raw.size()) {
+        size_t j = raw.find('\n', i);
+        j = (j == std::string::npos) ? raw.size() : j + 1;
+        std::string line(raw, i, j - i);
+        const char* c = line.c_str();
+        const char* p = c;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '#' && *p != '\0' && *p != '\r' && *p != '\n') {
+            const char* eq = strchr(p, '=');
+            if (eq != nullptr && eq > p) {
+                char key[128];
+                size_t kl = (size_t)(eq - p);
+                if (kl < sizeof(key)) {
+                    memcpy(key, p, kl);
+                    key[kl] = '\0';
+                    // trim trailing spaces on key
+                    while (kl > 0 && (key[kl - 1] == ' ' || key[kl - 1] == '\t')) key[--kl] = '\0';
+                    char repl[128];
+                    if (SpoofRewritePropsLine(key, eq + 1, repl, sizeof(repl))) {
+                        out->append(key);
+                        out->append('=');
+                        out->append(repl);
+                        out->append('\n');
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+        }
+        out->append(line);
+        i = j;
+    }
+}
+
 // Returns true when the call was fully handled by the special layer.
 // On NotFound: errno=ENOENT, *fdOut=-1. On EnforceOne: *fdOut is a memfd or -1.
 static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
     SpecialAction sp = ResolveSpecial(path);
-    if (sp == SpecialAction::None) return false;
+    if (sp == SpecialAction::None) {
+        // build.prop-style files: served with the spoof keys rewritten so that
+        // anything reading the raw prop files sees the same values as the
+        // hooked properties (integrity checkers cross-check these).
+        if (SpoofActive() && IsPropsFile(path) && (flags & O_ACCMODE) == O_RDONLY) {
+            std::string raw;
+            if (!ReadWholeFile(path, &raw)) return false;  // real error wins
+            std::string out;
+            RewritePropsContent(raw, &out);
+            int mfd = CreateMemfdWith(out.data(), out.size(), flags);
+            if (mfd < 0) return false;
+            *fdOut = mfd;
+            return true;
+        }
+        return false;
+    }
     if ((flags & O_ACCMODE) != O_RDONLY) return false;
     if (sp == SpecialAction::NotFound) {
         errno = ENOENT;

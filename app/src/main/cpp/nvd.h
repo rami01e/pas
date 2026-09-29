@@ -48,11 +48,13 @@ void InstallIfaceHooks();
 void InstallFsHooks();
 void InstallNetHooks();
 void InstallNetlinkHooks();
-void InstallIoctlHooks();
-void InstallPropSpoofHooks();
+void StartInitWorker();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode,
                     bool nativeEnabled);
-void StartInitWorker();
+void InstallIoctlHooks();
+void InstallPropSpoofHooks();
+bool SpoofActive();
+bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, size_t cap);
 
 // Hook-installation gate: the worker waits briefly for the Kotlin side to
 // deliver the config so it can either skip all hook installation (native
