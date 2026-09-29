@@ -69,6 +69,16 @@ object SpoofCore {
         if (sdkVal !in 21..45) sdkVal = 0
         val useSdk = sdkOn && sdkVal != 0
 
+        // Java-only id spoofs: available regardless of the native addon.
+        SpoofState.widevineOn = prefs.getBoolean("widevine_enabled", false)
+        SpoofState.widevineId = (prefs.getString("widevine_id", "") ?: "").lowercase()
+        SpoofState.gsfOn = prefs.getBoolean("gsf_enabled", false)
+        SpoofState.gsfId = (prefs.getString("gsf_id", "") ?: "").trim()
+        Log.i(
+            TAG,
+            "[NVD] id spoof: widevine=${SpoofState.widevineOn} gsf=${SpoofState.gsfOn}"
+        )
+
         // Always deliver the config first: it releases the native hook gate
         // (native addon on/off + compatibility mode).
         runCatching {
@@ -176,6 +186,7 @@ object SpoofCore {
         21 -> "5.0"; 22 -> "5.1"; 23 -> "6.0"; 24 -> "7.0"; 25 -> "7.1"
         26 -> "8.0"; 27 -> "8.1"; 28 -> "9"; 29 -> "10"; 30 -> "11"
         31 -> "12"; 32 -> "12"; 33 -> "13"; 34 -> "14"; 35 -> "15"; 36 -> "16"
+        37 -> "17"
         else -> null
     }
 }

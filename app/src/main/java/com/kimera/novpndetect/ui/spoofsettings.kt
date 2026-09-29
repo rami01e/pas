@@ -20,7 +20,11 @@ object SpoofSettings {
     private const val LOCAL = "nvd_spoof_local"
 
     private val KEYS = arrayOf(
-        "native_enabled", "sdk_enabled", "sdk_value", "abi_enabled", "abi_value", "safe_mode"
+        "native_enabled", "safe_mode",
+        "sdk_enabled", "sdk_value",
+        "abi_enabled", "abi_value",
+        "widevine_enabled", "widevine_id",
+        "gsf_enabled", "gsf_id"
     )
 
     @Volatile
@@ -53,61 +57,37 @@ object SpoofSettings {
         ctx.getSharedPreferences(LOCAL, Context.MODE_PRIVATE)
 
     /**
-     * Saves the values locally and (when connected) to the framework.
+     * Saves the given values locally and (when connected) to the framework.
      * Returns null on full success or a user-facing message.
      */
-    fun save(
-        ctx: Context,
-        nativeOn: Boolean,
-        sdkOn: Boolean,
-        sdkVal: Int,
-        abiOn: Boolean,
-        abiValue: String,
-        safeMode: Boolean
-    ): String? {
-        load(ctx).edit()
-            .putBoolean("native_enabled", nativeOn)
-            .putBoolean("sdk_enabled", sdkOn)
-            .putInt("sdk_value", sdkVal)
-            .putBoolean("abi_enabled", abiOn)
-            .putString("abi_value", abiValue)
-            .putBoolean("safe_mode", safeMode)
-            .apply()
+    fun save(ctx: Context, values: Map<String, Any?>): String? {
+        applyTo(load(ctx).edit(), values)
 
         val svc = service
         if (svc == null) {
             // Keep trying in the background; the sync-on-bind will deliver it.
             ensureListener(ctx)
             return "Saved locally. Vector service not connected right now - " +
-                "it will sync automatically once connected. To apply immediately: " +
-                "open Vector, then reopen this app."
+                "it will sync automatically once connected."
         }
 
         return try {
-            writeRemote(svc, nativeOn, sdkOn, sdkVal, abiOn, abiValue, safeMode)
+            applyTo(svc.getRemotePreferences(GROUP).edit(), values)
             null
         } catch (t: Throwable) {
             "Framework write failed: $t"
         }
     }
 
-    private fun writeRemote(
-        svc: XposedService,
-        nativeOn: Boolean,
-        sdkOn: Boolean,
-        sdkVal: Int,
-        abiOn: Boolean,
-        abiValue: String,
-        safeMode: Boolean
-    ) {
-        svc.getRemotePreferences(GROUP).edit()
-            .putBoolean("native_enabled", nativeOn)
-            .putBoolean("sdk_enabled", sdkOn)
-            .putInt("sdk_value", sdkVal)
-            .putBoolean("abi_enabled", abiOn)
-            .putString("abi_value", abiValue)
-            .putBoolean("safe_mode", safeMode)
-            .apply()
+    private fun applyTo(editor: SharedPreferences.Editor, values: Map<String, Any?>) {
+        for ((k, v) in values) {
+            when (v) {
+                is Boolean -> editor.putBoolean(k, v)
+                is Int -> editor.putInt(k, v)
+                is String -> editor.putString(k, v)
+            }
+        }
+        editor.apply()
     }
 
     /** Push whatever the UI saved while the service was disconnected. */
@@ -115,16 +95,12 @@ object SpoofSettings {
         val ctx = appContext ?: return
         val sp = load(ctx)
         if (!sp.contains("sdk_enabled")) return
-        runCatching {
-            writeRemote(
-                svc,
-                sp.getBoolean("native_enabled", false),
-                sp.getBoolean("sdk_enabled", false),
-                sp.getInt("sdk_value", 0),
-                sp.getBoolean("abi_enabled", false),
-                sp.getString("abi_value", "x86_64") ?: "x86_64",
-                sp.getBoolean("safe_mode", true)
-            )
+        val all = sp.all
+        val map = HashMap<String, Any?>()
+        for (k in KEYS) {
+            if (all.containsKey(k)) map[k] = all[k]
         }
+        if (map.isEmpty()) return
+        runCatching { applyTo(svc.getRemotePreferences(GROUP).edit(), map) }
     }
 }

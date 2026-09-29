@@ -54,6 +54,7 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool comp
             case 34: rel = "14"; break;
             case 35: rel = "15"; break;
             case 36: rel = "16"; break;
+            case 37: rel = "17"; break;
             default: break;
         }
         if (rel) snprintf(g_sdk_release, sizeof(g_sdk_release), "%s", rel);

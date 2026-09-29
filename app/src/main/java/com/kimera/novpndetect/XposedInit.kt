@@ -6,7 +6,9 @@ import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.util.concurrent.atomic.AtomicBoolean
 import com.kimera.novpndetect.hooks.HookConnectivityManager
+import com.kimera.novpndetect.hooks.HookGsfId
 import com.kimera.novpndetect.hooks.HookLinkProperties
+import com.kimera.novpndetect.hooks.HookMediaDrm
 import com.kimera.novpndetect.hooks.HookNetworkCapabilities
 import com.kimera.novpndetect.hooks.HookNetworkInfo
 import com.kimera.novpndetect.hooks.HookNetworkInterface
@@ -46,6 +48,8 @@ class XposedInit : XposedModule() {
                 HookNetworkInfo(),
                 HookNetworkRequestBuilder(),
                 HookLinkProperties(),
+                HookMediaDrm(),
+                HookGsfId(),
             )
 
         hooks.forEach {
@@ -54,10 +58,9 @@ class XposedInit : XposedModule() {
     }
 
     /**
-     * The native addon is loaded lazily and only when the user enabled it:
-     * with the addon off the helper library is never loaded into the process
-     * at all, so the module behaves exactly like the original Java-only
-     * version (which is the configuration games are known to run with).
+     * Native addon plus spoof config. The native library is loaded lazily and
+     * only when enabled; the spoof config is always delivered so the
+     * Java-level features (Widevine / GSF) work independently of the addon.
      */
     private fun initNativeAddon() {
         Thread({
@@ -74,10 +77,10 @@ class XposedInit : XposedModule() {
                 } catch (t: Throwable) {
                     log(Log.INFO, TAG, "[NVD] native library not loaded: $t")
                 }
-                runCatching { com.kimera.novpndetect.spoof.SpoofCore.init(this) }
             } else {
                 log(Log.INFO, TAG, "[NVD] native addon disabled - library not loaded")
             }
+            runCatching { com.kimera.novpndetect.spoof.SpoofCore.init(this) }
         }, "nvd-native-init").start()
     }
 }
