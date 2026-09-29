@@ -165,9 +165,9 @@ static void RewritePropsContent(const std::string& raw, std::string* out) {
                     char repl[128];
                     if (SpoofRewritePropsLine(key, eq + 1, repl, sizeof(repl))) {
                         out->append(key);
-                        out->append('=');
+                        out->push_back('=');
                         out->append(repl);
-                        out->append('\n');
+                        out->push_back('\n');
                         i = j;
                         continue;
                     }
@@ -178,6 +178,8 @@ static void RewritePropsContent(const std::string& raw, std::string* out) {
         i = j;
     }
 }
+
+static bool ReadWholeFile(const char* path, std::string* out);
 
 // Returns true when the call was fully handled by the special layer.
 // On NotFound: errno=ENOENT, *fdOut=-1. On EnforceOne: *fdOut is a memfd or -1.
