@@ -45,4 +45,8 @@ object SpoofState {
 
     @Volatile
     var gpuRenderer: String = ""
+
+    /** glGetString(GL_VERSION) replacement for the Java GL readers. */
+    @Volatile
+    var gpuGlVersion: String = ""
 }

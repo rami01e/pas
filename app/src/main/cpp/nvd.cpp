@@ -388,11 +388,18 @@ static void* InitWorker(void* arg) {
     Log("native: stage3 iface hooks");
     InstallFsHooks();
     Log("native: stage4 fs hooks");
+    if (CpuSpoofActive()) {
+        InstallCpuDeepHooks();
+        Log("native: stage4a cpu deep hooks");
+    } else {
+        Log("native: cpu spoof off - exec/syscall hooks skipped");
+    }
     if (GpuSpoofActive()) {
         InstallGpuHooks();
-        Log("native: stage4b gpu gl hooks");
+        InstallVulkanHooks();
+        Log("native: stage4b gpu gl+vulkan hooks");
     } else {
-        Log("native: gpu spoof off - gl hook skipped");
+        Log("native: gpu spoof off - gl/vulkan hooks skipped");
     }
     // setsockopt (SO_BINDTODEVICE hiding) is a core hiding primitive and stays
     // on in every mode, including compatibility mode.

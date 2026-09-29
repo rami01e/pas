@@ -181,9 +181,10 @@ static void RewritePropsContent(const std::string& raw, std::string* out) {
 
 static bool ReadWholeFile(const char* path, std::string* out);
 
-// /proc/cpuinfo rewrite: replaces the CPU identity lines (model name / Hardware
-// / vendor_id / x86 flags and other Intel-only keys) with an ARM-style view of
-// the selected CPU, keeping the per-core structure intact.
+// /proc/cpuinfo rewrite: each per-core block is rebuilt in the kernel's ARM
+// style for the selected CPU (model string, BogoMIPS, ARM feature list and
+// CPU implementer/architecture/variant/part/revision), so hardware-info
+// readers see a coherent ARM device instead of the host's x86 traces.
 static bool CpuinfoKeyMatch(const char* line, const char* key) {
     size_t kl = strlen(key);
     if (strncmp(line, key, kl) != 0) return false;
@@ -194,57 +195,111 @@ static bool CpuinfoKeyMatch(const char* line, const char* key) {
 }
 
 static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
-    std::string display = CpuSpoofDisplay();
-    bool hardware = false;
-    size_t i = 0;
-    while (i < raw.size()) {
-        size_t j = raw.find('\n', i);
-        j = (j == std::string::npos) ? raw.size() : j + 1;
-        std::string line(raw, i, j - i);
-        const char* c = line.c_str();
-        if (CpuinfoKeyMatch(c, "model name")) {
-            out->append("model name\t: ");
-            out->append(display);
-            out->push_back('\n');
-            i = j;
-            continue;
-        }
-        if (CpuinfoKeyMatch(c, "Hardware")) {
-            hardware = true;
-            out->append("Hardware\t: ");
-            out->append(display);
-            out->push_back('\n');
-            i = j;
-            continue;
-        }
-        if (CpuinfoKeyMatch(c, "flags")) {
-            out->append("Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32\n");
-            i = j;
-            continue;
-        }
-        static const char* const kDrop[] = {
-            "vendor_id",        "cpu family",       "model",
-            "stepping",         "microcode",        "fpu",
-            "fpu_exception",    "cpuid level",      "wp",
-            "bugs",             "clflush size",     "cache_alignment",
-            "address sizes",    "power management", "apicid",
-            "initial apicid",   "vmx flags",
-        };
-        bool skip = false;
-        for (const char* k : kDrop) {
-            if (CpuinfoKeyMatch(c, k)) {
-                skip = true;
+    const std::string model = CpuSpoofCpuinfoModel();
+    const std::string features = CpuSpoofFeatures();
+    const std::string part = CpuSpoofPart();
+    // Keep everything before the first per-core block as is.
+    size_t first = std::string::npos;
+    {
+        size_t p = 0;
+        while (p < raw.size()) {
+            size_t e = raw.find('\n', p);
+            e = (e == std::string::npos) ? raw.size() : e + 1;
+            if (CpuinfoKeyMatch(raw.c_str() + p, "processor") && e > p) {
+                first = p;
                 break;
             }
+            p = e;
         }
-        if (!skip) out->append(line);
-        i = j;
     }
-    if (!hardware) {
-        out->append("Hardware\t: ");
-        out->append(display);
+    if (first == std::string::npos) {
+        out->append(raw);
+        return;
+    }
+    out->append(raw, 0, first);
+    size_t p = first;
+    while (p < raw.size()) {
+        size_t e = raw.find('\n', p);
+        e = (e == std::string::npos) ? raw.size() : e + 1;
+        std::string line(raw, p, e - p);
+        if (!CpuinfoKeyMatch(line.c_str(), "processor")) {
+            out->append(line);
+            p = e;
+            continue;
+        }
+        // Extract the core number after the colon.
+        std::string num;
+        {
+            const char* c = line.c_str();
+            const char* colon = strchr(c, ':');
+            if (colon) {
+                colon++;
+                while (*colon == ' ' || *colon == '\t') colon++;
+                while (*colon && *colon != '\n' && *colon != '\r') num.push_back(*colon++);
+            }
+            if (num.empty()) num = "0";
+        }
+        out->append("processor\t: ");
+        out->append(num);
         out->push_back('\n');
+        out->append("model name\t: ");
+        out->append(model);
+        out->push_back('\n');
+        out->append("BogoMIPS\t: 52.00\n");
+        out->append("Features\t: ");
+        out->append(features);
+        out->push_back('\n');
+        out->append("CPU implementer\t: 0x41\n");
+        out->append("CPU architecture\t: 8\n");
+        out->append("CPU variant\t: 0x0\n");
+        out->append("CPU part\t: ");
+        out->append(part);
+        out->push_back('\n');
+        out->append("CPU revision\t: 1\n");
+        // Skip the rest of the block up to the following blank line or the
+        // next core header.
+        p = e;
+        while (p < raw.size()) {
+            size_t e2 = raw.find('\n', p);
+            e2 = (e2 == std::string::npos) ? raw.size() : e2 + 1;
+            bool blank = true;
+            for (size_t k = p; k < e2; k++) {
+                char ch = raw[k];
+                if (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+                    blank = false;
+                    break;
+                }
+            }
+            if (blank) {
+                out->push_back('\n');
+                p = e2;
+                break;
+            }
+            if (CpuinfoKeyMatch(raw.c_str() + p, "processor")) break;
+            p = e2;
+        }
     }
+}
+
+// cpufreq min/max mirrors: served with the selected CPU's clock range so
+// frequency rows match the spoofed model (kHz values, same format as sysfs).
+static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
+    if (CpuSpoofMinKHz() <= 0 || CpuSpoofMaxKHz() <= 0) return false;
+    if (strncmp(path, "/sys/devices/system/cpu/", 24) != 0) return false;
+    const char* p = strstr(path, "/cpufreq/");
+    if (!p) return false;
+    const char* leaf = p + 9;
+    if (*leaf == '\0' || strchr(leaf, '/') != nullptr) return false;
+    int v;
+    if (strcmp(leaf, "cpuinfo_min_freq") == 0 || strcmp(leaf, "scaling_min_freq") == 0) {
+        v = CpuSpoofMinKHz();
+    } else if (strcmp(leaf, "cpuinfo_max_freq") == 0 || strcmp(leaf, "scaling_max_freq") == 0) {
+        v = CpuSpoofMaxKHz();
+    } else {
+        return false;
+    }
+    snprintf(out, cap, "%d\n", v);
+    return true;
 }
 
 // Returns true when the call was fully handled by the special layer.
@@ -265,8 +320,8 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
             *fdOut = mfd;
             return true;
         }
-        // /proc/cpuinfo: served with an ARM-style model identity so hardware
-        // info readers see the selected CPU instead of the host string.
+        // /proc/cpuinfo: served as the ARM view of the selected CPU so
+        // hardware-info readers see a coherent ARM device.
         if (CpuSpoofActive() && strcmp(path, "/proc/cpuinfo") == 0 &&
             (flags & O_ACCMODE) == O_RDONLY) {
             std::string raw;
@@ -275,8 +330,20 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
             RewriteCpuinfoContent(raw, &out);
             int mfd = CreateMemfdWith(out.data(), out.size(), flags);
             if (mfd < 0) return false;
+            Log("native: cpuinfo served (ARM view)");
             *fdOut = mfd;
             return true;
+        }
+        // cpufreq min/max: mirrored with the selected CPU's clock range.
+        if (CpuSpoofActive() && (flags & O_ACCMODE) == O_RDONLY) {
+            char val[32];
+            if (CpuFreqSpoofValue(path, val, sizeof(val))) {
+                int mfd = CreateMemfdWith(val, strlen(val), flags);
+                if (mfd >= 0) {
+                    *fdOut = mfd;
+                    return true;
+                }
+            }
         }
         return false;
     }
@@ -719,6 +786,250 @@ int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// CPU: subprocess readers. Tools spawned via exec* / posix_spawn (for example
+// `cat /proc/cpuinfo`) would otherwise read the host file; the exec arguments
+// are rewritten to point at a pre-rendered copy so child processes observe
+// the same ARM view as the process itself. Active together with the CPU spoof
+// only, and fails safe (unmodified exec) whenever the copy cannot be written.
+// ---------------------------------------------------------------------------
+
+static std::string g_fake_cpuinfo_path;
+static bool g_fake_cpuinfo_probed = false;
+
+static std::string BuildFakeCpuinfoPath() {
+    char cmd[256] = {0};
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/cmdline", O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return std::string();
+    ssize_t n = syscall(SYS_read, fd, cmd, sizeof(cmd) - 1);
+    syscall(SYS_close, fd);
+    if (n <= 0) return std::string();
+    cmd[n] = '\0';
+    std::string pkg(cmd);
+    size_t colon = pkg.find(':');
+    if (colon != std::string::npos) pkg = pkg.substr(0, colon);
+    if (pkg.empty()) return std::string();
+    static const char* const kBases[] = {"/data/user/0/", "/data/data/"};
+    for (const char* b : kBases) {
+        std::string dir = std::string(b) + pkg + "/cache";
+        if (syscall(SYS_access, dir.c_str(), W_OK) == 0) {
+            return dir + "/.nvd_tmp";
+        }
+    }
+    return std::string();
+}
+
+static const std::string& FakeCpuinfoPath() {
+    if (!g_fake_cpuinfo_probed) {
+        g_fake_cpuinfo_probed = true;
+        g_fake_cpuinfo_path = BuildFakeCpuinfoPath();
+        if (g_fake_cpuinfo_path.empty()) {
+            Log("native: cpuinfo redirect target unavailable");
+        } else {
+            Log("native: cpuinfo redirect target %s", g_fake_cpuinfo_path.c_str());
+        }
+    }
+    return g_fake_cpuinfo_path;
+}
+
+static bool WriteFakeCpuinfo(const char* path) {
+    std::string raw;
+    if (!ReadWholeFile("/proc/cpuinfo", &raw)) return false;
+    std::string out;
+    RewriteCpuinfoContent(raw, &out);
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
+                          0600);
+    if (fd < 0) return false;
+    size_t off = 0;
+    while (off < out.size()) {
+        ssize_t w = syscall(SYS_write, fd, out.data() + off, out.size() - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            syscall(SYS_close, fd);
+            return false;
+        }
+        off += (size_t)w;
+    }
+    syscall(SYS_close, fd);
+    return true;
+}
+
+static std::string ReplaceCpuinfoRefs(const char* in, const std::string& fake) {
+    static const char kRef[] = "/proc/cpuinfo";
+    std::string out;
+    if (!in) return out;
+    const char* p = in;
+    for (;;) {
+        const char* hit = strstr(p, kRef);
+        if (hit == nullptr) {
+            out.append(p);
+            break;
+        }
+        out.append(p, (size_t)(hit - p));
+        out.append(fake);
+        p = hit + sizeof(kRef) - 1;
+    }
+    return out;
+}
+
+static bool RewriteArgvForCpuinfo(char* const in[], char*** outArgv, int* outCount) {
+    if (!CpuSpoofActive() || !in) return false;
+    const std::string& fake = FakeCpuinfoPath();
+    if (fake.empty()) return false;
+    int n = 0;
+    while (in[n] != nullptr) n++;
+    if (n == 0 || n > 256) return false;
+    bool any = false;
+    for (int i = 0; i < n; i++) {
+        if (in[i] != nullptr && strstr(in[i], "/proc/cpuinfo") != nullptr) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) return false;
+    if (!WriteFakeCpuinfo(fake.c_str())) return false;
+    char** na = (char**)calloc((size_t)n + 1, sizeof(char*));
+    if (!na) return false;
+    for (int i = 0; i < n; i++) {
+        std::string s = ReplaceCpuinfoRefs(in[i], fake);
+        na[i] = strdup(s.c_str());
+        if (!na[i]) {
+            for (int k = 0; k < i; k++) free(na[k]);
+            free(na);
+            return false;
+        }
+    }
+    na[n] = nullptr;
+    *outArgv = na;
+    *outCount = n;
+    return true;
+}
+
+static void FreeRewrittenArgv(char** argv, int n) {
+    if (!argv) return;
+    for (int i = 0; i < n; i++) free(argv[i]);
+    free(argv);
+}
+
+static int MyExecVe(const char* path, char* const argv[], char* const envp[]) {
+    BYTEHOOK_STACK_SCOPE();
+    char** na = nullptr;
+    int n = 0;
+    if (RewriteArgvForCpuinfo(argv, &na, &n)) {
+        Log("native: exec redirect (cpuinfo) via %s", path ? path : "?");
+        int rc = BYTEHOOK_CALL_PREV(MyExecVe, path, na, envp);
+        FreeRewrittenArgv(na, n);
+        return rc;
+    }
+    return BYTEHOOK_CALL_PREV(MyExecVe, path, argv, envp);
+}
+
+static int MyExecV(const char* path, char* const argv[]) {
+    BYTEHOOK_STACK_SCOPE();
+    char** na = nullptr;
+    int n = 0;
+    if (RewriteArgvForCpuinfo(argv, &na, &n)) {
+        Log("native: exec redirect (cpuinfo) via %s", path ? path : "?");
+        int rc = BYTEHOOK_CALL_PREV(MyExecV, path, na);
+        FreeRewrittenArgv(na, n);
+        return rc;
+    }
+    return BYTEHOOK_CALL_PREV(MyExecV, path, argv);
+}
+
+static int MyExecVp(const char* file, char* const argv[]) {
+    BYTEHOOK_STACK_SCOPE();
+    char** na = nullptr;
+    int n = 0;
+    if (RewriteArgvForCpuinfo(argv, &na, &n)) {
+        Log("native: exec redirect (cpuinfo) via %s", file ? file : "?");
+        int rc = BYTEHOOK_CALL_PREV(MyExecVp, file, na);
+        FreeRewrittenArgv(na, n);
+        return rc;
+    }
+    return BYTEHOOK_CALL_PREV(MyExecVp, file, argv);
+}
+
+static int MyPosixSpawn(pid_t* pid, const char* path, const void* fileActions, const void* attr,
+                        char* const argv[], char* const envp[]) {
+    BYTEHOOK_STACK_SCOPE();
+    char** na = nullptr;
+    int n = 0;
+    if (RewriteArgvForCpuinfo(argv, &na, &n)) {
+        Log("native: posix_spawn redirect (cpuinfo) via %s", path ? path : "?");
+        int rc = BYTEHOOK_CALL_PREV(MyPosixSpawn, pid, path, fileActions, attr, na, envp);
+        FreeRewrittenArgv(na, n);
+        return rc;
+    }
+    return BYTEHOOK_CALL_PREV(MyPosixSpawn, pid, path, fileActions, attr, argv, envp);
+}
+
+static int MyPosixSpawnP(pid_t* pid, const char* file, const void* fileActions, const void* attr,
+                         char* const argv[], char* const envp[]) {
+    BYTEHOOK_STACK_SCOPE();
+    char** na = nullptr;
+    int n = 0;
+    if (RewriteArgvForCpuinfo(argv, &na, &n)) {
+        Log("native: posix_spawn redirect (cpuinfo) via %s", file ? file : "?");
+        int rc = BYTEHOOK_CALL_PREV(MyPosixSpawnP, pid, file, fileActions, attr, na, envp);
+        FreeRewrittenArgv(na, n);
+        return rc;
+    }
+    return BYTEHOOK_CALL_PREV(MyPosixSpawnP, pid, file, fileActions, attr, argv, envp);
+}
+
+// Direct syscall() readers: open/openat of /proc/cpuinfo is answered with a
+// pre-rendered memfd (some native readers bypass the libc wrappers).
+static long MySyscall(long number, ...) {
+    BYTEHOOK_STACK_SCOPE();
+    va_list ap;
+    va_start(ap, number);
+    long a0 = va_arg(ap, long);
+    long a1 = va_arg(ap, long);
+    long a2 = va_arg(ap, long);
+    long a3 = va_arg(ap, long);
+    long a4 = va_arg(ap, long);
+    long a5 = va_arg(ap, long);
+    va_end(ap);
+#ifdef __NR_openat
+    if (CpuSpoofActive() && number == __NR_openat) {
+        const char* cpath = (const char*)a1;
+        if (cpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY &&
+            strcmp(cpath, "/proc/cpuinfo") == 0) {
+            std::string raw;
+            if (ReadWholeFile(cpath, &raw)) {
+                std::string out;
+                RewriteCpuinfoContent(raw, &out);
+                int mfd = CreateMemfdWith(out.data(), out.size(), (int)a2);
+                if (mfd >= 0) {
+                    Log("native: cpuinfo served (direct syscall)");
+                    return (long)mfd;
+                }
+            }
+        }
+    }
+#endif
+#ifdef __NR_open
+    if (CpuSpoofActive() && number == __NR_open) {
+        const char* cpath = (const char*)a0;
+        if (cpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY &&
+            strcmp(cpath, "/proc/cpuinfo") == 0) {
+            std::string raw;
+            if (ReadWholeFile(cpath, &raw)) {
+                std::string out;
+                RewriteCpuinfoContent(raw, &out);
+                int mfd = CreateMemfdWith(out.data(), out.size(), (int)a1);
+                if (mfd >= 0) {
+                    Log("native: cpuinfo served (direct syscall)");
+                    return (long)mfd;
+                }
+            }
+        }
+    }
+#endif
+    return BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
+}
+
 void InstallFsHooks() {
     HookLibcSym("open", (void*)HideOpen);
     HookLibcSym("open64", (void*)HideOpen64);
@@ -734,6 +1045,16 @@ void InstallFsHooks() {
     HookLibcSym("stat", (void*)HideStat);
     HookLibcSym("lstat", (void*)HideLstat);
     HookLibcSym("fstatat", (void*)HideFStatAt);
+}
+
+void InstallCpuDeepHooks() {
+    HookLibcSym("execve", (void*)MyExecVe);
+    HookLibcSym("execv", (void*)MyExecV);
+    HookLibcSym("execvp", (void*)MyExecVp);
+    HookLibcSym("posix_spawn", (void*)MyPosixSpawn);
+    HookLibcSym("posix_spawnp", (void*)MyPosixSpawnP);
+    HookLibcSym("syscall", (void*)MySyscall);
+    Log("native: cpu deep hooks installed (exec/syscall)");
 }
 
 }  // namespace nvd

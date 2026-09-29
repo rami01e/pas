@@ -10,10 +10,10 @@ import com.kimera.novpndetect.hookSafe
 import com.kimera.novpndetect.spoof.SpoofState
 
 /**
- * GPU spoof (Java path): replaces the GL_VENDOR / GL_RENDERER strings that
- * Java-based OpenGL readers query; GL_EXTENSIONS / GL_VERSION are left
+ * GPU spoof (Java path): replaces the GL_VENDOR / GL_RENDERER / GL_VERSION
+ * strings that Java-based OpenGL readers query; GL_EXTENSIONS is left
  * untouched so feature detection keeps working. The native layer covers the
- * same two strings for native GL callers (libGLESv2).
+ * same strings for native GL callers (libGLESv2) and the Vulkan identity.
  */
 class HookGpu : XHook {
 
@@ -38,6 +38,9 @@ class HookGpu : XHook {
                 } else if (name == GL_RENDERER) {
                     module.log(Log.INFO, TAG, "[NVD] GL_RENDERER -> ${SpoofState.gpuRenderer}")
                     SpoofState.gpuRenderer
+                } else if (name == GL_VERSION && SpoofState.gpuGlVersion.isNotEmpty()) {
+                    module.log(Log.INFO, TAG, "[NVD] GL_VERSION -> ${SpoofState.gpuGlVersion}")
+                    SpoofState.gpuGlVersion
                 } else {
                     chain.proceed()
                 }
@@ -48,5 +51,6 @@ class HookGpu : XHook {
     private companion object {
         const val GL_VENDOR = 0x1F00
         const val GL_RENDERER = 0x1F01
+        const val GL_VERSION = 0x1F02
     }
 }

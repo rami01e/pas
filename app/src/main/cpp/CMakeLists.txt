@@ -14,7 +14,8 @@ add_library(nvd SHARED
     hide_netlink.cpp
     hide_ioctl.cpp
     hide_props.cpp
-    hide_gpu.cpp)
+    hide_gpu.cpp
+    hide_vulkan.cpp)
 
 target_compile_options(nvd PRIVATE -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden)
 

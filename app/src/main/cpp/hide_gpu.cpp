@@ -1,15 +1,16 @@
 // CPU model / GPU (OpenGL) spoof for the scoped process.
 //
-// CPU: the model identity is delivered to hide_fs.cpp (/proc/cpuinfo rewrite)
-// and hide_props.cpp (ro.soc.* properties); the Kotlin side patches the Java
-// Build.SOC_* fields.
-// GPU: glGetString(GL_VENDOR / GL_RENDERER) is replaced for native OpenGL
-// readers through this hook; the Java GLES classes are covered from Kotlin.
-// Only the two identity strings are touched - GL_EXTENSIONS / GL_VERSION keep
-// their real values so feature detection still works.
+// CPU: the model identity is delivered to hide_fs.cpp (/proc/cpuinfo view,
+// cpufreq min/max mirrors, subprocess exec redirect) and hide_props.cpp
+// (ro.soc.* properties); the Kotlin side patches the Java Build.SOC_* /
+// HARDWARE / BOARD fields.
+// GPU: glGetString(GL_VENDOR / GL_RENDERER / GL_VERSION) is replaced for
+// native OpenGL readers through this hook; the Java GLES classes are covered
+// from Kotlin, and hide_vulkan.cpp covers the Vulkan identity. GL_EXTENSIONS
+// keeps its real value so feature detection still works.
 //
-// The GL hook is installed only when the GPU spoof is enabled at process
-// start (configuration takes effect when a scoped app restarts).
+// The GL / Vulkan hooks are installed only when the GPU spoof is enabled at
+// process start (configuration takes effect when a scoped app restarts).
 //
 // Config values are written once, early, from the module thread; the hot paths
 // read plain flags/arrays (same style as hide_props.cpp).
@@ -30,23 +31,61 @@ static volatile bool g_cpu_on = false;
 static char g_cpu_display[192] = {0};
 static char g_cpu_mfr[64] = {0};
 static char g_cpu_model[64] = {0};
-static volatile bool g_gpu_on = false;
-static char g_gpu_vendor[128] = {0};
-static char g_gpu_renderer[192] = {0};
+static char g_cpu_part[16] = {0};
+static char g_cpu_info_model[96] = {0};
+static char g_cpu_features[256] = {0};
+static volatile int g_cpu_min_khz = 0;
+static volatile int g_cpu_max_khz = 0;
 
-void SetCpuGpuConfig(bool cpuOn, const char* cpuDisplay, const char* cpuMfr, const char* cpuModel,
-                     bool gpuOn, const char* gpuVendor, const char* gpuRenderer) {
+static volatile bool g_gpu_on = false;
+static char g_gpu_vendor[64] = {0};
+static char g_gpu_renderer[192] = {0};
+static char g_gpu_gl_version[192] = {0};
+static volatile unsigned long long g_gpu_vendor_id = 0;
+static volatile unsigned long long g_gpu_device_id = 0;
+static volatile unsigned long long g_gpu_driver_version = 0;
+static volatile unsigned long long g_gpu_api_version = 0;
+static char g_gpu_driver_name[192] = {0};
+static char g_gpu_driver_info[256] = {0};
+
+static void CopyStr(char* dst, size_t cap, const char* src) {
+    snprintf(dst, cap, "%s", src ? src : "");
+}
+
+void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
+                  const char* part, const char* cpuInfoModel, const char* features, int minKHz,
+                  int maxKHz) {
     g_cpu_on = false;
-    g_gpu_on = false;
-    snprintf(g_cpu_display, sizeof(g_cpu_display), "%s", cpuDisplay ? cpuDisplay : "");
-    snprintf(g_cpu_mfr, sizeof(g_cpu_mfr), "%s", cpuMfr ? cpuMfr : "");
-    snprintf(g_cpu_model, sizeof(g_cpu_model), "%s", cpuModel ? cpuModel : "");
-    snprintf(g_gpu_vendor, sizeof(g_gpu_vendor), "%s", gpuVendor ? gpuVendor : "");
-    snprintf(g_gpu_renderer, sizeof(g_gpu_renderer), "%s", gpuRenderer ? gpuRenderer : "");
+    CopyStr(g_cpu_display, sizeof(g_cpu_display), display);
+    CopyStr(g_cpu_mfr, sizeof(g_cpu_mfr), mfr);
+    CopyStr(g_cpu_model, sizeof(g_cpu_model), model);
+    CopyStr(g_cpu_part, sizeof(g_cpu_part), part);
+    CopyStr(g_cpu_info_model, sizeof(g_cpu_info_model), cpuInfoModel);
+    CopyStr(g_cpu_features, sizeof(g_cpu_features), features);
+    g_cpu_min_khz = minKHz;
+    g_cpu_max_khz = maxKHz;
     g_cpu_on = cpuOn && g_cpu_display[0] != '\0';
+    Log("native: cpu config on=%d display=%s part=%s khz=%d-%d", (int)g_cpu_on, g_cpu_display,
+        g_cpu_part, (int)g_cpu_min_khz, (int)g_cpu_max_khz);
+}
+
+void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
+                  unsigned long long vendorId, unsigned long long deviceId,
+                  unsigned long long driverVersion, unsigned long long apiVersion,
+                  const char* driverName, const char* driverInfo) {
+    g_gpu_on = false;
+    CopyStr(g_gpu_vendor, sizeof(g_gpu_vendor), vendor);
+    CopyStr(g_gpu_renderer, sizeof(g_gpu_renderer), renderer);
+    CopyStr(g_gpu_gl_version, sizeof(g_gpu_gl_version), glVersion);
+    CopyStr(g_gpu_driver_name, sizeof(g_gpu_driver_name), driverName);
+    CopyStr(g_gpu_driver_info, sizeof(g_gpu_driver_info), driverInfo);
+    g_gpu_vendor_id = vendorId;
+    g_gpu_device_id = deviceId;
+    g_gpu_driver_version = driverVersion;
+    g_gpu_api_version = apiVersion;
     g_gpu_on = gpuOn && g_gpu_renderer[0] != '\0';
-    Log("native: cpu/gpu config cpuOn=%d cpu=%s gpuOn=%d renderer=%s", (int)g_cpu_on,
-        g_cpu_display, (int)g_gpu_on, g_gpu_renderer);
+    Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx", (int)g_gpu_on,
+        g_gpu_renderer, g_gpu_vendor_id, g_gpu_device_id);
 }
 
 bool CpuSpoofActive() {
@@ -65,20 +104,79 @@ std::string CpuSpoofModel() {
     return std::string(g_cpu_model);
 }
 
+std::string CpuSpoofPart() {
+    return std::string(g_cpu_part);
+}
+
+std::string CpuSpoofCpuinfoModel() {
+    return std::string(g_cpu_info_model);
+}
+
+std::string CpuSpoofFeatures() {
+    return std::string(g_cpu_features);
+}
+
+int CpuSpoofMinKHz() {
+    return g_cpu_min_khz;
+}
+
+int CpuSpoofMaxKHz() {
+    return g_cpu_max_khz;
+}
+
 bool GpuSpoofActive() {
     return g_gpu_on;
+}
+
+std::string GpuSpoofVendor() {
+    return std::string(g_gpu_vendor);
+}
+
+std::string GpuSpoofRenderer() {
+    return std::string(g_gpu_renderer);
+}
+
+std::string GpuSpoofGlVersion() {
+    return std::string(g_gpu_gl_version);
+}
+
+unsigned long long GpuSpoofVendorId() {
+    return g_gpu_vendor_id;
+}
+
+unsigned long long GpuSpoofDeviceId() {
+    return g_gpu_device_id;
+}
+
+unsigned long long GpuSpoofDriverVersion() {
+    return g_gpu_driver_version;
+}
+
+unsigned long long GpuSpoofApiVersion() {
+    return g_gpu_api_version;
+}
+
+std::string GpuSpoofDriverName() {
+    return std::string(g_gpu_driver_name);
+}
+
+std::string GpuSpoofDriverInfo() {
+    return std::string(g_gpu_driver_info);
 }
 
 // ---------------------------------------------------------------------------
 // OpenGL glGetString hook (native callers)
 // ---------------------------------------------------------------------------
 
-// GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01
+// GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01, GL_VERSION = 0x1F02
 static const unsigned char* MyGlGetString(unsigned int name) {
     BYTEHOOK_STACK_SCOPE();
     if (g_gpu_on) {
         if (name == 0x1F00) return (const unsigned char*)g_gpu_vendor;
         if (name == 0x1F01) return (const unsigned char*)g_gpu_renderer;
+        if (name == 0x1F02 && g_gpu_gl_version[0] != '\0') {
+            return (const unsigned char*)g_gpu_gl_version;
+        }
     }
     return BYTEHOOK_CALL_PREV(MyGlGetString, name);
 }
@@ -110,11 +208,12 @@ void InstallGpuHooks() {
 }  // namespace nvd
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetCpuGpu(JNIEnv* env, jobject thiz,
-                                                            jboolean cpuOn, jstring cpuDisplay,
-                                                            jstring cpuMfr, jstring cpuModel,
-                                                            jboolean gpuOn, jstring gpuVendor,
-                                                            jstring gpuRenderer) {
+Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
+                                                         jboolean cpuOn, jstring cpuDisplay,
+                                                         jstring cpuMfr, jstring cpuModel,
+                                                         jstring cpuPart, jstring cpuInfoModel,
+                                                         jstring cpuFeatures, jint minKhz,
+                                                         jint maxKhz) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -123,11 +222,38 @@ Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetCpuGpu(JNIEnv* env, jobject
         if (c) env->ReleaseStringUTFChars(s, c);
         return out;
     };
-    std::string cpu = toStr(cpuDisplay);
+    std::string display = toStr(cpuDisplay);
     std::string mfr = toStr(cpuMfr);
     std::string model = toStr(cpuModel);
+    std::string part = toStr(cpuPart);
+    std::string infoModel = toStr(cpuInfoModel);
+    std::string features = toStr(cpuFeatures);
+    nvd::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
+                      infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
+                                                         jboolean gpuOn, jstring gpuVendor,
+                                                         jstring gpuRenderer, jstring gpuGlVersion,
+                                                         jlong vendorId, jlong deviceId,
+                                                         jlong driverVersion, jlong apiVersion,
+                                                         jstring driverName, jstring driverInfo) {
+    (void)thiz;
+    auto toStr = [env](jstring s) -> std::string {
+        if (!s) return std::string();
+        const char* c = env->GetStringUTFChars(s, nullptr);
+        std::string out = c ? c : "";
+        if (c) env->ReleaseStringUTFChars(s, c);
+        return out;
+    };
     std::string vendor = toStr(gpuVendor);
     std::string renderer = toStr(gpuRenderer);
-    nvd::SetCpuGpuConfig(cpuOn == JNI_TRUE, cpu.c_str(), mfr.c_str(), model.c_str(),
-                         gpuOn == JNI_TRUE, vendor.c_str(), renderer.c_str());
+    std::string glVersion = toStr(gpuGlVersion);
+    std::string dName = toStr(driverName);
+    std::string dInfo = toStr(driverInfo);
+    nvd::SetGpuConfig(gpuOn == JNI_TRUE, vendor.c_str(), renderer.c_str(), glVersion.c_str(),
+                      (unsigned long long)vendorId, (unsigned long long)deviceId,
+                      (unsigned long long)driverVersion, (unsigned long long)apiVersion,
+                      dName.c_str(), dInfo.c_str());
 }

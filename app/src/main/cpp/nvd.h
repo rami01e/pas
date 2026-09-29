@@ -54,15 +54,36 @@ void StartInitWorker();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode,
                     bool nativeEnabled);
 
-// CPU model / GPU (OpenGL) spoof (hide_gpu.cpp)
-void SetCpuGpuConfig(bool cpuOn, const char* cpuDisplay, const char* cpuMfr, const char* cpuModel,
-                     bool gpuOn, const char* gpuVendor, const char* gpuRenderer);
+// CPU model / GPU (OpenGL + Vulkan) spoof (hide_gpu.cpp, hide_vulkan.cpp)
+void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
+                  const char* part, const char* cpuInfoModel, const char* features, int minKHz,
+                  int maxKHz);
+void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
+                  unsigned long long vendorId, unsigned long long deviceId,
+                  unsigned long long driverVersion, unsigned long long apiVersion,
+                  const char* driverName, const char* driverInfo);
 bool CpuSpoofActive();
 std::string CpuSpoofDisplay();
 std::string CpuSpoofManufacturer();
 std::string CpuSpoofModel();
+std::string CpuSpoofPart();
+std::string CpuSpoofCpuinfoModel();
+std::string CpuSpoofFeatures();
+int CpuSpoofMinKHz();
+int CpuSpoofMaxKHz();
 bool GpuSpoofActive();
+std::string GpuSpoofVendor();
+std::string GpuSpoofRenderer();
+std::string GpuSpoofGlVersion();
+unsigned long long GpuSpoofVendorId();
+unsigned long long GpuSpoofDeviceId();
+unsigned long long GpuSpoofDriverVersion();
+unsigned long long GpuSpoofApiVersion();
+std::string GpuSpoofDriverName();
+std::string GpuSpoofDriverInfo();
 void InstallGpuHooks();
+void InstallVulkanHooks();
+void InstallCpuDeepHooks();
 
 // Caller filter shared with the GPU hook installer (defined in nvd.cpp).
 bool CallerAllowHooks(const char* caller_path_name, void* arg);

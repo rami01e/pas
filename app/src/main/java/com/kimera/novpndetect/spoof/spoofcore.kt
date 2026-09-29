@@ -35,14 +35,29 @@ object SpoofCore {
         nativeEnabled: Boolean
     )
 
-    external fun nativeSetCpuGpu(
+    external fun nativeSetCpu(
         cpuOn: Boolean,
         cpuDisplay: String,
         cpuMfr: String,
         cpuModel: String,
+        cpuPart: String,
+        cpuInfoModel: String,
+        cpuFeatures: String,
+        cpuMinKHz: Int,
+        cpuMaxKHz: Int
+    )
+
+    external fun nativeSetGpu(
         gpuOn: Boolean,
         gpuVendor: String,
-        gpuRenderer: String
+        gpuRenderer: String,
+        gpuGlVersion: String,
+        gpuVendorId: Long,
+        gpuDeviceId: Long,
+        gpuDriverVersion: Long,
+        gpuApiVersion: Long,
+        gpuDriverName: String,
+        gpuDriverInfo: String
     )
 
     /** Called from XposedInit.onPackageReady (once per process). */
@@ -98,21 +113,30 @@ object SpoofCore {
         SpoofState.cpuOn = cpuOnEff
         SpoofState.cpuDisplay = cpuEntry.display
         SpoofState.cpuManufacturer = cpuEntry.manufacturer
-        SpoofState.cpuModel = cpuEntry.model
+        SpoofState.cpuModel = cpuEntry.socModel
         SpoofState.gpuOn = gpuOnEff
         SpoofState.gpuVendor = gpuEntry.vendor
         SpoofState.gpuRenderer = gpuEntry.renderer
+        SpoofState.gpuGlVersion = gpuEntry.glVersion
         Log.i(
             TAG,
             "[NVD] cpu/gpu spoof: cpu=$cpuOnEff (${cpuEntry.display}) " +
                 "gpu=$gpuOnEff (${gpuEntry.renderer})"
         )
         // Delivered before the config gate so the native worker can decide
-        // whether to install the GL hooks right away.
+        // whether to install the CPU/GPU hook groups right away.
         runCatching {
-            nativeSetCpuGpu(
-                cpuOnEff, cpuEntry.display, cpuEntry.manufacturer, cpuEntry.model,
-                gpuOnEff, gpuEntry.vendor, gpuEntry.renderer
+            nativeSetCpu(
+                cpuOnEff, cpuEntry.display, cpuEntry.manufacturer, cpuEntry.socModel,
+                cpuEntry.part, cpuEntry.cpuinfoModel, cpuEntry.features,
+                cpuEntry.minKHz, cpuEntry.maxKHz
+            )
+        }
+        runCatching {
+            nativeSetGpu(
+                gpuOnEff, gpuEntry.vendor, gpuEntry.renderer, gpuEntry.glVersion,
+                gpuEntry.vendorId, gpuEntry.deviceId, gpuEntry.driverVersion,
+                gpuEntry.apiVersion, gpuEntry.driverName, gpuEntry.driverInfo
             )
         }
 
@@ -146,7 +170,9 @@ object SpoofCore {
         }
         if (cpuOnEff) {
             patch(Build::class.java, "SOC_MANUFACTURER", cpuEntry.manufacturer, "SOC_MANUFACTURER")
-            patch(Build::class.java, "SOC_MODEL", cpuEntry.model, "SOC_MODEL")
+            patch(Build::class.java, "SOC_MODEL", cpuEntry.socModel, "SOC_MODEL")
+            patch(Build::class.java, "HARDWARE", cpuEntry.hardware, "HARDWARE")
+            patch(Build::class.java, "BOARD", cpuEntry.hardware, "BOARD")
         }
         if (abiOn) {
             val abi = if (abiArm64) "arm64-v8a" else "x86_64"
