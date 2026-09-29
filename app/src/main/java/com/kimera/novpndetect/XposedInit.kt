@@ -36,8 +36,7 @@ class XposedInit : XposedModule() {
         }
         log(Log.INFO, TAG, "[NVD] onPackageReady: ${param.packageName} - installing hooks")
 
-        loadNativeLibrary()
-        runCatching { com.kimera.novpndetect.spoof.SpoofCore.init(this) }
+        initNativeAddon()
 
         val hooks =
             arrayOf(
@@ -54,12 +53,31 @@ class XposedInit : XposedModule() {
         }
     }
 
-    private fun loadNativeLibrary() {
-        try {
-            System.loadLibrary("nvd")
-            log(Log.INFO, TAG, "[NVD] native library loaded")
-        } catch (t: Throwable) {
-            log(Log.INFO, TAG, "[NVD] native library not loaded: $t")
-        }
+    /**
+     * The native addon is loaded lazily and only when the user enabled it:
+     * with the addon off the helper library is never loaded into the process
+     * at all, so the module behaves exactly like the original Java-only
+     * version (which is the configuration games are known to run with).
+     */
+    private fun initNativeAddon() {
+        Thread({
+            val nativeOn = try {
+                getRemotePreferences("nvd_spoof").getBoolean("native_enabled", false)
+            } catch (t: Throwable) {
+                log(Log.INFO, TAG, "[NVD] native: config unavailable ($t) - addon stays off")
+                false
+            }
+            if (nativeOn) {
+                try {
+                    System.loadLibrary("nvd")
+                    log(Log.INFO, TAG, "[NVD] native library loaded")
+                } catch (t: Throwable) {
+                    log(Log.INFO, TAG, "[NVD] native library not loaded: $t")
+                }
+                runCatching { com.kimera.novpndetect.spoof.SpoofCore.init(this) }
+            } else {
+                log(Log.INFO, TAG, "[NVD] native addon disabled - library not loaded")
+            }
+        }, "nvd-native-init").start()
     }
 }

@@ -52,6 +52,7 @@ void InstallIoctlHooks();
 void InstallPropSpoofHooks();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode,
                     bool nativeEnabled);
+void StartInitWorker();
 
 // Hook-installation gate: the worker waits briefly for the Kotlin side to
 // deliver the config so it can either skip all hook installation (native

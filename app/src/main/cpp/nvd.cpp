@@ -18,6 +18,7 @@
 #include <android/log.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <jni.h>
 #include <net/if.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -399,22 +400,46 @@ static void* InitWorker(void* arg) {
     return nullptr;
 }
 
+void StartInitWorker();
+
+static void SpawnInitWorker() {
+    pthread_t t;
+    if (pthread_create(&t, nullptr, InitWorker, nullptr) == 0) {
+        pthread_detach(t);
+    } else {
+        Log("native: pthread_create failed");
+    }
+}
+
+void StartInitWorker() {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, SpawnInitWorker);
+}
+
 }  // namespace nvd
 
 // ---------------------------------------------------------------------------
-// LSPosed native entry point: returns immediately, init happens on a worker
-// thread so it can never block the app's startup path.
+// Entry points. JNI_OnLoad is the real entry now: the library is loaded
+// lazily from Kotlin (System.loadLibrary) only when the native addon is
+// enabled, so with the addon off the process never sees this library at all.
+// native_init is kept for compatibility but is no longer advertised through
+// native_init.list (which would force Vector to load the library into every
+// scoped process).
 // ---------------------------------------------------------------------------
+
+extern "C" __attribute__((visibility("default"))) __attribute__((used)) jint JNICALL
+JNI_OnLoad(JavaVM* vm, void* reserved) {
+    (void)vm;
+    (void)reserved;
+    nvd::Log("native: JNI_OnLoad - starting worker thread");
+    nvd::StartInitWorker();
+    return JNI_VERSION_1_6;
+}
 
 extern "C" __attribute__((visibility("default"))) __attribute__((used))
 NativeOnModuleLoaded native_init(const NativeAPIEntries* entries) {
     (void)entries;
     nvd::Log("native: native_init entry - starting worker thread");
-    pthread_t t;
-    if (pthread_create(&t, nullptr, nvd::InitWorker, nullptr) == 0) {
-        pthread_detach(t);
-    } else {
-        nvd::Log("native: pthread_create failed");
-    }
+    nvd::StartInitWorker();
     return nvd::OnModuleLoadedCb;
 }
