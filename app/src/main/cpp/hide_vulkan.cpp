@@ -211,6 +211,212 @@ static VkResult MyVkEnumerateInstanceExtensionProperties(const char* layer, uint
 }
 
 // ---------------------------------------------------------------------------
+// Loader-chain coverage (Chrome / WebView / ANGLE-style consumers)
+//
+// Browsers and ANGLE resolve the Vulkan entry points through
+// vkGetInstanceProcAddr and dlsym instead of direct PLT calls, which bypasses
+// the GOT hooks above. The resolver chain is wrapped as well so the identity
+// queries are answered from the spoofed profile on that path too.
+// ---------------------------------------------------------------------------
+
+typedef void* (*NvdGipaFn)(VkInstance instance, const char* name);
+
+static void* g_real_gipa = nullptr;
+static volatile unsigned g_chain_logged = 0;
+
+enum VkTargetId {
+    VK_T_PROP = 0,
+    VK_T_PROP2,
+    VK_T_PROP2K,
+    VK_T_FEAT,
+    VK_T_FEAT2,
+    VK_T_FEAT2K,
+    VK_T_EXTDEV,
+    VK_T_EXTINST,
+    VK_T_COUNT
+};
+
+static const char* const kVkNames[VK_T_COUNT] = {
+    "vkGetPhysicalDeviceProperties",
+    "vkGetPhysicalDeviceProperties2",
+    "vkGetPhysicalDeviceProperties2KHR",
+    "vkGetPhysicalDeviceFeatures",
+    "vkGetPhysicalDeviceFeatures2",
+    "vkGetPhysicalDeviceFeatures2KHR",
+    "vkEnumerateDeviceExtensionProperties",
+    "vkEnumerateInstanceExtensionProperties",
+};
+
+static void* volatile g_vk_real[VK_T_COUNT] = {nullptr};
+
+static int TargetIndex(const char* name) {
+    if (!name || name[0] != 'v' || name[1] != 'k') return -1;
+    for (int i = 0; i < VK_T_COUNT; i++) {
+        if (strcmp(name, kVkNames[i]) == 0) return i;
+    }
+    return -1;
+}
+
+static void* ResolveRealTarget(int id) {
+    void* r = g_vk_real[id];
+    if (r) return r;
+    NvdGipaFn gipa = (NvdGipaFn)g_real_gipa;
+    if (gipa) {
+        r = gipa(VK_NULL_HANDLE, kVkNames[id]);
+        if (r) g_vk_real[id] = r;
+    }
+    return r;
+}
+
+static void ChainLog(int id, const char* how) {
+    if (g_chain_logged & (1u << id)) return;
+    g_chain_logged |= (1u << id);
+    Log("native: vulkan loader-chain %s: %s", how, kVkNames[id]);
+}
+
+static void VkPropsPtr(VkPhysicalDevice pd, VkPhysicalDeviceProperties* out) {
+    auto real = (PFN_vkGetPhysicalDeviceProperties)ResolveRealTarget(VK_T_PROP);
+    if (real) real(pd, out);
+    if (out && GpuSpoofActive()) PatchCoreProps(out);
+}
+
+static void VkProps2Ptr(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* out) {
+    auto real = (PFN_vkGetPhysicalDeviceProperties2)ResolveRealTarget(VK_T_PROP2);
+    if (real) real(pd, out);
+    PatchProps2(out);
+}
+
+static void VkProps2KhrPtr(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* out) {
+    auto real = (PFN_vkGetPhysicalDeviceProperties2)ResolveRealTarget(VK_T_PROP2K);
+    if (real) real(pd, out);
+    PatchProps2(out);
+}
+
+static void VkFeatPtr(VkPhysicalDevice pd, VkPhysicalDeviceFeatures* out) {
+    auto real = (PFN_vkGetPhysicalDeviceFeatures)ResolveRealTarget(VK_T_FEAT);
+    if (real) real(pd, out);
+    if (out && GpuSpoofActive()) PatchFeatures(out);
+}
+
+static void VkFeat2Ptr(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* out) {
+    auto real = (PFN_vkGetPhysicalDeviceFeatures2)ResolveRealTarget(VK_T_FEAT2);
+    if (real) real(pd, out);
+    PatchFeatures2(out);
+}
+
+static void VkFeat2KhrPtr(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* out) {
+    auto real = (PFN_vkGetPhysicalDeviceFeatures2)ResolveRealTarget(VK_T_FEAT2K);
+    if (real) real(pd, out);
+    PatchFeatures2(out);
+}
+
+static VkResult VkExtDevPtr(VkPhysicalDevice pd, const char* layer, uint32_t* count,
+                            VkExtensionProperties* props) {
+    auto real = (PFN_vkEnumerateDeviceExtensionProperties)ResolveRealTarget(VK_T_EXTDEV);
+    if (!real) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = real(pd, layer, count, props);
+    if (!count) return r;
+    if (layer != nullptr && layer[0] != '\0') return r;
+    if (props == nullptr) {
+        if (!GpuSpoofActive() || *count == 0) return r;
+        uint32_t total = *count;
+        VkExtensionProperties* tmp =
+            (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * total);
+        if (!tmp) return r;
+        uint32_t got = total;
+        real(pd, layer, &got, tmp);
+        uint32_t hidden = 0;
+        for (uint32_t i = 0; i < got; i++) {
+            if (IsHiddenExtName(tmp[i].extensionName)) hidden++;
+        }
+        free(tmp);
+        if (hidden > 0) *count = total - hidden;
+        return r;
+    }
+    return FilterExtList(count, props, r);
+}
+
+static VkResult VkExtInstPtr(const char* layer, uint32_t* count, VkExtensionProperties* props) {
+    auto real = (PFN_vkEnumerateInstanceExtensionProperties)ResolveRealTarget(VK_T_EXTINST);
+    if (!real) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = real(layer, count, props);
+    if (!count) return r;
+    if (layer != nullptr && layer[0] != '\0') return r;
+    if (props == nullptr) {
+        if (!GpuSpoofActive() || *count == 0) return r;
+        uint32_t total = *count;
+        VkExtensionProperties* tmp =
+            (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * total);
+        if (!tmp) return r;
+        uint32_t got = total;
+        real(layer, &got, tmp);
+        uint32_t hidden = 0;
+        for (uint32_t i = 0; i < got; i++) {
+            if (IsHiddenExtName(tmp[i].extensionName)) hidden++;
+        }
+        free(tmp);
+        if (hidden > 0) *count = total - hidden;
+        return r;
+    }
+    return FilterExtList(count, props, r);
+}
+
+static void* const kVkProxies[VK_T_COUNT] = {
+    (void*)VkPropsPtr,  (void*)VkProps2Ptr, (void*)VkProps2KhrPtr,
+    (void*)VkFeatPtr,   (void*)VkFeat2Ptr,  (void*)VkFeat2KhrPtr,
+    (void*)VkExtDevPtr, (void*)VkExtInstPtr,
+};
+
+// vkGetInstanceProcAddr, covered both for direct (GOT) callers and for
+// consumers that obtained it through dlsym.
+static void* MyVkGetInstanceProcAddrGOT(VkInstance instance, const char* name) {
+    BYTEHOOK_STACK_SCOPE();
+    void* real = BYTEHOOK_CALL_PREV(MyVkGetInstanceProcAddrGOT, instance, name);
+    if (!GpuSpoofActive() || !name || !real) return real;
+    int id = TargetIndex(name);
+    if (id >= 0) {
+        g_vk_real[id] = real;
+        ChainLog(id, "hit");
+        return kVkProxies[id];
+    }
+    return real;
+}
+
+static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
+    NvdGipaFn gipa = (NvdGipaFn)g_real_gipa;
+    if (!gipa) return nullptr;
+    void* real = gipa(instance, name);
+    if (!GpuSpoofActive() || !name || !real) return real;
+    int id = TargetIndex(name);
+    if (id >= 0) {
+        g_vk_real[id] = real;
+        ChainLog(id, "dlsym hit");
+        return kVkProxies[id];
+    }
+    return real;
+}
+
+static void* MyDlsym(void* handle, const char* symbol) {
+    BYTEHOOK_STACK_SCOPE();
+    void* real = BYTEHOOK_CALL_PREV(MyDlsym, handle, symbol);
+    if (!symbol || symbol[0] != 'v' || symbol[1] != 'k') return real;
+    if (strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
+        g_real_gipa = real;
+        if (GpuSpoofActive() && real) return (void*)MyVkGetInstanceProcAddrPtr;
+        return real;
+    }
+    if (GpuSpoofActive() && real) {
+        int id = TargetIndex(symbol);
+        if (id >= 0) {
+            g_vk_real[id] = real;
+            ChainLog(id, "dlsym direct");
+            return kVkProxies[id];
+        }
+    }
+    return real;
+}
+
+// ---------------------------------------------------------------------------
 // install
 // ---------------------------------------------------------------------------
 
@@ -238,6 +444,7 @@ void InstallVulkanHooks() {
         {"vkGetPhysicalDeviceFeatures2KHR", (void*)MyVkGetPhysicalDeviceFeatures2KHR},
         {"vkEnumerateDeviceExtensionProperties", (void*)MyVkEnumerateDeviceExtensionProperties},
         {"vkEnumerateInstanceExtensionProperties", (void*)MyVkEnumerateInstanceExtensionProperties},
+        {"vkGetInstanceProcAddr", (void*)MyVkGetInstanceProcAddrGOT},
     };
     int ok = 0;
     for (const HookSpec& s : kSpecs) {
@@ -245,7 +452,11 @@ void InstallVulkanHooks() {
                                                      s.sym, s.fn, OnVkHooked, nullptr);
         if (stub) ok++;
     }
-    Log("native: vulkan hooks installed %d/%d", ok, (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
+    // ANGLE-style consumers fetch the entry points through dlsym; cover that
+    // path as well.
+    HookLibcSym("dlsym", (void*)MyDlsym);
+    Log("native: vulkan hooks installed %d/%d (+dlsym chain)", ok,
+        (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
 }
 
 }  // namespace nvd

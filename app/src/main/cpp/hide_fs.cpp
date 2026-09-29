@@ -838,12 +838,18 @@ static const std::string& FakeCpuinfoPath() {
 
 static bool WriteFakeCpuinfo(const char* path) {
     std::string raw;
-    if (!ReadWholeFile("/proc/cpuinfo", &raw)) return false;
+    if (!ReadWholeFile("/proc/cpuinfo", &raw)) {
+        Log("native: cpuinfo copy read failed");
+        return false;
+    }
     std::string out;
     RewriteCpuinfoContent(raw, &out);
     int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC,
                           0600);
-    if (fd < 0) return false;
+    if (fd < 0) {
+        Log("native: cpuinfo copy write failed (errno=%d)", errno);
+        return false;
+    }
     size_t off = 0;
     while (off < out.size()) {
         ssize_t w = syscall(SYS_write, fd, out.data() + off, out.size() - off);
@@ -1034,6 +1040,56 @@ static long MySyscall(long number, ...) {
     return BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
 }
 
+// Some shells receive their commands over a pipe (persistent shell objects,
+// libsu-style helpers): the command text passes through write(2) in this
+// process, so /proc/cpuinfo references are rewritten there as well.
+static bool BufHasCpuinfoRef(const char* p, size_t n) {
+    static const char kRef[] = "/proc/cpuinfo";
+    const size_t kl = sizeof(kRef) - 1;
+    if (n < kl) return false;
+    for (size_t i = 0; i + kl <= n; i++) {
+        if (p[i] == '/' && memcmp(p + i, kRef, kl) == 0) return true;
+    }
+    return false;
+}
+
+static std::string ReplaceCpuinfoRefsBuf(const char* p, size_t n, const std::string& fake) {
+    static const char kRef[] = "/proc/cpuinfo";
+    const size_t kl = sizeof(kRef) - 1;
+    std::string out;
+    out.reserve(n + 64);
+    size_t i = 0;
+    while (i < n) {
+        if (i + kl <= n && p[i] == '/' && memcmp(p + i, kRef, kl) == 0) {
+            out.append(fake);
+            i += kl;
+        } else {
+            out.push_back(p[i]);
+            i++;
+        }
+    }
+    return out;
+}
+
+static ssize_t MyWrite(int fd, const void* buf, size_t count) {
+    BYTEHOOK_STACK_SCOPE();
+    if (CpuSpoofActive() && buf != nullptr && count > 0 && count <= 8192 &&
+        BufHasCpuinfoRef((const char*)buf, count)) {
+        const std::string& fake = FakeCpuinfoPath();
+        if (!fake.empty() && WriteFakeCpuinfo(fake.c_str())) {
+            std::string out = ReplaceCpuinfoRefsBuf((const char*)buf, count, fake);
+            ssize_t w = BYTEHOOK_CALL_PREV(MyWrite, fd, out.data(), out.size());
+            if (w >= 0) {
+                Log("native: pipe cpuinfo redirect (%u -> %u bytes)", (unsigned)count,
+                    (unsigned)out.size());
+                return (ssize_t)count;
+            }
+            return w;
+        }
+    }
+    return BYTEHOOK_CALL_PREV(MyWrite, fd, buf, count);
+}
+
 void InstallFsHooks() {
     HookLibcSym("open", (void*)HideOpen);
     HookLibcSym("open64", (void*)HideOpen64);
@@ -1058,7 +1114,8 @@ void InstallCpuDeepHooks() {
     HookLibcSym("posix_spawn", (void*)MyPosixSpawn);
     HookLibcSym("posix_spawnp", (void*)MyPosixSpawnP);
     HookLibcSym("syscall", (void*)MySyscall);
-    Log("native: cpu deep hooks installed (exec/syscall)");
+    HookLibcSym("write", (void*)MyWrite);
+    Log("native: cpu deep hooks installed (exec/syscall/write)");
 }
 
 }  // namespace nvd

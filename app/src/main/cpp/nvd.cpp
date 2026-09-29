@@ -299,6 +299,7 @@ static bool CallerAllow(const char* caller_path_name, void* arg) {
         "libhp",            // emulator shared modules (libhp14_x86_64.so)
         "mumu-configs",
         "libnvd.so",        // ourselves
+        "libbytehook.so",   // bytehook internals (avoid resolver recursion)
     };
     for (size_t i = 0; i < sizeof(kSkip) / sizeof(kSkip[0]); i++) {
         if (strstr(caller_path_name, kSkip[i]) != nullptr) {
