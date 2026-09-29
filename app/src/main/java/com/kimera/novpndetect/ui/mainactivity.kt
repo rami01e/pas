@@ -29,6 +29,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
+import com.kimera.novpndetect.spoof.DeviceCatalog
 import java.security.SecureRandom
 
 /**
@@ -45,6 +46,10 @@ class MainActivity : Activity() {
     private lateinit var abiGroup: RadioGroup
     private lateinit var abiX86: RadioButton
     private lateinit var abiArm64: RadioButton
+    private lateinit var cpuCheck: CheckBox
+    private lateinit var cpuSpinner: Spinner
+    private lateinit var gpuCheck: CheckBox
+    private lateinit var gpuSpinner: Spinner
     private lateinit var wvCheck: CheckBox
     private lateinit var wvEdit: EditText
     private lateinit var gsfCheck: CheckBox
@@ -133,6 +138,28 @@ class MainActivity : Activity() {
             check(abiX86.id)
         }
         content.addView(row(abiCheck, abiGroup, { randomAbi() }, { clearAbi() }))
+
+        // ---------------- CPU ----------------
+        cpuCheck = CheckBox(this).apply { text = "Spoof CPU model" }
+        cpuSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_item,
+                DeviceCatalog.CPUS.map { it.display }
+            ).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+        }
+        content.addView(row(cpuCheck, cpuSpinner, { randomCpu() }, { clearCpu() }))
+
+        // ---------------- GPU ----------------
+        gpuCheck = CheckBox(this).apply { text = "Spoof GPU (OpenGL)" }
+        gpuSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(
+                this@MainActivity,
+                android.R.layout.simple_spinner_item,
+                DeviceCatalog.GPUS.map { "${it.vendor} ${it.renderer}" }
+            ).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+        }
+        content.addView(row(gpuCheck, gpuSpinner, { randomGpu() }, { clearGpu() }))
 
         // ---------------- Widevine ----------------
         wvCheck = CheckBox(this).apply { text = "Spoof Widevine (report L1)" }
@@ -360,8 +387,20 @@ class MainActivity : Activity() {
         return if (i >= 0) i else 0
     }
 
+    private fun cpuIndexFor(v: String): Int =
+        DeviceCatalog.CPUS.indexOfFirst { it.display == v }.coerceAtLeast(0)
+
+    private fun gpuIndexFor(v: String): Int =
+        DeviceCatalog.GPUS.indexOfFirst { it.renderer == v }.coerceAtLeast(0)
+
     private fun sdkValueSelected(): Int =
         sdkValues.getOrElse(sdkSpinner.selectedItemPosition) { currentSdk }
+
+    private fun cpuSelected(): String =
+        DeviceCatalog.CPUS.getOrElse(cpuSpinner.selectedItemPosition) { DeviceCatalog.CPUS[0] }.display
+
+    private fun gpuSelected(): String =
+        DeviceCatalog.GPUS.getOrElse(gpuSpinner.selectedItemPosition) { DeviceCatalog.GPUS[0] }.renderer
 
     // ------------------------------------------------------------------
     // random / clear per feature
@@ -383,6 +422,24 @@ class MainActivity : Activity() {
     private fun clearAbi() {
         abiGroup.check(abiX86.id)
         abiCheck.isChecked = false
+    }
+
+    private fun randomCpu() {
+        cpuSpinner.setSelection(rng.nextInt(DeviceCatalog.CPUS.size))
+    }
+
+    private fun clearCpu() {
+        cpuSpinner.setSelection(0)
+        cpuCheck.isChecked = false
+    }
+
+    private fun randomGpu() {
+        gpuSpinner.setSelection(rng.nextInt(DeviceCatalog.GPUS.size))
+    }
+
+    private fun clearGpu() {
+        gpuSpinner.setSelection(0)
+        gpuCheck.isChecked = false
     }
 
     private fun randomWidevine(): String = buildString {
@@ -421,6 +478,10 @@ class MainActivity : Activity() {
         abiGroup.check(
             if (sp.getString("abi_value", "x86_64") == "arm64-v8a") abiArm64.id else abiX86.id
         )
+        cpuCheck.isChecked = sp.getBoolean("cpu_enabled", false)
+        cpuSpinner.setSelection(cpuIndexFor(sp.getString("cpu_value", "") ?: ""))
+        gpuCheck.isChecked = sp.getBoolean("gpu_enabled", false)
+        gpuSpinner.setSelection(gpuIndexFor(sp.getString("gpu_value", "") ?: ""))
         wvCheck.isChecked = sp.getBoolean("widevine_enabled", false)
         wvEdit.setText(sp.getString("widevine_id", "") ?: "")
         gsfCheck.isChecked = sp.getBoolean("gsf_enabled", false)
@@ -435,6 +496,10 @@ class MainActivity : Activity() {
         "sdk_value" to sdkValueSelected(),
         "abi_enabled" to abiCheck.isChecked,
         "abi_value" to (if (abiArm64.isChecked) "arm64-v8a" else "x86_64"),
+        "cpu_enabled" to cpuCheck.isChecked,
+        "cpu_value" to cpuSelected(),
+        "gpu_enabled" to gpuCheck.isChecked,
+        "gpu_value" to gpuSelected(),
         "widevine_enabled" to wvCheck.isChecked,
         "widevine_id" to wvEdit.text.toString().trim().lowercase(),
         "gsf_enabled" to gsfCheck.isChecked,
@@ -450,6 +515,10 @@ class MainActivity : Activity() {
             "sdk_value" to sp.getInt("sdk_value", currentSdk),
             "abi_enabled" to sp.getBoolean("abi_enabled", false),
             "abi_value" to (sp.getString("abi_value", "x86_64") ?: "x86_64"),
+            "cpu_enabled" to sp.getBoolean("cpu_enabled", false),
+            "cpu_value" to DeviceCatalog.cpu(sp.getString("cpu_value", null)).display,
+            "gpu_enabled" to sp.getBoolean("gpu_enabled", false),
+            "gpu_value" to DeviceCatalog.gpu(sp.getString("gpu_value", null)).renderer,
             "widevine_enabled" to sp.getBoolean("widevine_enabled", false),
             "widevine_id" to (sp.getString("widevine_id", "") ?: ""),
             "gsf_enabled" to sp.getBoolean("gsf_enabled", false),
@@ -480,11 +549,13 @@ class MainActivity : Activity() {
         compatCheck.setOnCheckedChangeListener(checkListener)
         sdkCheck.setOnCheckedChangeListener(checkListener)
         abiCheck.setOnCheckedChangeListener(checkListener)
+        cpuCheck.setOnCheckedChangeListener(checkListener)
+        gpuCheck.setOnCheckedChangeListener(checkListener)
         wvCheck.setOnCheckedChangeListener(checkListener)
         gsfCheck.setOnCheckedChangeListener(checkListener)
 
         abiGroup.setOnCheckedChangeListener { _, _ -> updateDirty() }
-        sdkSpinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+        val spinnerListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?,
                 view: View?,
@@ -496,6 +567,9 @@ class MainActivity : Activity() {
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
         }
+        sdkSpinner.onItemSelectedListener = spinnerListener
+        cpuSpinner.onItemSelectedListener = spinnerListener
+        gpuSpinner.onItemSelectedListener = spinnerListener
     }
 
     private fun saveSpoof() {

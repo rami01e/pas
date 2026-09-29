@@ -25,6 +25,8 @@
 
 #include <jni.h>
 
+#include <string>
+
 #include "bytehook.h"
 
 namespace nvd {
@@ -99,8 +101,13 @@ static bool IsSpoofTarget(const char* name) {
         "ro.product.odm.cpu.abi",       "ro.product.system.cpu.abilist",
         "ro.product.system.cpu.abilist64", "ro.product.system.cpu.abilist32",
     };
+    static const char* const kSoc[] = {
+        "ro.soc.model",
+        "ro.soc.manufacturer",
+    };
     if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0]))) return true;
     if (g_abi_on && NameIn(name, kAbi, sizeof(kAbi) / sizeof(kAbi[0]))) return true;
+    if (CpuSpoofActive() && NameIn(name, kSoc, sizeof(kSoc) / sizeof(kSoc[0]))) return true;
     return false;
 }
 
@@ -113,7 +120,7 @@ static bool SetStr(char* out, size_t cap, size_t* outLen, const char* v) {
 }
 
 bool SpoofActive() {
-    return g_sdk_on || g_abi_on;
+    return g_sdk_on || g_abi_on || CpuSpoofActive();
 }
 
 static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_t cap,
@@ -122,7 +129,7 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
 // Rewrites one "key=value" property pair for build.prop-style files. Returns
 // true with outVal filled when the key must present the spoofed value.
 bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, size_t cap) {
-    if (!key || !outVal || (!g_sdk_on && !g_abi_on)) return false;
+    if (!key || !outVal || (!g_sdk_on && !g_abi_on && !CpuSpoofActive())) return false;
     size_t rl = 0;
     return BuildSpoofValue(key, origVal ? origVal : "", outVal, cap, &rl);
 }
@@ -163,6 +170,14 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
             return SetStr(out, cap, outLen, a ? "arm64" : "x86_64");
         }
     }
+    if (CpuSpoofActive()) {
+        if (strcmp(name, "ro.soc.model") == 0) {
+            return SetStr(out, cap, outLen, CpuSpoofModel().c_str());
+        }
+        if (strcmp(name, "ro.soc.manufacturer") == 0) {
+            return SetStr(out, cap, outLen, CpuSpoofManufacturer().c_str());
+        }
+    }
     return false;
 }
 
@@ -172,7 +187,7 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
 
 int HidePropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
-    if (!name || !value || (!g_sdk_on && !g_abi_on)) {
+    if (!name || !value || (!g_sdk_on && !g_abi_on && !CpuSpoofActive())) {
         return BYTEHOOK_CALL_PREV(HidePropGet, name, value);
     }
     if (!IsSpoofTarget(name)) {
@@ -204,7 +219,7 @@ struct ReadCbCtx {
 
 static void SpoofReadCb(void* cookie, const char* name, const char* value, uint32_t serial) {
     auto* ctx = (ReadCbCtx*)cookie;
-    if (name && (!g_sdk_on && !g_abi_on ? false : IsSpoofTarget(name))) {
+    if (name && ((g_sdk_on || g_abi_on || CpuSpoofActive()) && IsSpoofTarget(name))) {
         char repl[PROP_VALUE_MAX];
         size_t rl = 0;
         if (BuildSpoofValue(name, value ? value : "", repl, sizeof(repl), &rl)) {
@@ -217,7 +232,7 @@ static void SpoofReadCb(void* cookie, const char* name, const char* value, uint3
 
 int HidePropReadCb(const prop_info* pi, PropReadCallback cb, void* cookie) {
     BYTEHOOK_STACK_SCOPE();
-    if (!cb || (!g_sdk_on && !g_abi_on)) {
+    if (!cb || (!g_sdk_on && !g_abi_on && !CpuSpoofActive())) {
         // Spoofing disabled: pass the callback through untouched so the hook
         // is invisible even to aggressive native code.
         return BYTEHOOK_CALL_PREV(HidePropReadCb, pi, cb, cookie);

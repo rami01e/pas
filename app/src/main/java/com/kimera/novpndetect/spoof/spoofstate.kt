@@ -22,4 +22,27 @@ object SpoofState {
     /** GSF android_id, digits (served as the numeric gservices value). */
     @Volatile
     var gsfId: String = ""
+
+    @Volatile
+    var cpuOn: Boolean = false
+
+    /** CPU display name used for /proc/cpuinfo + Build.SOC_* (e.g. "Qualcomm Snapdragon 855"). */
+    @Volatile
+    var cpuDisplay: String = ""
+
+    @Volatile
+    var cpuManufacturer: String = ""
+
+    /** SoC model code (e.g. "SM8550"), used for ro.soc.model / Build.SOC_MODEL. */
+    @Volatile
+    var cpuModel: String = ""
+
+    @Volatile
+    var gpuOn: Boolean = false
+
+    @Volatile
+    var gpuVendor: String = ""
+
+    @Volatile
+    var gpuRenderer: String = ""
 }

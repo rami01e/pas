@@ -309,6 +309,10 @@ static bool CallerAllow(const char* caller_path_name, void* arg) {
     return true;
 }
 
+bool CallerAllowHooks(const char* caller_path_name, void* arg) {
+    return CallerAllow(caller_path_name, arg);
+}
+
 void HookLibcSym(const char* sym, void* proxy) {
     bytehook_stub_t stub = bytehook_hook_partial(CallerAllow, nullptr, "libc.so", sym, proxy,
                                                  OnHooked, nullptr);
@@ -384,6 +388,12 @@ static void* InitWorker(void* arg) {
     Log("native: stage3 iface hooks");
     InstallFsHooks();
     Log("native: stage4 fs hooks");
+    if (GpuSpoofActive()) {
+        InstallGpuHooks();
+        Log("native: stage4b gpu gl hooks");
+    } else {
+        Log("native: gpu spoof off - gl hook skipped");
+    }
     // setsockopt (SO_BINDTODEVICE hiding) is a core hiding primitive and stays
     // on in every mode, including compatibility mode.
     InstallNetHooks();

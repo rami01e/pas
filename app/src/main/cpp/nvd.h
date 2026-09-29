@@ -7,6 +7,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <string>
+
 // ---- LSPosed native module entry ABI (see LSPosed wiki "Native Hook") ----
 
 typedef int (*HookFunType)(void* func, void* replace, void** backup);
@@ -51,6 +53,19 @@ void InstallNetlinkHooks();
 void StartInitWorker();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode,
                     bool nativeEnabled);
+
+// CPU model / GPU (OpenGL) spoof (hide_gpu.cpp)
+void SetCpuGpuConfig(bool cpuOn, const char* cpuDisplay, const char* cpuMfr, const char* cpuModel,
+                     bool gpuOn, const char* gpuVendor, const char* gpuRenderer);
+bool CpuSpoofActive();
+std::string CpuSpoofDisplay();
+std::string CpuSpoofManufacturer();
+std::string CpuSpoofModel();
+bool GpuSpoofActive();
+void InstallGpuHooks();
+
+// Caller filter shared with the GPU hook installer (defined in nvd.cpp).
+bool CallerAllowHooks(const char* caller_path_name, void* arg);
 void InstallIoctlHooks();
 void InstallPropSpoofHooks();
 bool SpoofActive();

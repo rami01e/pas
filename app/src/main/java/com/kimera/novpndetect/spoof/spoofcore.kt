@@ -35,6 +35,16 @@ object SpoofCore {
         nativeEnabled: Boolean
     )
 
+    external fun nativeSetCpuGpu(
+        cpuOn: Boolean,
+        cpuDisplay: String,
+        cpuMfr: String,
+        cpuModel: String,
+        gpuOn: Boolean,
+        gpuVendor: String,
+        gpuRenderer: String
+    )
+
     /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
         Thread({
@@ -79,6 +89,33 @@ object SpoofCore {
             "[NVD] id spoof: widevine=${SpoofState.widevineOn} gsf=${SpoofState.gsfOn}"
         )
 
+        // CPU / GPU spoof values (resolved from the shared catalog; active only
+        // together with the native addon so all surfaces stay consistent).
+        val cpuEntry = DeviceCatalog.cpu(prefs.getString("cpu_value", null))
+        val gpuEntry = DeviceCatalog.gpu(prefs.getString("gpu_value", null))
+        val cpuOnEff = prefs.getBoolean("cpu_enabled", false) && nativeOn
+        val gpuOnEff = prefs.getBoolean("gpu_enabled", false) && nativeOn
+        SpoofState.cpuOn = cpuOnEff
+        SpoofState.cpuDisplay = cpuEntry.display
+        SpoofState.cpuManufacturer = cpuEntry.manufacturer
+        SpoofState.cpuModel = cpuEntry.model
+        SpoofState.gpuOn = gpuOnEff
+        SpoofState.gpuVendor = gpuEntry.vendor
+        SpoofState.gpuRenderer = gpuEntry.renderer
+        Log.i(
+            TAG,
+            "[NVD] cpu/gpu spoof: cpu=$cpuOnEff (${cpuEntry.display}) " +
+                "gpu=$gpuOnEff (${gpuEntry.renderer})"
+        )
+        // Delivered before the config gate so the native worker can decide
+        // whether to install the GL hooks right away.
+        runCatching {
+            nativeSetCpuGpu(
+                cpuOnEff, cpuEntry.display, cpuEntry.manufacturer, cpuEntry.model,
+                gpuOnEff, gpuEntry.vendor, gpuEntry.renderer
+            )
+        }
+
         // Always deliver the config first: it releases the native hook gate
         // (native addon on/off + compatibility mode).
         runCatching {
@@ -107,6 +144,10 @@ object SpoofCore {
             patch(Build.VERSION::class.java, "SDK_INT", sdkVal, "SDK_INT")
             releaseFor(sdkVal)?.let { patch(Build.VERSION::class.java, "RELEASE", it, "RELEASE") }
         }
+        if (cpuOnEff) {
+            patch(Build::class.java, "SOC_MANUFACTURER", cpuEntry.manufacturer, "SOC_MANUFACTURER")
+            patch(Build::class.java, "SOC_MODEL", cpuEntry.model, "SOC_MODEL")
+        }
         if (abiOn) {
             val abi = if (abiArm64) "arm64-v8a" else "x86_64"
             val abi2 = if (abiArm64) "armeabi-v7a" else "x86"
@@ -122,7 +163,7 @@ object SpoofCore {
         }
         Log.i(
             TAG,
-            "[NVD] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn arm64=$abiArm64 compat=$compat java ok=$ok fail=$fail"
+            "[NVD] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn arm64=$abiArm64 cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
         )
     }
 

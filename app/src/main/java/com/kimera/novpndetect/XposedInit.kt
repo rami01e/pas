@@ -7,6 +7,7 @@ import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.util.concurrent.atomic.AtomicBoolean
 import com.kimera.novpndetect.hooks.HookConnectivityManager
 import com.kimera.novpndetect.hooks.HookGsfId
+import com.kimera.novpndetect.hooks.HookGpu
 import com.kimera.novpndetect.hooks.HookLinkProperties
 import com.kimera.novpndetect.hooks.HookMediaDrm
 import com.kimera.novpndetect.hooks.HookNetworkCapabilities
@@ -50,6 +51,7 @@ class XposedInit : XposedModule() {
                 HookLinkProperties(),
                 HookMediaDrm(),
                 HookGsfId(),
+                HookGpu(),
             )
 
         hooks.forEach {

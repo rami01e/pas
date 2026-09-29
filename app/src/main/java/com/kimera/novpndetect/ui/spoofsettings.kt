@@ -23,6 +23,8 @@ object SpoofSettings {
         "native_enabled", "safe_mode",
         "sdk_enabled", "sdk_value",
         "abi_enabled", "abi_value",
+        "cpu_enabled", "cpu_value",
+        "gpu_enabled", "gpu_value",
         "widevine_enabled", "widevine_id",
         "gsf_enabled", "gsf_id"
     )

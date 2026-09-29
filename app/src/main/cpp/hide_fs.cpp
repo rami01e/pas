@@ -181,6 +181,72 @@ static void RewritePropsContent(const std::string& raw, std::string* out) {
 
 static bool ReadWholeFile(const char* path, std::string* out);
 
+// /proc/cpuinfo rewrite: replaces the CPU identity lines (model name / Hardware
+// / vendor_id / x86 flags and other Intel-only keys) with an ARM-style view of
+// the selected CPU, keeping the per-core structure intact.
+static bool CpuinfoKeyMatch(const char* line, const char* key) {
+    size_t kl = strlen(key);
+    if (strncmp(line, key, kl) != 0) return false;
+    const char* p = line + kl;
+    if (*p != ' ' && *p != '\t' && *p != ':') return false;
+    while (*p == ' ' || *p == '\t') p++;
+    return *p == ':';
+}
+
+static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
+    std::string display = CpuSpoofDisplay();
+    bool hardware = false;
+    size_t i = 0;
+    while (i < raw.size()) {
+        size_t j = raw.find('\n', i);
+        j = (j == std::string::npos) ? raw.size() : j + 1;
+        std::string line(raw, i, j - i);
+        const char* c = line.c_str();
+        if (CpuinfoKeyMatch(c, "model name")) {
+            out->append("model name\t: ");
+            out->append(display);
+            out->push_back('\n');
+            i = j;
+            continue;
+        }
+        if (CpuinfoKeyMatch(c, "Hardware")) {
+            hardware = true;
+            out->append("Hardware\t: ");
+            out->append(display);
+            out->push_back('\n');
+            i = j;
+            continue;
+        }
+        if (CpuinfoKeyMatch(c, "flags")) {
+            out->append("Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32\n");
+            i = j;
+            continue;
+        }
+        static const char* const kDrop[] = {
+            "vendor_id",        "cpu family",       "model",
+            "stepping",         "microcode",        "fpu",
+            "fpu_exception",    "cpuid level",      "wp",
+            "bugs",             "clflush size",     "cache_alignment",
+            "address sizes",    "power management", "apicid",
+            "initial apicid",   "vmx flags",
+        };
+        bool skip = false;
+        for (const char* k : kDrop) {
+            if (CpuinfoKeyMatch(c, k)) {
+                skip = true;
+                break;
+            }
+        }
+        if (!skip) out->append(line);
+        i = j;
+    }
+    if (!hardware) {
+        out->append("Hardware\t: ");
+        out->append(display);
+        out->push_back('\n');
+    }
+}
+
 // Returns true when the call was fully handled by the special layer.
 // On NotFound: errno=ENOENT, *fdOut=-1. On EnforceOne: *fdOut is a memfd or -1.
 static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
@@ -194,6 +260,19 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
             if (!ReadWholeFile(path, &raw)) return false;  // real error wins
             std::string out;
             RewritePropsContent(raw, &out);
+            int mfd = CreateMemfdWith(out.data(), out.size(), flags);
+            if (mfd < 0) return false;
+            *fdOut = mfd;
+            return true;
+        }
+        // /proc/cpuinfo: served with an ARM-style model identity so hardware
+        // info readers see the selected CPU instead of the host string.
+        if (CpuSpoofActive() && strcmp(path, "/proc/cpuinfo") == 0 &&
+            (flags & O_ACCMODE) == O_RDONLY) {
+            std::string raw;
+            if (!ReadWholeFile(path, &raw)) return false;
+            std::string out;
+            RewriteCpuinfoContent(raw, &out);
             int mfd = CreateMemfdWith(out.data(), out.size(), flags);
             if (mfd < 0) return false;
             *fdOut = mfd;
