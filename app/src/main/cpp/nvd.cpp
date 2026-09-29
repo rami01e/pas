@@ -265,9 +265,53 @@ static void OnHooked(bytehook_stub_t stub, int status_code, const char* caller_p
         caller_path_name ? caller_path_name : "?", status_code);
 }
 
+// ---------------------------------------------------------------------------
+// caller filter for bytehook: never hook ARM-translated application libraries
+// (they execute through the emulator's native bridge; patching their PLT/GOT
+// with our x86_64 assumptions corrupts translated code) nor the translation /
+// bridge support libraries themselves.
+// ---------------------------------------------------------------------------
+
+static void LogSkipOnce(const char* path) {
+    static char logged[16][160];
+    static int loggedCount = 0;
+    for (int i = 0; i < loggedCount; i++) {
+        if (strncmp(logged[i], path, sizeof(logged[i]) - 1) == 0) return;
+    }
+    if (loggedCount < 16) {
+        strncpy(logged[loggedCount], path, sizeof(logged[0]) - 1);
+        logged[loggedCount][sizeof(logged[0]) - 1] = '\0';
+        loggedCount++;
+    }
+    Log("native: hook skip <- %s", path);
+}
+
+static bool CallerAllow(const char* caller_path_name, void* arg) {
+    (void)arg;
+    if (!caller_path_name) return true;
+    static const char* const kSkip[] = {
+        "!/lib/arm",        // base.apk!/lib/arm64-v8a/... / armeabi-v7a / armeabi
+        "/libnb.so",        // emulator native bridge executor
+        "libnativebridge",  // ART native-bridge client
+        "libhoudini",       // other emulator translators
+        "libndk_translation",
+        "libhp",            // emulator shared modules (libhp14_x86_64.so)
+        "mumu-configs",
+        "libnvd.so",        // ourselves
+    };
+    for (size_t i = 0; i < sizeof(kSkip) / sizeof(kSkip[0]); i++) {
+        if (strstr(caller_path_name, kSkip[i]) != nullptr) {
+            LogSkipOnce(caller_path_name);
+            return false;
+        }
+    }
+    return true;
+}
+
 void HookLibcSym(const char* sym, void* proxy) {
-    bytehook_stub_t stub = bytehook_hook_all("libc.so", sym, proxy, OnHooked, nullptr);
-    if (!stub) Log("native: bytehook_hook_all failed for %s", sym);
+    bytehook_stub_t stub = bytehook_hook_partial(CallerAllow, nullptr, "libc.so", sym, proxy,
+                                                 OnHooked, nullptr);
+    if (!stub) Log("native: bytehook_hook_partial failed for %s", sym);
 }
 
 static void OnModuleLoadedCb(const char* name, void* handle) {
@@ -323,6 +367,10 @@ static void* InitWorker(void* arg) {
     Log("native: stage3 iface hooks");
     InstallFsHooks();
     Log("native: stage4 fs hooks");
+    // setsockopt (SO_BINDTODEVICE hiding) is a core hiding primitive and stays
+    // on in every mode, including compatibility mode.
+    InstallNetHooks();
+    Log("native: stage5 net hooks");
 
     // Give the Kotlin side a moment to deliver the spoof/compat config so
     // compatibility mode can skip the extended hook groups entirely.
@@ -330,12 +378,11 @@ static void* InitWorker(void* arg) {
     bool ready = WaitSpoofConfigReady(2500, &compat);
     Log("native: config ready=%d compat=%d", (int)ready, (int)compat);
     if (!compat) {
-        InstallNetHooks();
         InstallNetlinkHooks();
         InstallIoctlHooks();
         InstallPropSpoofHooks();
     } else {
-        Log("native: compat mode - extended hooks skipped");
+        Log("native: compat mode - extended hooks skipped (netlink/ioctl/props)");
     }
     Log("native: all hooks installed");
     return nullptr;
