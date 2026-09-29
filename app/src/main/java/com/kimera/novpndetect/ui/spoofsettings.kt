@@ -19,7 +19,9 @@ object SpoofSettings {
     const val GROUP = "nvd_spoof"
     private const val LOCAL = "nvd_spoof_local"
 
-    private val KEYS = arrayOf("sdk_enabled", "sdk_value", "abi_enabled", "abi_value", "safe_mode")
+    private val KEYS = arrayOf(
+        "native_enabled", "sdk_enabled", "sdk_value", "abi_enabled", "abi_value", "safe_mode"
+    )
 
     @Volatile
     private var service: XposedService? = null
@@ -56,6 +58,7 @@ object SpoofSettings {
      */
     fun save(
         ctx: Context,
+        nativeOn: Boolean,
         sdkOn: Boolean,
         sdkVal: Int,
         abiOn: Boolean,
@@ -63,6 +66,7 @@ object SpoofSettings {
         safeMode: Boolean
     ): String? {
         load(ctx).edit()
+            .putBoolean("native_enabled", nativeOn)
             .putBoolean("sdk_enabled", sdkOn)
             .putInt("sdk_value", sdkVal)
             .putBoolean("abi_enabled", abiOn)
@@ -80,7 +84,7 @@ object SpoofSettings {
         }
 
         return try {
-            writeRemote(svc, sdkOn, sdkVal, abiOn, abiValue, safeMode)
+            writeRemote(svc, nativeOn, sdkOn, sdkVal, abiOn, abiValue, safeMode)
             null
         } catch (t: Throwable) {
             "Framework write failed: $t"
@@ -89,6 +93,7 @@ object SpoofSettings {
 
     private fun writeRemote(
         svc: XposedService,
+        nativeOn: Boolean,
         sdkOn: Boolean,
         sdkVal: Int,
         abiOn: Boolean,
@@ -96,6 +101,7 @@ object SpoofSettings {
         safeMode: Boolean
     ) {
         svc.getRemotePreferences(GROUP).edit()
+            .putBoolean("native_enabled", nativeOn)
             .putBoolean("sdk_enabled", sdkOn)
             .putInt("sdk_value", sdkVal)
             .putBoolean("abi_enabled", abiOn)
@@ -112,6 +118,7 @@ object SpoofSettings {
         runCatching {
             writeRemote(
                 svc,
+                sp.getBoolean("native_enabled", false),
                 sp.getBoolean("sdk_enabled", false),
                 sp.getInt("sdk_value", 0),
                 sp.getBoolean("abi_enabled", false),

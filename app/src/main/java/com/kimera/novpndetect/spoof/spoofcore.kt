@@ -31,7 +31,8 @@ object SpoofCore {
         sdkVal: Int,
         abiOn: Boolean,
         abiArm64: Boolean,
-        compatMode: Boolean
+        compatMode: Boolean,
+        nativeEnabled: Boolean
     )
 
     /** Called from XposedInit.onPackageReady (once per process). */
@@ -44,8 +45,8 @@ object SpoofCore {
                 null
             }
             if (prefs == null) {
-                // Release the native hook gate with safe defaults.
-                runCatching { nativeSetConfig(false, 0, false, false, true) }
+                // Release the native hook gate with safe defaults (addon off).
+                runCatching { nativeSetConfig(false, 0, false, false, true, false) }
             } else {
                 apply(prefs)
                 try {
@@ -59,6 +60,7 @@ object SpoofCore {
     }
 
     private fun apply(prefs: SharedPreferences) {
+        val nativeOn = prefs.getBoolean("native_enabled", false)
         val sdkOn = prefs.getBoolean("sdk_enabled", false)
         var sdkVal = prefs.getInt("sdk_value", 0)
         val abiOn = prefs.getBoolean("abi_enabled", false)
@@ -67,8 +69,16 @@ object SpoofCore {
         if (sdkVal !in 21..45) sdkVal = 0
         val useSdk = sdkOn && sdkVal != 0
 
-        // Native first: any later Build.<clinit> reads the hooked properties.
-        runCatching { nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiArm64, compat) }
+        // Always deliver the config first: it releases the native hook gate
+        // (native addon on/off + compatibility mode).
+        runCatching {
+            nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiArm64, compat, nativeOn)
+        }
+
+        if (!nativeOn) {
+            Log.i(TAG, "[NVD] spoof: native addon disabled - Java hooks only")
+            return
+        }
 
         var ok = 0
         var fail = 0

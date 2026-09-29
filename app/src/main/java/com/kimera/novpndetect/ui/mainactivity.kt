@@ -39,6 +39,7 @@ class MainActivity : Activity() {
     private lateinit var abiX86: RadioButton
     private lateinit var abiArm64: RadioButton
     private lateinit var compatCheck: CheckBox
+    private lateinit var nativeCheck: CheckBox
     private var busy = false
 
     private val ui = Handler(Looper.getMainLooper())
@@ -67,7 +68,19 @@ class MainActivity : Activity() {
         )
 
         // ---------------- spoof settings ----------------
-        root.addView(sectionLabel("Per-app spoofing (SDK / CPU ABI)", pad))
+        root.addView(sectionLabel("Spoof / native addon", pad))
+
+        nativeCheck = CheckBox(this).apply {
+            text = "Enable native addon (advanced VPN-trace hooks + spoof)"
+            isChecked = false
+        }
+        root.addView(nativeCheck)
+        root.addView(
+            TextView(this).apply {
+                text = "OFF = module works like the original (Java hooks only) and apps load normally. Turn ON when hunting native traces."
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            }
+        )
 
         sdkCheck = CheckBox(this).apply { text = "Spoof Android version (SDK_INT)" }
         sdkEdit = EditText(this).apply {
@@ -205,6 +218,7 @@ class MainActivity : Activity() {
 
     private fun loadSpoofValues() {
         val sp = SpoofSettings.load(this)
+        nativeCheck.isChecked = sp.getBoolean("native_enabled", false)
         sdkCheck.isChecked = sp.getBoolean("sdk_enabled", false)
         val v = sp.getInt("sdk_value", 0)
         if (v in 21..45) sdkEdit.setText(v.toString())
@@ -227,7 +241,8 @@ class MainActivity : Activity() {
         val abiOn = abiCheck.isChecked
         val abiVal = if (abiArm64.isChecked) "arm64-v8a" else "x86_64"
         val err = SpoofSettings.save(
-            this, sdkOn, if (sdkVal > 0) sdkVal else 0, abiOn, abiVal, compatCheck.isChecked
+            this, nativeCheck.isChecked, sdkOn, if (sdkVal > 0) sdkVal else 0, abiOn, abiVal,
+            compatCheck.isChecked
         )
         Toast.makeText(
             this,
@@ -241,7 +256,7 @@ class MainActivity : Activity() {
         sdkCheck.isChecked = false
         abiCheck.isChecked = false
         val err = SpoofSettings.save(
-            this, false, 0, false, "x86_64", compatCheck.isChecked
+            this, nativeCheck.isChecked, false, 0, false, "x86_64", compatCheck.isChecked
         )
         Toast.makeText(
             this,

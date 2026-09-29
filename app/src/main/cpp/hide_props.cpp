@@ -36,7 +36,8 @@ static char g_sdk_release[8] = {0};
 static volatile bool g_abi_on = false;
 static volatile bool g_abi_arm64 = false;
 
-void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode) {
+void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode,
+                    bool nativeEnabled) {
     if (sdkVal < 21 || sdkVal > 45) sdkOn = false;
     g_sdk_on = false;
     g_abi_on = false;
@@ -63,12 +64,11 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool comp
         g_abi_arm64 = abiArm64;
         g_abi_on = true;
     }
-    Log("native: spoof config sdk=%d(%d) abi=%d arm64=%d compat=%d", (int)g_sdk_on, g_sdk_val,
-        (int)g_abi_on, (int)g_abi_arm64, (int)compatMode);
-    // Releases the hook-installation worker; compat mode skips the extended
-    // hook groups (netlink/ioctl/property/uname/cpu) that some heavy apps
-    // dislike, leaving the well-tested iface+fs set in place.
-    SignalSpoofConfigReady(compatMode);
+    Log("native: spoof config sdk=%d(%d) abi=%d arm64=%d compat=%d native=%d", (int)g_sdk_on,
+        g_sdk_val, (int)g_abi_on, (int)g_abi_arm64, (int)compatMode, (int)nativeEnabled);
+    // Releases the hook-installation worker: with the native addon disabled it
+    // installs nothing at all; compat mode skips only the extended groups.
+    SignalSpoofConfigReady(compatMode, nativeEnabled);
 }
 
 static bool NameIn(const char* name, const char* const* list, size_t n) {
@@ -250,9 +250,11 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetConfig(JNIEnv* env, jobject thiz,
                                                             jboolean sdkOn, jint sdkVal,
                                                             jboolean abiOn, jboolean abiArm64,
-                                                            jboolean compatMode) {
+                                                            jboolean compatMode,
+                                                            jboolean nativeEnabled) {
     (void)env;
     (void)thiz;
     nvd::SetSpoofConfig(sdkOn == JNI_TRUE, (int)sdkVal, abiOn == JNI_TRUE,
-                        abiArm64 == JNI_TRUE, compatMode == JNI_TRUE);
+                        abiArm64 == JNI_TRUE, compatMode == JNI_TRUE,
+                        nativeEnabled == JNI_TRUE);
 }

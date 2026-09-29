@@ -327,16 +327,18 @@ static pthread_mutex_t g_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cfg_cv = PTHREAD_COND_INITIALIZER;
 static bool g_cfg_ready = false;
 static bool g_cfg_compat = false;
+static bool g_cfg_native = true;
 
-void SignalSpoofConfigReady(bool compatMode) {
+void SignalSpoofConfigReady(bool compatMode, bool nativeEnabled) {
     pthread_mutex_lock(&g_cfg_mtx);
     g_cfg_compat = compatMode;
+    g_cfg_native = nativeEnabled;
     g_cfg_ready = true;
     pthread_cond_broadcast(&g_cfg_cv);
     pthread_mutex_unlock(&g_cfg_mtx);
 }
 
-bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut) {
+bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut, bool* nativeOut) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     ts.tv_sec += timeoutMs / 1000;
@@ -351,6 +353,7 @@ bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut) {
     }
     bool ready = g_cfg_ready;
     if (compatOut) *compatOut = g_cfg_compat;
+    if (nativeOut) *nativeOut = g_cfg_native;
     pthread_mutex_unlock(&g_cfg_mtx);
     return ready;
 }
@@ -358,6 +361,19 @@ bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut) {
 static void* InitWorker(void* arg) {
     (void)arg;
     Log("native: worker start");
+
+    // The Kotlin side delivers the configuration first: with the native addon
+    // disabled nothing is installed at all (module behaves like the original,
+    // Java-only); compatibility mode skips just the extended hook groups.
+    bool compat = false;
+    bool nativeOn = true;
+    bool ready = WaitSpoofConfigReady(2500, &compat, &nativeOn);
+    Log("native: config ready=%d compat=%d native=%d", (int)ready, (int)compat, (int)nativeOn);
+    if (!nativeOn) {
+        Log("native: addon disabled by user - no hooks installed");
+        return nullptr;
+    }
+
     int rc = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
     Log("native: stage1 bytehook rc=%d version=%s mode=%d", rc, bytehook_get_version(),
         bytehook_get_mode());
@@ -372,11 +388,6 @@ static void* InitWorker(void* arg) {
     InstallNetHooks();
     Log("native: stage5 net hooks");
 
-    // Give the Kotlin side a moment to deliver the spoof/compat config so
-    // compatibility mode can skip the extended hook groups entirely.
-    bool compat = false;
-    bool ready = WaitSpoofConfigReady(2500, &compat);
-    Log("native: config ready=%d compat=%d", (int)ready, (int)compat);
     if (!compat) {
         InstallNetlinkHooks();
         InstallIoctlHooks();
