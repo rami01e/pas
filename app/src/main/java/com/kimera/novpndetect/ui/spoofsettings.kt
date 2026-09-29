@@ -27,7 +27,7 @@ object SpoofSettings {
     private val listener = object : XposedServiceHelper.OnServiceListener {
         override fun onServiceBind(service: XposedService) {
             this@SpoofSettings.service = service
-            syncLocalToRemote(this@SpoofSettings.service)
+            syncLocalToRemote(service)
         }
 
         override fun onServiceDied(service: XposedService) {
