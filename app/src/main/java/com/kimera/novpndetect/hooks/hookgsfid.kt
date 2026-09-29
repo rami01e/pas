@@ -1,10 +1,10 @@
 package com.kimera.novpndetect.hooks
 
-import android.content.CancellationSignal
 import android.content.ContentResolver
 import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Bundle
+import android.os.CancellationSignal
 import android.util.Log
 import io.github.libxposed.api.XposedModule
 import com.kimera.novpndetect.TAG
