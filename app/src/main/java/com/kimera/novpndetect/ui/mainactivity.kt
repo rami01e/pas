@@ -38,6 +38,7 @@ class MainActivity : Activity() {
     private lateinit var abiGroup: RadioGroup
     private lateinit var abiX86: RadioButton
     private lateinit var abiArm64: RadioButton
+    private lateinit var compatCheck: CheckBox
     private var busy = false
 
     private val ui = Handler(Looper.getMainLooper())
@@ -107,14 +108,26 @@ class MainActivity : Activity() {
             }
         )
 
+        compatCheck = CheckBox(this).apply {
+            text = "Compatibility mode (skip extended native hooks)"
+            isChecked = true
+        }
+        root.addView(compatCheck)
         root.addView(
-            button("Save spoof settings") { saveSpoof() }.apply {
-                layoutParams = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                )
+            TextView(this).apply {
+                text = "Recommended ON if any scoped app fails to load. Turn OFF to re-enable full VPN-trace hiding (netlink/ioctl/CPU hooks)."
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             }
         )
+
+        val spoofButtons = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.START
+        }
+        spoofButtons.addView(button("Save") { saveSpoof() })
+        spoofButtons.addView(button("Disable spoofing") { disableSpoof() })
+        spoofButtons.addView(button("Reconnect") { reconnectService() })
+        root.addView(spoofButtons)
         spoofStatus = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setPadding(0, pad / 4, 0, pad / 2)
@@ -153,7 +166,7 @@ class MainActivity : Activity() {
 
         setContentView(root)
 
-        SpoofSettings.ensureListener()
+        SpoofSettings.ensureListener(this)
         loadSpoofValues()
         refreshSpoofStatus()
         loadLogs()
@@ -201,6 +214,7 @@ class MainActivity : Activity() {
         } else {
             abiGroup.check(abiX86.id)
         }
+        compatCheck.isChecked = sp.getBoolean("safe_mode", true)
     }
 
     private fun saveSpoof() {
@@ -212,13 +226,35 @@ class MainActivity : Activity() {
         }
         val abiOn = abiCheck.isChecked
         val abiVal = if (abiArm64.isChecked) "arm64-v8a" else "x86_64"
-        val err = SpoofSettings.save(this, sdkOn, if (sdkVal > 0) sdkVal else 0, abiOn, abiVal)
+        val err = SpoofSettings.save(
+            this, sdkOn, if (sdkVal > 0) sdkVal else 0, abiOn, abiVal, compatCheck.isChecked
+        )
         Toast.makeText(
             this,
             err ?: "Saved \u2713 — takes effect when the target app restarts",
             Toast.LENGTH_LONG
         ).show()
         refreshSpoofStatus()
+    }
+
+    private fun disableSpoof() {
+        sdkCheck.isChecked = false
+        abiCheck.isChecked = false
+        val err = SpoofSettings.save(
+            this, false, 0, false, "x86_64", compatCheck.isChecked
+        )
+        Toast.makeText(
+            this,
+            err ?: "Spoofing disabled \u2713 — restart the scoped apps to apply",
+            Toast.LENGTH_LONG
+        ).show()
+        refreshSpoofStatus()
+    }
+
+    private fun reconnectService() {
+        SpoofSettings.ensureListener(this)
+        refreshSpoofStatus()
+        Toast.makeText(this, "Reconnecting to Vector service\u2026", Toast.LENGTH_SHORT).show()
     }
 
     private fun refreshSpoofStatus() {

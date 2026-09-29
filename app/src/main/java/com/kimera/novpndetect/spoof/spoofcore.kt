@@ -13,10 +13,10 @@ import java.lang.reflect.Field
  * family); this class covers the Java surfaces (android.os.Build fields,
  * os.arch) and pushes the config into the native layer.
  *
- * Ordering matters: the native config is set first so that a later
- * Build.VERSION/Build class initialization (clinit) already computes our
- * spoofed values from the hooked properties. A delayed re-apply then
- * guarantees the final field state.
+ * It also delivers the "compatibility mode" flag: the native worker waits
+ * briefly for this config so compatibility mode can skip the extended hook
+ * groups (netlink / ioctl / properties / uname / cpu) entirely - the set that
+ * heavy apps load best without.
  *
  * Disabled by default; configured from the module GUI through Vector remote
  * preferences (group "nvd_spoof").
@@ -26,13 +26,27 @@ object SpoofCore {
     private const val TAG = "NoVPNDetect"
     const val GROUP = "nvd_spoof"
 
-    external fun nativeSetConfig(sdkOn: Boolean, sdkVal: Int, abiOn: Boolean, abiArm64: Boolean)
+    external fun nativeSetConfig(
+        sdkOn: Boolean,
+        sdkVal: Int,
+        abiOn: Boolean,
+        abiArm64: Boolean,
+        compatMode: Boolean
+    )
 
     /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
         Thread({
-            try {
-                val prefs = module.getRemotePreferences(GROUP)
+            val prefs: SharedPreferences? = try {
+                module.getRemotePreferences(GROUP)
+            } catch (t: Throwable) {
+                Log.i(TAG, "[NVD] spoof: no remote prefs ($t) - defaults")
+                null
+            }
+            if (prefs == null) {
+                // Release the native hook gate with safe defaults.
+                runCatching { nativeSetConfig(false, 0, false, false, true) }
+            } else {
                 apply(prefs)
                 try {
                     Thread.sleep(5000)
@@ -40,8 +54,6 @@ object SpoofCore {
                 }
                 apply(prefs)
                 Log.i(TAG, "[NVD] spoof: remote prefs attached")
-            } catch (t: Throwable) {
-                Log.i(TAG, "[NVD] spoof: not available ($t)")
             }
         }, "nvd-spoof").start()
     }
@@ -51,11 +63,12 @@ object SpoofCore {
         var sdkVal = prefs.getInt("sdk_value", 0)
         val abiOn = prefs.getBoolean("abi_enabled", false)
         val abiArm64 = prefs.getString("abi_value", "x86_64") == "arm64-v8a"
+        val compat = prefs.getBoolean("safe_mode", true)
         if (sdkVal !in 21..45) sdkVal = 0
         val useSdk = sdkOn && sdkVal != 0
 
         // Native first: any later Build.<clinit> reads the hooked properties.
-        runCatching { nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiArm64) }
+        runCatching { nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiArm64, compat) }
 
         var ok = 0
         var fail = 0
@@ -89,7 +102,7 @@ object SpoofCore {
         }
         Log.i(
             TAG,
-            "[NVD] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn arm64=$abiArm64 java ok=$ok fail=$fail"
+            "[NVD] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn arm64=$abiArm64 compat=$compat java ok=$ok fail=$fail"
         )
     }
 

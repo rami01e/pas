@@ -275,6 +275,42 @@ static void OnModuleLoadedCb(const char* name, void* handle) {
     (void)handle;
 }
 
+// ---------------------------------------------------------------------------
+// hook-installation gate (see nvd.h)
+// ---------------------------------------------------------------------------
+
+static pthread_mutex_t g_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_cfg_cv = PTHREAD_COND_INITIALIZER;
+static bool g_cfg_ready = false;
+static bool g_cfg_compat = false;
+
+void SignalSpoofConfigReady(bool compatMode) {
+    pthread_mutex_lock(&g_cfg_mtx);
+    g_cfg_compat = compatMode;
+    g_cfg_ready = true;
+    pthread_cond_broadcast(&g_cfg_cv);
+    pthread_mutex_unlock(&g_cfg_mtx);
+}
+
+bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeoutMs / 1000;
+    ts.tv_nsec += (long)(timeoutMs % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&g_cfg_mtx);
+    while (!g_cfg_ready) {
+        if (pthread_cond_timedwait(&g_cfg_cv, &g_cfg_mtx, &ts) != 0) break;
+    }
+    bool ready = g_cfg_ready;
+    if (compatOut) *compatOut = g_cfg_compat;
+    pthread_mutex_unlock(&g_cfg_mtx);
+    return ready;
+}
+
 static void* InitWorker(void* arg) {
     (void)arg;
     Log("native: worker start");
@@ -287,10 +323,20 @@ static void* InitWorker(void* arg) {
     Log("native: stage3 iface hooks");
     InstallFsHooks();
     Log("native: stage4 fs hooks");
-    InstallNetHooks();
-    InstallNetlinkHooks();
-    InstallIoctlHooks();
-    InstallPropSpoofHooks();
+
+    // Give the Kotlin side a moment to deliver the spoof/compat config so
+    // compatibility mode can skip the extended hook groups entirely.
+    bool compat = false;
+    bool ready = WaitSpoofConfigReady(2500, &compat);
+    Log("native: config ready=%d compat=%d", (int)ready, (int)compat);
+    if (!compat) {
+        InstallNetHooks();
+        InstallNetlinkHooks();
+        InstallIoctlHooks();
+        InstallPropSpoofHooks();
+    } else {
+        Log("native: compat mode - extended hooks skipped");
+    }
     Log("native: all hooks installed");
     return nullptr;
 }

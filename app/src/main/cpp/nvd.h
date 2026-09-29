@@ -50,6 +50,12 @@ void InstallNetHooks();
 void InstallNetlinkHooks();
 void InstallIoctlHooks();
 void InstallPropSpoofHooks();
-void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64);
+void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode);
+
+// Hook-installation gate: the worker waits briefly for the Kotlin side to
+// deliver the spoof/compat configuration so compatibility mode can skip the
+// extended hook groups before they are ever installed.
+void SignalSpoofConfigReady(bool compatMode);
+bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut);
 
 }  // namespace nvd
