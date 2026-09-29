@@ -812,9 +812,13 @@ static std::string BuildFakeCpuinfoPath() {
     static const char* const kBases[] = {"/data/user/0/", "/data/data/"};
     for (const char* b : kBases) {
         std::string dir = std::string(b) + pkg + "/cache";
-        if (syscall(SYS_access, dir.c_str(), W_OK) == 0) {
+#ifdef __NR_faccessat
+        if (syscall(__NR_faccessat, AT_FDCWD, dir.c_str(), W_OK, 0) == 0) {
             return dir + "/.nvd_tmp";
         }
+#else
+        return dir + "/.nvd_tmp";
+#endif
     }
     return std::string();
 }
