@@ -9,10 +9,11 @@ import com.kimera.novpndetect.hookSafe
 import com.kimera.novpndetect.spoof.SpoofState
 
 /**
- * Widevine property spoof: reports security level L1 and a generated
- * deviceUniqueId. This covers the properties that fingerprinting code reads
- * through MediaDrm; it does not create hardware-backed L1 playback (that
- * needs a real L1 CDM), which is not what app/web fingerprinting checks.
+ * Widevine property spoof: reports security level L1, a generated
+ * deviceUniqueId and reference-device version / max HDCP strings. This covers
+ * the properties that fingerprinting code reads through MediaDrm; it does not
+ * create hardware-backed L1 playback (that needs a real L1 CDM), which is not
+ * what app/web fingerprinting checks.
  */
 class HookMediaDrm : XHook {
 
@@ -30,9 +31,25 @@ class HookMediaDrm : XHook {
             val method = MediaDrm::class.java.getMethod("getPropertyString", String::class.java)
             module.hook(method).intercept { chain ->
                 val key = chain.getArg(0) as? String
-                if (SpoofState.widevineOn && key == "securityLevel") {
+                if (!SpoofState.widevineOn) {
+                    chain.proceed()
+                } else if (key == "securityLevel") {
                     module.log(Log.INFO, TAG, "[NVD] MediaDrm securityLevel -> L1")
                     "L1"
+                } else if (key == "maxHdcpLevel") {
+                    module.log(Log.INFO, TAG, "[NVD] MediaDrm maxHdcpLevel -> $MAX_HDCP_LEVEL")
+                    MAX_HDCP_LEVEL
+                } else if (key == "version") {
+                    // Cosmetic alignment: only rewrite values shaped like a
+                    // Widevine version (x.y.z...). ClearKey reports "1.2" and
+                    // stays untouched.
+                    val orig = chain.proceed() as? String
+                    if (orig != null && WIDEVINE_VERSION_LIKE.containsMatchIn(orig)) {
+                        module.log(Log.INFO, TAG, "[NVD] MediaDrm version -> $WIDEVINE_VERSION")
+                        WIDEVINE_VERSION
+                    } else {
+                        orig
+                    }
                 } else {
                     chain.proceed()
                 }
@@ -85,5 +102,12 @@ class HookMediaDrm : XHook {
                 Character.digit(hex[i * 2 + 1], 16)).toByte()
         }
         return out
+    }
+
+    private companion object {
+        /** Mirrors what the reference device (Galaxy A13 class) reports. */
+        const val WIDEVINE_VERSION = "16.1.1@015"
+        const val MAX_HDCP_LEVEL = "HDCP-2.2"
+        val WIDEVINE_VERSION_LIKE = Regex("""^\d+\.\d+\.\d+""")
     }
 }

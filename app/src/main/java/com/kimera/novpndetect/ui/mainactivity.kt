@@ -137,7 +137,7 @@ class MainActivity : Activity() {
         // ---------------- Widevine ----------------
         wvCheck = CheckBox(this).apply { text = "Spoof Widevine (report L1)" }
         wvEdit = EditText(this).apply {
-            hint = "deviceUniqueId (hex)"
+            hint = "deviceUniqueId (hex, 64 chars)"
             setSingleLine(true)
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
@@ -386,7 +386,7 @@ class MainActivity : Activity() {
     }
 
     private fun randomWidevine(): String = buildString {
-        repeat(32) { append("0123456789abcdef"[rng.nextInt(16)]) }
+        repeat(64) { append("0123456789abcdef"[rng.nextInt(16)]) }
     }
 
     private fun clearWidevine() {
@@ -509,7 +509,7 @@ class MainActivity : Activity() {
 
         val wv = wvEdit.text.toString().trim().lowercase()
         if (wvCheck.isChecked && (wv.isEmpty() || wv.length % 2 != 0 || !wv.all { it in "0123456789abcdef" })) {
-            toast("Widevine id must be hex (even number of characters)")
+            toast("Widevine id must be hex, even length (64 chars = 32 bytes)")
             return
         }
         val gsf = gsfEdit.text.toString().trim()
