@@ -27,6 +27,22 @@ class HookMediaDrm : XHook {
         hookSecurityLevel(module)
         hookIsCryptoSchemeSupported(module)
         hookMaxSecurityLevel(module)
+        hookOpenSession(module)
+        val has3 = runCatching {
+            MediaDrm::class.java.getMethod(
+                "isCryptoSchemeSupported", UUID::class.java, String::class.java, Integer.TYPE
+            )
+        }.isSuccess
+        val hasOs = runCatching {
+            MediaDrm::class.java.getMethod("openSession", Integer.TYPE)
+        }.isSuccess
+        val hasMax = runCatching {
+            MediaDrm::class.java.getMethod("getMaxSecurityLevel")
+        }.isSuccess
+        module.log(
+            Log.INFO, TAG,
+            "[PAS] MediaDrm hooks avail: 3arg=$has3 sessionInt=$hasOs maxLevel=$hasMax"
+        )
     }
 
     private fun hookPropertyString(module: XposedModule) {
@@ -82,6 +98,7 @@ class HookMediaDrm : XHook {
             module.hook(method).intercept { chain ->
                 if (SpoofState.widevineOn) {
                     // MediaDrm.SECURITY_LEVEL_HW_SECURE_ALL
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.getSecurityLevel -> 5")
                     5
                 } else {
                     chain.proceed()
@@ -143,11 +160,47 @@ class HookMediaDrm : XHook {
         }
     }
 
+    /**
+     * The browser EME "HW_SECURE_*" path opens sessions at the requested
+     * security level; a software CDM rejects levels above its native one,
+     * which made browser capability checks fail even when the support query
+     * answered yes. Fall back to a default session for levels >= 2.
+     */
+    private fun hookOpenSession(module: XposedModule) {
+        // openSession(int) exists on API 28+; skip silently elsewhere.
+        runCatching { MediaDrm::class.java.getMethod("openSession", Integer.TYPE) }.getOrNull()?.let { method ->
+            module.hook(method).intercept { chain ->
+                val level = (chain.getArg(0) as? Int) ?: 0
+                if (SpoofState.widevineOn && level in 2..5) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.openSession($level) -> default session")
+                    val drm = chain.getThisObject() as? MediaDrm
+                    if (drm != null) {
+                        try {
+                            drm.openSession()
+                        } catch (t: Throwable) {
+                            module.log(Log.INFO, TAG, "[PAS] default openSession failed: $t")
+                            null
+                        }
+                    } else {
+                        chain.proceed()
+                    }
+                } else {
+                    chain.proceed()
+                }
+            }
+        }
+    }
+
     private fun hookMaxSecurityLevel(module: XposedModule) {
         // getMaxSecurityLevel() exists on API 28+; skip silently elsewhere.
         runCatching { MediaDrm::class.java.getMethod("getMaxSecurityLevel") }.getOrNull()?.let { method ->
             module.hook(method).intercept { chain ->
-                if (SpoofState.widevineOn) 5 else chain.proceed()
+                if (SpoofState.widevineOn) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.getMaxSecurityLevel -> 5")
+                    5
+                } else {
+                    chain.proceed()
+                }
             }
         }
     }

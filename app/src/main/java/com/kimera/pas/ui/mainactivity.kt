@@ -7,7 +7,17 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.DialogInterface
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.graphics.Canvas
+import android.net.Uri
+import android.provider.Settings
+import android.text.Editable
+import android.text.TextWatcher
+import android.view.ViewGroup
+import android.widget.BaseAdapter
+import android.widget.CheckBox
+import android.widget.ListView
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -165,7 +175,7 @@ class MainActivity : Activity() {
         titleBox.addView(
             TextView(this).apply {
                 text = "PerAppSpoofer"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
                 typeface = Typeface.MONOSPACE
                 setTypeface(typeface, Typeface.BOLD)
                 setTextColor(cText)
@@ -175,7 +185,7 @@ class MainActivity : Activity() {
         titleBox.addView(
             TextView(this).apply {
                 text = "v${versionName()} \u00b7 KiMeRa"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 typeface = Typeface.MONOSPACE
                 setTextColor(cText3)
                 setPadding(0, dp(3), 0, 0)
@@ -211,7 +221,7 @@ class MainActivity : Activity() {
         content.addView(header)
 
         statusText = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11.5f)
             setTextColor(cText2)
             setPadding(0, dp(4), 0, dp(10))
         }
@@ -349,7 +359,7 @@ class MainActivity : Activity() {
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
             text = "Reload to read the Vector log (root)."
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setTextColor(cText3)
             setPadding(dp(12), dp(2), dp(12), 0)
         }
@@ -371,7 +381,7 @@ class MainActivity : Activity() {
         logsContainer.addView(logButtons)
         val logScroll = ScrollView(this)
         logView = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = Typeface.MONOSPACE
             setTextIsSelectable(true)
             setTextColor(cConsoleTx)
@@ -469,7 +479,7 @@ class MainActivity : Activity() {
         }
 
         override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-            setMeasuredDimension(dp(30), dp(18))
+            setMeasuredDimension(dp(32), dp(20))
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -494,7 +504,7 @@ class MainActivity : Activity() {
                 p.color = cTrackOffBorder
                 canvas.drawRoundRect(rect, r, r, p)
             }
-            val ks = dp(12).toFloat()
+            val ks = dp(14).toFloat()
             val kTop = (h - ks) / 2f
             val kLeft = if (checked) w - dp(2) - ks else dp(2).toFloat()
             p.style = Paint.Style.FILL
@@ -513,7 +523,7 @@ class MainActivity : Activity() {
 
     private fun chipView(text: String, color: Int): TextView = TextView(this).apply {
         this.text = text
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
         typeface = Typeface.DEFAULT_BOLD
         letterSpacing = 0.08f
         setTextColor(color)
@@ -533,7 +543,7 @@ class MainActivity : Activity() {
 
     private fun micro(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
         text = label.uppercase()
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
         typeface = Typeface.DEFAULT_BOLD
         letterSpacing = 0.1f
         setTextColor(cText3)
@@ -551,7 +561,7 @@ class MainActivity : Activity() {
     }
 
     private fun valueTextView(): TextView = TextView(this).apply {
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
         typeface = Typeface.MONOSPACE
         setTextColor(cText3)
         isSingleLine = true
@@ -585,7 +595,7 @@ class MainActivity : Activity() {
         btn.addView(
             TextView(this).apply {
                 text = label.uppercase()
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 typeface = Typeface.DEFAULT_BOLD
                 letterSpacing = 0.08f
                 setTextColor(if (filled) cApplyTx else cText)
@@ -596,7 +606,7 @@ class MainActivity : Activity() {
             btn.addView(
                 TextView(this).apply {
                     text = tag.uppercase()
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 8.5f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
                     letterSpacing = 0.12f
                     setTextColor(if (filled) cApplyTx else cText3)
                 }
@@ -628,7 +638,7 @@ class MainActivity : Activity() {
         hdr.addView(
             TextView(this).apply {
                 text = title.uppercase()
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                 typeface = Typeface.DEFAULT_BOLD
                 letterSpacing = 0.12f
                 setTextColor(cText2)
@@ -688,12 +698,12 @@ class MainActivity : Activity() {
         }
         head.addView(
             sw,
-            LinearLayout.LayoutParams(dp(30), dp(18)).apply { rightMargin = dp(8) }
+            LinearLayout.LayoutParams(dp(32), dp(20)).apply { rightMargin = dp(8) }
         )
         head.addView(
             TextView(this).apply {
                 text = name
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
                 setTextColor(cText)
             },
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -715,7 +725,7 @@ class MainActivity : Activity() {
             addView(
                 TextView(this@MainActivity).apply {
                     text = hint
-                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
                     typeface = Typeface.MONOSPACE
                     setTextColor(cText3)
                 },
@@ -1306,106 +1316,245 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private data class AppEntry(val label: String, val pkg: String, val system: Boolean)
+
     private fun openAddAppsDialog() {
         if (!SpoofSettings.isConnected()) {
             toast("Vector service not connected - reopen the app and retry.")
             return
         }
+        toast("Loading apps\u2026")
         Thread {
             val pm = packageManager
-            val launch = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            val acts = try {
-                pm.queryIntentActivities(launch, 0)
-            } catch (t: Throwable) {
-                emptyList()
-            }
             val scope = SpoofSettings.scopePackages() ?: emptyList()
+            val list = ArrayList<AppEntry>()
             val seen = HashSet<String>()
-            val list = ArrayList<Pair<String, String>>() // label to package
-            for (ai in acts) {
-                val pkg = ai.activityInfo.applicationInfo.packageName
-                if (pkg == packageName || pkg in scope || !seen.add(pkg)) continue
-                val label = try {
-                    ai.loadLabel(pm).toString()
-                } catch (t: Throwable) {
-                    pkg
+            try {
+                for (ai in pm.getInstalledApplications(0)) {
+                    val p = ai.packageName
+                    if (p == packageName || p in scope || !seen.add(p)) continue
+                    val label = try {
+                        ai.loadLabel(pm).toString()
+                    } catch (t: Throwable) {
+                        p
+                    }
+                    val system = (ai.flags and
+                        (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP)) != 0
+                    list.add(AppEntry(label, p, system))
                 }
-                list.add(label to pkg)
+            } catch (t: Throwable) {
+                // keep whatever we managed to collect
             }
-            list.sortBy { it.first.lowercase() }
+            list.sortWith(compareBy({ it.system }, { it.label.lowercase() }))
             runOnUiThread {
-                if (list.isEmpty()) {
-                    toast("No addable apps found")
-                    return@runOnUiThread
-                }
-                val labels = list.map { "${it.first}  (${it.second})" }.toTypedArray()
-                val checked = BooleanArray(list.size)
-                AlertDialog.Builder(this)
-                    .setTitle("Add apps to scope")
-                    .setMultiChoiceItems(labels, checked) { _, which, isChecked ->
-                        checked[which] = isChecked
-                    }
-                    .setPositiveButton("Request add") { _, _ ->
-                        val sel = list.filterIndexed { i, _ -> checked[i] }.map { it.second }
-                        if (sel.isEmpty()) {
-                            toast("Nothing selected")
-                            return@setPositiveButton
-                        }
-                        SpoofSettings.requestScope(sel) { ok, detail ->
-                            runOnUiThread {
-                                toast(
-                                    if (ok) "Scope updated: $detail"
-                                    else "Scope request failed: $detail"
-                                )
-                                refreshScopeChip()
-                            }
-                        }
-                    }
-                    .setNegativeButton("Cancel", null)
-                    .show()
+                if (isFinishing) return@runOnUiThread
+                showAddAppsDialog(list)
             }
         }.start()
     }
 
-    private fun openVectorManager() {
-        val candidates = listOf(
-            "org.lsposed.manager",
-            "io.github.lsposed.manager",
-            "com.vector.manager",
-            "org.lsposed.vector",
-            "io.github.vector"
-        )
-        for (p in candidates) {
-            val i = packageManager.getLaunchIntentForPackage(p)
-            if (i != null) {
-                try {
-                    startActivity(i)
-                    toast("Open the PerAppSpoofer card \u2192 Scope")
-                    return
-                } catch (t: Throwable) {
-                    // try the next candidate
+    private fun showAddAppsDialog(all: List<AppEntry>) {
+        if (all.isEmpty()) {
+            toast("No addable apps found")
+            return
+        }
+        val checked = HashSet<String>()
+        val filtered = ArrayList<AppEntry>()
+        val search = EditText(this).apply {
+            hint = "Search label or package\u2026"
+            setSingleLine(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextColor(cText)
+            setHintTextColor(cText3)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        val listView = ListView(this)
+        val adapter = object : BaseAdapter() {
+            override fun getCount(): Int = filtered.size
+            override fun getItem(position: Int): Any = filtered[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val e = filtered[position]
+                val row = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(14), dp(6), dp(14), dp(6))
                 }
+                val cb = CheckBox(this@MainActivity).apply {
+                    isChecked = checked.contains(e.pkg)
+                    setOnCheckedChangeListener { _, v ->
+                        if (v) checked.add(e.pkg) else checked.remove(e.pkg)
+                    }
+                }
+                val col = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(8), 0, 0, 0)
+                }
+                col.addView(
+                    TextView(this@MainActivity).apply {
+                        text = e.label
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setTextColor(cText)
+                    }
+                )
+                col.addView(
+                    TextView(this@MainActivity).apply {
+                        text = e.pkg + if (e.system) "  \u00b7  system" else ""
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10.5f)
+                        typeface = Typeface.MONOSPACE
+                        setTextColor(cText3)
+                    }
+                )
+                row.addView(cb)
+                row.addView(
+                    col,
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                )
+                row.setOnClickListener { cb.isChecked = !cb.isChecked }
+                return row
             }
         }
-        // Fallback scan: any launchable package whose name mentions lsposed/vector.
+        listView.adapter = adapter
+        fun refilter(q: String) {
+            filtered.clear()
+            val qq = q.trim().lowercase()
+            if (qq.isEmpty()) {
+                filtered.addAll(all)
+            } else {
+                for (e in all) {
+                    if (e.label.lowercase().contains(qq) || e.pkg.contains(qq)) filtered.add(e)
+                }
+            }
+            adapter.notifyDataSetChanged()
+        }
+        refilter("")
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                refilter(s?.toString() ?: "")
+            }
+        })
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(
+            search,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        box.addView(
+            listView,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(400))
+        )
+        AlertDialog.Builder(this)
+            .setTitle("Add apps to scope (${all.size})")
+            .setView(box)
+            .setPositiveButton("Request add") { _, _ ->
+                val sel = checked.toList()
+                if (sel.isEmpty()) {
+                    toast("Nothing selected")
+                    return@setPositiveButton
+                }
+                SpoofSettings.requestScope(sel) { ok, detail ->
+                    runOnUiThread {
+                        toast(
+                            if (ok) "Scope updated: $detail"
+                            else "Scope request failed: $detail"
+                        )
+                        refreshScopeChip()
+                    }
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun openVectorManager() {
+        val pm = packageManager
+        fun launch(pkg: String): Boolean {
+            val i = pm.getLaunchIntentForPackage(pkg) ?: return false
+            return try {
+                startActivity(i)
+                true
+            } catch (t: Throwable) {
+                false
+            }
+        }
+        fun openInfo(pkg: String) {
+            try {
+                startActivity(
+                    Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$pkg")
+                    )
+                )
+                toast("Opened app info - tap Open there for the Scope screen")
+            } catch (t: Throwable) {
+                toast("Vector manager not found - tell me its package name")
+            }
+        }
+        for (p in listOf(
+            "org.lsposed.manager", "io.github.lsposed.manager", "com.vector.manager",
+            "org.lsposed.vector", "io.github.vector"
+        )) {
+            if (launch(p)) {
+                toast("Opening Vector\u2026 scope lives in the module card")
+                return
+            }
+        }
+        // Scan apps by package / label (the manager may use a custom package id).
         try {
-            val pm = packageManager
             for (app in pm.getInstalledApplications(0)) {
                 val pkg = app.packageName
+                if (pkg == packageName) continue
                 val low = pkg.lowercase()
-                if (low.contains("lsposed") || low.contains("vector")) {
-                    val i = pm.getLaunchIntentForPackage(pkg)
-                    if (i != null) {
-                        startActivity(i)
-                        toast("Open the PerAppSpoofer card \u2192 Scope")
-                        return
-                    }
+                val label = try {
+                    app.loadLabel(pm).toString()
+                } catch (t: Throwable) {
+                    ""
+                }
+                val match = low.contains("lsposed") || low.contains("vector") ||
+                    label.contains("vector", true) || label.contains("lsposed", true)
+                if (match && launch(pkg)) {
+                    toast("Opening Vector\u2026 scope lives in the module card")
+                    return
                 }
             }
         } catch (t: Throwable) {
             // fall through
         }
-        toast("Vector manager not found - open your manager app's Scope screen manually.")
+        // Component scan: the manager declares the libxposed framework service.
+        try {
+            for (p in pm.getInstalledPackages(
+                PackageManager.GET_SERVICES or PackageManager.GET_RECEIVERS or PackageManager.GET_PROVIDERS
+            )) {
+                val pkg = p.packageName
+                if (pkg == packageName) continue
+                var hit = false
+                p.services?.forEach { s ->
+                    if (s.name.contains("xposed", true) || s.name.contains("lsposed", true)) hit = true
+                }
+                if (!hit) p.receivers?.forEach { r ->
+                    if (r.name.contains("xposed", true) || r.name.contains("lsposed", true)) hit = true
+                }
+                if (!hit) p.providers?.forEach { pr ->
+                    if (pr.name.contains("xposed", true) || pr.name.contains("lsposed", true)) hit = true
+                }
+                if (hit) {
+                    if (launch(pkg)) {
+                        toast("Opening Vector\u2026 scope lives in the module card")
+                    } else {
+                        openInfo(pkg)
+                    }
+                    return
+                }
+            }
+        } catch (t: Throwable) {
+            // fall through
+        }
+        toast("Vector manager not found - long-press its icon \u2192 App info, and tell me the package name.")
     }
 
     // ------------------------------------------------------------------
@@ -1462,13 +1611,13 @@ class MainActivity : Activity() {
                 val lspd = runSu(
                     "for D in /data/adb/lspd/log /data/adb/vector/log; do " +
                         "cat \$D/modules_*.log \$D/verbose_*.log 2>/dev/null; done " +
-                        "| grep -a PerAppSpoofer | tail -n 600"
+                        "| grep -a PerAppSpoofer | tail -n 900"
                 )
                 if (lspd != null) rootWorks = true
                 if (!lspd.isNullOrBlank()) {
                     out.append("=== LSPosed/Vector log ===\n").append(lspd).append("\n\n")
                 }
-                val lc = runSu("logcat -d -t 4000 | grep -a PerAppSpoofer | tail -n 400")
+                val lc = runSu("logcat -d -t 9000 | grep -a PerAppSpoofer | tail -n 900")
                 if (lc != null) rootWorks = true
                 if (!lc.isNullOrBlank()) {
                     out.append("=== logcat ===\n").append(lc)

@@ -60,6 +60,44 @@ class HookConnectivityManager : XHook {
                 result
             }
         }
+        hookSafe(module, "ConnectivityManager.getLinkProperties") {
+            val m1 = ConnectivityManager::class.java.getMethod("getLinkProperties")
+            module.hook(m1).intercept { chain ->
+                val r = chain.proceed()
+                if (SpoofState.reconOn) {
+                    module.log(Log.INFO, TAG, "ConnectivityManager.getLinkProperties -> $r")
+                }
+                r
+            }
+            val m2 = ConnectivityManager::class.java.getMethod("getLinkProperties", Network::class.java)
+            module.hook(m2).intercept { chain ->
+                val r = chain.proceed()
+                if (SpoofState.reconOn) {
+                    module.log(Log.INFO, TAG, "ConnectivityManager.getLinkProperties(${chain.getArg(0)}) -> $r")
+                }
+                r
+            }
+        }
+        hookSafe(module, "ConnectivityManager.getNetworkInfo(Network)") {
+            val m = ConnectivityManager::class.java.getMethod("getNetworkInfo", Network::class.java)
+            module.hook(m).intercept { chain ->
+                val r = chain.proceed()
+                if (SpoofState.reconOn) {
+                    module.log(Log.INFO, TAG, "ConnectivityManager.getNetworkInfo(${chain.getArg(0)}) -> $r")
+                }
+                r
+            }
+        }
+        hookSafe(module, "ConnectivityManager.getActiveNetworkInfo") {
+            val m = ConnectivityManager::class.java.getMethod("getActiveNetworkInfo")
+            module.hook(m).intercept { chain ->
+                val r = chain.proceed()
+                if (SpoofState.reconOn) {
+                    module.log(Log.INFO, TAG, "ConnectivityManager.getActiveNetworkInfo -> $r")
+                }
+                r
+            }
+        }
     }
 
     private fun hookNetworkInfo(module: XposedModule) {
