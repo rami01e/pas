@@ -27,6 +27,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -55,6 +56,9 @@ static bool AllDigits(const char* s) {
 }
 
 bool IsHiddenIfaceName(const char* name) {
+    // "WebRTC local IP" relaxed mode keeps every interface visible so
+    // browsers can gather local (host) candidates like a clean device.
+    if (WebRtcVisible()) return false;
     if (!name || !*name) return false;
     struct Rule {
         const char* prefix;
@@ -203,6 +207,18 @@ void RefreshHiddenNames(bool force) {
     if (!g_names.empty()) {
         Log("native: hidden interfaces: %zu (first: %s)", g_names.size(), g_names[0].c_str());
     }
+}
+
+static std::atomic<bool> g_webrtc_visible{true};
+
+bool WebRtcVisible() {
+    return g_webrtc_visible.load();
+}
+
+void SetWebRtcVisible(bool on) {
+    g_webrtc_visible.store(on);
+    Log("native: webrtc visible=%d", on ? 1 : 0);
+    RefreshHiddenNames(true);
 }
 
 bool LineContainsHiddenName(const char* line) {

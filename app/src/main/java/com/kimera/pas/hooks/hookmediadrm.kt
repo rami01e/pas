@@ -211,7 +211,10 @@ class HookMediaDrm : XHook {
      */
     private fun hookChromiumBridge(module: XposedModule) {
         val cls = try {
-            Class.forName("org.chromium.media.MediaDrmBridge")
+            Class.forName(
+                "org.chromium.media.MediaDrmBridge", false,
+                com.kimera.pas.pasClassLoader
+            )
         } catch (t: Throwable) {
             null
         }

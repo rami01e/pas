@@ -18,6 +18,10 @@ import com.kimera.pas.hooks.HookRecon
 
 const val TAG = "PerAppSpoofer"
 
+/** App classloader of the scoped package (set from onPackageReady). */
+@Volatile
+var pasClassLoader: ClassLoader? = null
+
 /**
  * libxposed API 101 entry point (Vector 2.2+).
  *
@@ -38,6 +42,7 @@ class XposedInit : XposedModule() {
         if (!hooksInstalled.compareAndSet(false, true)) {
             return
         }
+        pasClassLoader = param.classLoader
         log(Log.INFO, TAG, "[PAS] onPackageReady: ${param.packageName} - installing hooks")
 
         initNativeAddon()

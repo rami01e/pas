@@ -94,6 +94,8 @@ void InstallCpuDeepHooks();
 // module GUI; used to map a target app's detection surface.
 void SetRecon(bool on);
 bool ReconEnabled();
+void SetWebRtcVisible(bool on);
+bool WebRtcVisible();
 void ReconNote(const char* op, const char* detail, long res);
 void InstallReconHooks();
 

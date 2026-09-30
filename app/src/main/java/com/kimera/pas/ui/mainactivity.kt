@@ -115,6 +115,7 @@ class MainActivity : Activity() {
     private lateinit var logsContainer: LinearLayout
     private lateinit var logsStatus: TextView
     private lateinit var logView: TextView
+    private var lastLogText: String = ""
     private lateinit var bottomBar: LinearLayout
 
     private var busy = false
@@ -236,66 +237,6 @@ class MainActivity : Activity() {
             ).apply { bottomMargin = dp(12) }
         )
 
-        // ---------------- SPOOF panel ----------------
-        val (spoofPanel, spoofBody) = panel("Spoof", null, null)
-        addPanel(spoofPanel)
-
-        nativeSw = SwitchView(this)
-        nativeChip = chipView("Off", cText2)
-        toggleRow(
-            spoofBody, true, nativeSw, "Native addon",
-            "Native hook engine \u2014 VPN-trace + device surfaces", nativeChip
-        )
-
-        compatSw = SwitchView(this)
-        compatChip = chipView("On", cAmber)
-        toggleRow(
-            spoofBody, false, compatSw, "Compatibility mode",
-            "Skip extended hook groups (netlink / ioctl / props)", compatChip
-        )
-
-        sdkSw = SwitchView(this)
-        sdkValue = valueTextView()
-        valueRow(spoofBody, false, sdkSw, "Spoof SDK", sdkValue,
-            { pickSdk() }, { randomSdk() }, { clearSdk() })
-
-        abiSw = SwitchView(this)
-        addRow(spoofBody, false) {
-            addAbiHead()
-        }
-
-        cpuSw = SwitchView(this)
-        cpuValue = valueTextView()
-        valueRow(spoofBody, false, cpuSw, "CPU model", cpuValue,
-            { pickCpu() }, { randomCpu() }, { clearCpu() })
-
-        gpuSw = SwitchView(this)
-        gpuValue = valueTextView()
-        valueRow(spoofBody, false, gpuSw, "GPU", gpuValue,
-            { pickGpu() }, { randomGpu() }, { clearGpu() })
-
-        wvSw = SwitchView(this)
-        wvValue = valueTextView()
-        valueRow(spoofBody, false, wvSw, "Widevine", wvValue,
-            { editWidevine() }, { wvEditVal = randomWidevine(); updateWvValue(); updateDirty() },
-            { clearWidevine() })
-
-        gsfSw = SwitchView(this)
-        gsfValue = valueTextView()
-        valueRow(spoofBody, false, gsfSw, "GSF ID", gsfValue,
-            { editGsf() }, { gsfEditVal = randomGsf(); updateGsfValue(); updateDirty() },
-            { clearGsf() })
-
-        // ---------------- NETWORK panel ----------------
-        val (netPanel, netBody) = panel("Network", null, null)
-        addPanel(netPanel)
-        webrtcSw = SwitchView(this)
-        webrtcChip = chipView("Visible", cCyan)
-        toggleRow(
-            netBody, true, webrtcSw, "WebRTC local IP",
-            "Browsers gather local candidates \u2014 realistic device view", webrtcChip
-        )
-
         // ---------------- SCOPE panel ----------------
         scopeChip = chipView("\u2014", cText2)
         val (scopePanel, scopeBody) = panel("Scope", scopeChip, null)
@@ -331,13 +272,75 @@ class MainActivity : Activity() {
             )
         }
 
+        // ---------------- NATIVE panel ----------------
+        val (spoofPanel, spoofBody) = panel("Native", null, null)
+        addPanel(spoofPanel)
+
+        nativeSw = SwitchView(this)
+        nativeChip = chipView("Off", cText2)
+        toggleRow(
+            spoofBody, true, nativeSw, "Native addon",
+            "Native hook engine \u2014 VPN-trace + device surfaces", nativeChip
+        )
+
+        sdkSw = SwitchView(this)
+        sdkValue = valueTextView()
+        valueRow(spoofBody, false, sdkSw, "Spoof SDK", sdkValue,
+            { pickSdk() }, { randomSdk() }, { clearSdk() })
+
+        abiSw = SwitchView(this)
+        addRow(spoofBody, false) {
+            addAbiHead()
+        }
+
+        cpuSw = SwitchView(this)
+        cpuValue = valueTextView()
+        valueRow(spoofBody, false, cpuSw, "CPU model", cpuValue,
+            { pickCpu() }, { randomCpu() }, { clearCpu() })
+
+        gpuSw = SwitchView(this)
+        gpuValue = valueTextView()
+        valueRow(spoofBody, false, gpuSw, "GPU", gpuValue,
+            { pickGpu() }, { randomGpu() }, { clearGpu() })
+
+        webrtcSw = SwitchView(this)
+        webrtcChip = chipView("Visible", cCyan)
+        toggleRow(
+            spoofBody, false, webrtcSw, "WebRTC local IP",
+            "Loosens interface hiding so browsers can gather local candidates", webrtcChip
+        )
+
+        // ---------------- JAVA panel ----------------
+        val (javaPanel, javaBody) = panel("Java", null, null)
+        addPanel(javaPanel)
+
+        wvSw = SwitchView(this)
+        wvValue = valueTextView()
+        valueRow(javaBody, true, wvSw, "Widevine", wvValue,
+            { editWidevine() }, { wvEditVal = randomWidevine(); updateWvValue(); updateDirty() },
+            { clearWidevine() })
+
+        gsfSw = SwitchView(this)
+        gsfValue = valueTextView()
+        valueRow(javaBody, false, gsfSw, "GSF ID", gsfValue,
+            { editGsf() }, { gsfEditVal = randomGsf(); updateGsfValue(); updateDirty() },
+            { clearGsf() })
+
         // ---------------- DIAGNOSTICS panel ----------------
         val (diagPanel, diagBody) = panel("Diagnostics", null, null)
         addPanel(diagPanel)
+
+        compatSw = SwitchView(this)
+        compatChip = chipView("On", cAmber)
+        toggleRow(
+            diagBody, true, compatSw, "Compatibility mode",
+            "Skip extended hook groups (netlink / ioctl / props)", compatChip
+        )
+
         reconSw = SwitchView(this)
         reconChip = chipView("Off", cText2)
         toggleRow(
-            diagBody, true, reconSw, "Recon logging",
+            diagBody, false, reconSw, "Recon logging",
             "Verbose probe capture for detection mapping", reconChip
         )
 
@@ -370,13 +373,15 @@ class MainActivity : Activity() {
         }
         logButtons.addView(micro("Reload") { loadLogs() })
         logButtons.addView(micro("Copy") { copyLogs() })
-        logButtons.addView(micro("Clear") { logView.text = "" })
+        logButtons.addView(micro("Clear") { lastLogText = ""; logView.text = "" })
         logsContainer.addView(logButtons)
-        val logScroll = ScrollView(this)
+        val logScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = true
+            isFillViewport = true
+        }
         logView = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = Typeface.MONOSPACE
-            setTextIsSelectable(true)
             setTextColor(cConsoleTx)
             setBackgroundColor(cConsoleBg)
             setPadding(dp(10), dp(8), dp(10), dp(8))
@@ -386,7 +391,7 @@ class MainActivity : Activity() {
             logScroll,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(200)
+                dp(240)
             ).apply { topMargin = dp(4) }
         )
 
@@ -950,12 +955,20 @@ class MainActivity : Activity() {
     private fun buildSdkOptions() {
         sdkValues.clear()
         sdkLabels.clear()
-        sdkValues.add(currentSdk)
-        sdkLabels.add("SDK $currentSdk (current)")
+        var defaultAdded = false
         for (v in 32..37) {
-            if (v == currentSdk) continue
             sdkValues.add(v)
-            sdkLabels.add("SDK $v (Android ${androidVersionFor(v)})")
+            if (v == currentSdk) {
+                sdkLabels.add("SDK $v (Default)")
+                defaultAdded = true
+            } else {
+                sdkLabels.add("SDK $v (Android ${androidVersionFor(v)})")
+            }
+        }
+        if (!defaultAdded) {
+            // System SDK outside the catalog range - keep it selectable.
+            sdkValues.add(currentSdk)
+            sdkLabels.add("SDK $currentSdk (Default)")
         }
     }
 
@@ -1559,9 +1572,20 @@ class MainActivity : Activity() {
                     rootWorks -> "Root OK, but no [PerAppSpoofer] entries found yet. Use Reload after opening a scoped app."
                     else -> "Root unavailable or denied. Grant root to this app in KernelSU, then Reload.\n" + text
                 }
-                logView.text = text
+                renderLogs(text)
             }
         }.start()
+    }
+
+    private fun renderLogs(raw: String) {
+        lastLogText = raw
+        val sb = StringBuilder()
+        var n = 0
+        for (line in raw.split("\n")) {
+            n++
+            sb.append(String.format("%4d \u2502 ", n)).append(line).append('\n')
+        }
+        logView.text = sb.toString()
     }
 
     private fun runSu(cmd: String): String? = try {
@@ -1575,7 +1599,7 @@ class MainActivity : Activity() {
 
     private fun copyLogs() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("PerAppSpoofer logs", logView.text))
+        cm.setPrimaryClip(ClipData.newPlainText("PerAppSpoofer logs", lastLogText.ifEmpty { logView.text }))
         toast("Copied")
     }
 }

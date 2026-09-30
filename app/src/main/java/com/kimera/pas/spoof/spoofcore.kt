@@ -63,6 +63,8 @@ object SpoofCore {
 
     external fun nativeSetRecon(reconOn: Boolean)
 
+    external fun nativeSetWebrtc(webrtcVisible: Boolean)
+
     /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
         Thread({
@@ -118,6 +120,7 @@ object SpoofCore {
         // "WebRTC local IP" option (default: visible/realistic). Consumed live
         // by the network-interface hooks.
         SpoofState.webrtcLocalIp = prefs.getBoolean("webrtc_localip", true)
+        runCatching { nativeSetWebrtc(SpoofState.webrtcLocalIp) }
         Log.i(TAG, "[PAS] net: webrtc local ip = ${SpoofState.webrtcLocalIp}")
 
         // CPU / GPU spoof values (resolved from the shared catalog; active only
