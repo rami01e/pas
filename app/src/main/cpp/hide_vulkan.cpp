@@ -52,28 +52,69 @@ static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
     p->apiVersion = (uint32_t)GpuSpoofApiVersion();
 }
 
+// Diagnostics: which Vulkan structure-type names the build's headers expose as
+// macros. Modern Vulkan headers declare them as enum members only, so classic
+// #ifdef guards are always false and would silently compile patches out.
+static void LogVkHeaderProbes() {
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES
+    Log("native: vk probe drvprops=macro");
+#else
+    Log("native: vk probe drvprops=missing");
+#endif
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
+    Log("native: vk probe vk12feat=macro");
+#else
+    Log("native: vk probe vk12feat=missing");
+#endif
+#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES
+    Log("native: vk probe vk13feat=macro");
+#else
+    Log("native: vk probe vk13feat=missing");
+#endif
+}
+
+// VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES (1000196000, Vulkan 1.2)
+// is matched by value and patched through a local ABI layout
+// (driverName / driverInfo are 256 bytes each), so the driver row is fixed
+// regardless of how old or new the build's Vulkan headers are.
+static volatile bool g_drvprops_logged = false;
+
+static const uint32_t kNvdDriverPropsSType = 1000196000u;
+
+struct NvdDriverProps {
+    VkStructureType sType;
+    void* pNext;
+    uint32_t driverID;
+    char driverName[256];
+    char driverInfo[256];
+    uint8_t conformance[4];
+};
+
+static void PatchDriverPropsNode(void* node) {
+    if (node == nullptr || !GpuSpoofActive()) return;
+    auto* d = (NvdDriverProps*)node;
+    snprintf(d->driverName, sizeof(d->driverName), "%s", GpuSpoofDriverName().c_str());
+    snprintf(d->driverInfo, sizeof(d->driverInfo), "%s", GpuSpoofDriverInfo().c_str());
+    d->conformance[0] = 1;
+    d->conformance[1] = 3;
+    d->conformance[2] = 1;
+    d->conformance[3] = 0;
+    if (!g_drvprops_logged) {
+        g_drvprops_logged = true;
+        Log("native: vulkan driverprops patched");
+    }
+}
+
 static void PatchProps2(VkPhysicalDeviceProperties2* out) {
     if (!out || !GpuSpoofActive()) return;
     PatchCoreProps(&out->properties);
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES
     int guard = 0;
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
          s = s->pNext, guard++) {
-        if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES) {
-            auto* d = (VkPhysicalDeviceDriverProperties*)s;
-            snprintf(d->driverName, sizeof(d->driverName), "%s", GpuSpoofDriverName().c_str());
-            snprintf(d->driverInfo, sizeof(d->driverInfo), "%s", GpuSpoofDriverInfo().c_str());
-            d->conformanceVersion.major = 1;
-            d->conformanceVersion.minor = 3;
-            d->conformanceVersion.subminor = 1;
-            d->conformanceVersion.patch = 0;
-            if (!g_drvprops_logged) {
-                g_drvprops_logged = true;
-                Log("native: vulkan driverprops patched");
-            }
+        if ((uint32_t)s->sType == kNvdDriverPropsSType) {
+            PatchDriverPropsNode((void*)s);
         }
     }
-#endif
 }
 
 static void PatchFeatures(VkPhysicalDeviceFeatures* f) {
@@ -87,18 +128,14 @@ static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
     int guard = 0;
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
          s = s->pNext, guard++) {
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
         if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
             ((VkPhysicalDeviceVulkan12Features*)s)->descriptorIndexing = VK_FALSE;
         }
-#endif
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES
         if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
             auto* f13 = (VkPhysicalDeviceVulkan13Features*)s;
             f13->dynamicRendering = VK_TRUE;
             f13->synchronization2 = VK_TRUE;
         }
-#endif
     }
 }
 
@@ -227,7 +264,6 @@ typedef void* (*NvdGipaFn)(VkInstance instance, const char* name);
 
 static void* g_real_gipa = nullptr;
 static volatile unsigned g_chain_logged = 0;
-static volatile bool g_drvprops_logged = false;
 
 enum VkTargetId {
     VK_T_PROP = 0,
@@ -441,6 +477,7 @@ static void OnVkHooked(bytehook_stub_t stub, int status_code, const char* caller
 }
 
 void InstallVulkanHooks() {
+    LogVkHeaderProbes();
     struct HookSpec {
         const char* sym;
         void* fn;
