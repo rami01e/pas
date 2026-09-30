@@ -15,7 +15,7 @@
 // Config values are written once, early, from the module thread; the hot paths
 // read plain flags/arrays (same style as hide_props.cpp).
 
-#include "nvd.h"
+#include "pas.h"
 
 #include <jni.h>
 #include <stdio.h>
@@ -25,7 +25,7 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 static volatile bool g_cpu_on = false;
 static char g_cpu_display[192] = {0};
@@ -180,9 +180,9 @@ std::string GpuSpoofDriverInfo() {
 // resolution. Resolver results are bytehook-free representatives because
 // those pointers are called directly (outside bytehook frames).
 
-typedef void* (*NvdEglGpaFn)(const char*);
-typedef const unsigned char* (*NvdGlGetStringFn)(unsigned int);
-typedef const unsigned char* (*NvdGlGetStringiFn)(unsigned int, unsigned int);
+typedef void* (*PasEglGpaFn)(const char*);
+typedef const unsigned char* (*PasGlGetStringFn)(unsigned int);
+typedef const unsigned char* (*PasGlGetStringiFn)(unsigned int, unsigned int);
 
 static void* volatile g_real_gl_get_string = nullptr;
 static void* volatile g_real_gl_get_stringi = nullptr;
@@ -251,7 +251,7 @@ static const unsigned char* RepGlGetString(unsigned int name) {
     bool spoof = SpoofGlName(name, &spoofed);
     DiagGlStr("glgs", name, spoof ? 1 : 0);
     if (spoof) return spoofed;
-    auto real = (NvdGlGetStringFn)g_real_gl_get_string;
+    auto real = (PasGlGetStringFn)g_real_gl_get_string;
     return real ? real(name) : nullptr;
 }
 
@@ -260,7 +260,7 @@ static const unsigned char* RepGlGetStringi(unsigned int name, unsigned int inde
     bool spoof = index == 0 && SpoofGlName(name, &spoofed);
     DiagGlStr("glgsi", name, spoof ? 1 : 0);
     if (spoof) return spoofed;
-    auto real = (NvdGlGetStringiFn)g_real_gl_get_stringi;
+    auto real = (PasGlGetStringiFn)g_real_gl_get_stringi;
     return real ? real(name, index) : nullptr;
 }
 
@@ -294,14 +294,14 @@ static void* RepEglGetProcAddress(const char* name) {
     if (name != nullptr) GpuDiag("eglgpa", name);
     if (g_gpu_on && name != nullptr) {
         if (strcmp(name, "glGetString") == 0) {
-            auto real = (NvdEglGpaFn)g_real_egl_gpa;
+            auto real = (PasEglGpaFn)g_real_egl_gpa;
             void* r = real ? real(name) : nullptr;
             if (r != nullptr) g_real_gl_get_string = r;
             GlChainLog("glGetString", "eglGetProcAddress");
             return (void*)RepGlGetString;
         }
         if (strcmp(name, "glGetStringi") == 0) {
-            auto real = (NvdEglGpaFn)g_real_egl_gpa;
+            auto real = (PasEglGpaFn)g_real_egl_gpa;
             void* r = real ? real(name) : nullptr;
             if (r != nullptr) g_real_gl_get_stringi = r;
             GlChainLog("glGetStringi", "eglGetProcAddress");
@@ -311,7 +311,7 @@ static void* RepEglGetProcAddress(const char* name) {
             return (void*)RepEglGetProcAddress;
         }
     }
-    auto real = (NvdEglGpaFn)g_real_egl_gpa;
+    auto real = (PasEglGpaFn)g_real_egl_gpa;
     return real ? real(name) : nullptr;
 }
 
@@ -406,10 +406,10 @@ void InstallGpuHooks() {
     Log("native: gpu hook eglGetProcAddress stub=%d", stubEgl != nullptr);
 }
 
-}  // namespace nvd
+}  // namespace pas
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
                                                          jboolean cpuOn, jstring cpuDisplay,
                                                          jstring cpuMfr, jstring cpuModel,
                                                          jstring cpuPart, jstring cpuInfoModel,
@@ -430,13 +430,13 @@ Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject th
     std::string infoModel = toStr(cpuInfoModel);
     std::string features = toStr(cpuFeatures);
     std::string hwLine = toStr(cpuHwLine);
-    nvd::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
+    pas::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
                       infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz,
                       hwLine.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
                                                          jboolean gpuOn, jstring gpuVendor,
                                                          jstring gpuRenderer, jstring gpuGlVersion,
                                                          jlong vendorId, jlong deviceId,
@@ -455,7 +455,7 @@ Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject th
     std::string glVersion = toStr(gpuGlVersion);
     std::string dName = toStr(driverName);
     std::string dInfo = toStr(driverInfo);
-    nvd::SetGpuConfig(gpuOn == JNI_TRUE, vendor.c_str(), renderer.c_str(), glVersion.c_str(),
+    pas::SetGpuConfig(gpuOn == JNI_TRUE, vendor.c_str(), renderer.c_str(), glVersion.c_str(),
                       (unsigned long long)vendorId, (unsigned long long)deviceId,
                       (unsigned long long)driverVersion, (unsigned long long)apiVersion,
                       dName.c_str(), dInfo.c_str());

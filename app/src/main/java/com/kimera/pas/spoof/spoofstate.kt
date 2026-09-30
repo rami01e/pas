@@ -1,4 +1,4 @@
-package com.kimera.novpndetect.spoof
+package com.kimera.pas.spoof
 
 /**
  * Live spoof state read by the Java hooks (Widevine DRM / GSF ID).

@@ -1,4 +1,4 @@
-package com.kimera.novpndetect
+package com.kimera.pas
 
 import android.util.Log
 import io.github.libxposed.api.XposedModule

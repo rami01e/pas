@@ -1,4 +1,4 @@
-// NoVPNDetect native layer (libnvd.so)
+// PerAppSpoofer native layer (libpas.so)
 //
 // Hides VPN (tun0-style) interfaces from the scoped app process on all
 // supported ABIs, including x86_64 emulators. PLT/GOT hooking is provided by
@@ -13,7 +13,7 @@
 //  - The hidden-interface list is read directly from /proc/net/dev (plus
 //    /sys/class/net/<name>/ifindex) via raw syscalls.
 
-#include "nvd.h"
+#include "pas.h"
 
 #include <android/log.h>
 #include <errno.h>
@@ -33,12 +33,12 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 void Log(const char* fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    __android_log_vprint(ANDROID_LOG_INFO, "NoVPNDetect", fmt, ap);
+    __android_log_vprint(ANDROID_LOG_INFO, "PerAppSpoofer", fmt, ap);
     va_end(ap);
 }
 
@@ -305,7 +305,7 @@ static bool CallerAllow(const char* caller_path_name, void* arg) {
         "libndk_translation",
         "libhp",            // emulator shared modules (libhp14_x86_64.so)
         "mumu-configs",
-        "libnvd.so",        // ourselves
+        "libpas.so",        // ourselves
         "libbytehook.so",   // bytehook internals (avoid resolver recursion)
     };
     for (size_t i = 0; i < sizeof(kSkip) / sizeof(kSkip[0]); i++) {
@@ -338,7 +338,7 @@ static void OnModuleLoadedCb(const char* name, void* handle) {
 }
 
 // ---------------------------------------------------------------------------
-// hook-installation gate (see nvd.h)
+// hook-installation gate (see pas.h)
 // ---------------------------------------------------------------------------
 
 static pthread_mutex_t g_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
@@ -463,7 +463,7 @@ void StartInitWorker() {
     pthread_once(&once, SpawnInitWorker);
 }
 
-}  // namespace nvd
+}  // namespace pas
 
 // ---------------------------------------------------------------------------
 // Entry points. JNI_OnLoad is the real entry now: the library is loaded
@@ -478,15 +478,15 @@ extern "C" __attribute__((visibility("default"))) __attribute__((used)) jint JNI
 JNI_OnLoad(JavaVM* vm, void* reserved) {
     (void)vm;
     (void)reserved;
-    nvd::Log("native: JNI_OnLoad - starting worker thread");
-    nvd::StartInitWorker();
+    pas::Log("native: JNI_OnLoad - starting worker thread");
+    pas::StartInitWorker();
     return JNI_VERSION_1_6;
 }
 
 extern "C" __attribute__((visibility("default"))) __attribute__((used))
 NativeOnModuleLoaded native_init(const NativeAPIEntries* entries) {
     (void)entries;
-    nvd::Log("native: native_init entry - starting worker thread");
-    nvd::StartInitWorker();
-    return nvd::OnModuleLoadedCb;
+    pas::Log("native: native_init entry - starting worker thread");
+    pas::StartInitWorker();
+    return pas::OnModuleLoadedCb;
 }

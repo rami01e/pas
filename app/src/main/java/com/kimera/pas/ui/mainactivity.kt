@@ -1,4 +1,4 @@
-package com.kimera.novpndetect.ui
+package com.kimera.pas.ui
 
 import android.app.Activity
 import android.content.ClipData
@@ -29,7 +29,7 @@ import android.widget.ScrollView
 import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
-import com.kimera.novpndetect.spoof.DeviceCatalog
+import com.kimera.pas.spoof.DeviceCatalog
 import java.security.SecureRandom
 
 /**
@@ -92,7 +92,7 @@ class MainActivity : Activity() {
 
         content.addView(
             TextView(this).apply {
-                text = "NoVPNDetect ${versionName()}"
+                text = "PerAppSpoofer v${versionName()} by KiMeRa"
                 setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
                 setTypeface(typeface, Typeface.BOLD)
             }
@@ -653,13 +653,13 @@ class MainActivity : Activity() {
                 val lspd = runSu(
                     "for D in /data/adb/lspd/log /data/adb/vector/log; do " +
                         "cat \$D/modules_*.log \$D/verbose_*.log 2>/dev/null; done " +
-                        "| grep -a NoVPNDetect | tail -n 600"
+                        "| grep -a PerAppSpoofer | tail -n 600"
                 )
                 if (lspd != null) rootWorks = true
                 if (!lspd.isNullOrBlank()) {
                     out.append("=== LSPosed/Vector log ===\n").append(lspd).append("\n\n")
                 }
-                val lc = runSu("logcat -d -t 4000 | grep -a NoVPNDetect | tail -n 400")
+                val lc = runSu("logcat -d -t 4000 | grep -a PerAppSpoofer | tail -n 400")
                 if (lc != null) rootWorks = true
                 if (!lc.isNullOrBlank()) {
                     out.append("=== logcat ===\n").append(lc)
@@ -672,7 +672,7 @@ class MainActivity : Activity() {
                 busy = false
                 status.text = when {
                     rootWorks && text.isNotBlank() -> "Loaded (root OK). Latest entries below."
-                    rootWorks -> "Root OK, but no [NoVPNDetect] entries found yet. Use Reload after opening a scoped app."
+                    rootWorks -> "Root OK, but no [PerAppSpoofer] entries found yet. Use Reload after opening a scoped app."
                     else -> "Root unavailable or denied. Grant root to this app in KernelSU, then Reload.\n" + text
                 }
                 logView.text = text
@@ -691,7 +691,7 @@ class MainActivity : Activity() {
 
     private fun copyLogs() {
         val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("NoVPNDetect logs", logView.text))
+        cm.setPrimaryClip(ClipData.newPlainText("PerAppSpoofer logs", logView.text))
         toast("Copied")
     }
 }

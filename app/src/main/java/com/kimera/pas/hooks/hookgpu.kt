@@ -1,13 +1,13 @@
-package com.kimera.novpndetect.hooks
+package com.kimera.pas.hooks
 
 import android.opengl.GLES10
 import android.opengl.GLES20
 import android.util.Log
 import io.github.libxposed.api.XposedModule
-import com.kimera.novpndetect.TAG
-import com.kimera.novpndetect.XHook
-import com.kimera.novpndetect.hookSafe
-import com.kimera.novpndetect.spoof.SpoofState
+import com.kimera.pas.TAG
+import com.kimera.pas.XHook
+import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 
 /**
  * GPU spoof (Java path): replaces the GL_VENDOR / GL_RENDERER / GL_VERSION
@@ -33,13 +33,13 @@ class HookGpu : XHook {
                 if (!SpoofState.gpuOn) {
                     chain.proceed()
                 } else if (name == GL_VENDOR) {
-                    module.log(Log.INFO, TAG, "[NVD] GL_VENDOR -> ${SpoofState.gpuVendor}")
+                    module.log(Log.INFO, TAG, "[PAS] GL_VENDOR -> ${SpoofState.gpuVendor}")
                     SpoofState.gpuVendor
                 } else if (name == GL_RENDERER) {
-                    module.log(Log.INFO, TAG, "[NVD] GL_RENDERER -> ${SpoofState.gpuRenderer}")
+                    module.log(Log.INFO, TAG, "[PAS] GL_RENDERER -> ${SpoofState.gpuRenderer}")
                     SpoofState.gpuRenderer
                 } else if (name == GL_VERSION && SpoofState.gpuGlVersion.isNotEmpty()) {
-                    module.log(Log.INFO, TAG, "[NVD] GL_VERSION -> ${SpoofState.gpuGlVersion}")
+                    module.log(Log.INFO, TAG, "[PAS] GL_VERSION -> ${SpoofState.gpuGlVersion}")
                     SpoofState.gpuGlVersion
                 } else {
                     chain.proceed()

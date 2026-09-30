@@ -7,7 +7,7 @@
 // hidden (VPN) interfaces or VPN policy tables so the netlink view matches
 // every other hooked path (getifaddrs, /proc/net/*, sysfs, if_indextoname).
 
-#include "nvd.h"
+#include "pas.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -22,7 +22,7 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 #ifndef NETLINK_ROUTE
 #define NETLINK_ROUTE 0
@@ -266,4 +266,4 @@ void InstallNetlinkHooks() {
     HookLibcSym("recvmsg", (void*)HideRecvMsg);
 }
 
-}  // namespace nvd
+}  // namespace pas

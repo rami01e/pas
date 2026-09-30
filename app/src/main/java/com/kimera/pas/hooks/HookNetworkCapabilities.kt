@@ -1,13 +1,13 @@
-package com.kimera.novpndetect.hooks
+package com.kimera.pas.hooks
 
 import android.net.NetworkCapabilities
 import android.util.Log
 import io.github.libxposed.api.XposedModule
 import java.net.NetworkInterface
 import kotlin.collections.iterator
-import com.kimera.novpndetect.TAG
-import com.kimera.novpndetect.XHook
-import com.kimera.novpndetect.hookSafe
+import com.kimera.pas.TAG
+import com.kimera.pas.XHook
+import com.kimera.pas.hookSafe
 
 class HookNetworkCapabilities : XHook {
 

@@ -1,4 +1,4 @@
-package com.kimera.novpndetect.util
+package com.kimera.pas.util
 
 fun getRandomString(length: Int) : String {
     val allowedChars = ('a'..'z') + ('0'..'9')

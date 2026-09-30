@@ -13,7 +13,7 @@
 // Disabled by default; configured from the module GUI through the Vector
 // remote preferences and pushed in with SpoofCore.nativeSetConfig().
 
-#include "nvd.h"
+#include "pas.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -29,7 +29,7 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 static volatile bool g_sdk_on = false;
 static volatile int g_sdk_val = 0;
@@ -294,13 +294,13 @@ int HideUname(struct utsname* buf) {
 }
 
 // android_getCpuFamily values (cpu-features.h)
-#define NVD_CPU_FAMILY_ARM64 4
-#define NVD_CPU_FAMILY_X86_64 5
+#define PAS_CPU_FAMILY_ARM64 4
+#define PAS_CPU_FAMILY_X86_64 5
 
 uint64_t HideCpuFamily() {
     BYTEHOOK_STACK_SCOPE();
     if (g_abi_on) {
-        return g_abi_arm64 ? NVD_CPU_FAMILY_ARM64 : NVD_CPU_FAMILY_X86_64;
+        return g_abi_arm64 ? PAS_CPU_FAMILY_ARM64 : PAS_CPU_FAMILY_X86_64;
     }
     return BYTEHOOK_CALL_PREV(HideCpuFamily);
 }
@@ -324,17 +324,17 @@ void InstallPropSpoofHooks() {
     HookLibcSym("android_getCpuFeatures", (void*)HideCpuFeatures);
 }
 
-}  // namespace nvd
+}  // namespace pas
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetConfig(JNIEnv* env, jobject thiz,
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetConfig(JNIEnv* env, jobject thiz,
                                                             jboolean sdkOn, jint sdkVal,
                                                             jboolean abiOn, jboolean abiArm64,
                                                             jboolean compatMode,
                                                             jboolean nativeEnabled) {
     (void)env;
     (void)thiz;
-    nvd::SetSpoofConfig(sdkOn == JNI_TRUE, (int)sdkVal, abiOn == JNI_TRUE,
+    pas::SetSpoofConfig(sdkOn == JNI_TRUE, (int)sdkVal, abiOn == JNI_TRUE,
                         abiArm64 == JNI_TRUE, compatMode == JNI_TRUE,
                         nativeEnabled == JNI_TRUE);
 }

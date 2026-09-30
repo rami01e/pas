@@ -1,4 +1,4 @@
-package com.kimera.novpndetect.spoof
+package com.kimera.pas.spoof
 
 /**
  * Shared CPU / GPU model catalogs.

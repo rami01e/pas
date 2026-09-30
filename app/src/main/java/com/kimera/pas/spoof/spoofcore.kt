@@ -1,4 +1,4 @@
-package com.kimera.novpndetect.spoof
+package com.kimera.pas.spoof
 
 import android.content.SharedPreferences
 import android.os.Build
@@ -19,12 +19,12 @@ import java.lang.reflect.Field
  * heavy apps load best without.
  *
  * Disabled by default; configured from the module GUI through Vector remote
- * preferences (group "nvd_spoof").
+ * preferences (group "pas_spoof").
  */
 object SpoofCore {
 
-    private const val TAG = "NoVPNDetect"
-    const val GROUP = "nvd_spoof"
+    private const val TAG = "PerAppSpoofer"
+    const val GROUP = "pas_spoof"
 
     external fun nativeSetConfig(
         sdkOn: Boolean,
@@ -69,7 +69,7 @@ object SpoofCore {
             val prefs: SharedPreferences? = try {
                 module.getRemotePreferences(GROUP)
             } catch (t: Throwable) {
-                Log.i(TAG, "[NVD] spoof: no remote prefs ($t) - defaults")
+                Log.i(TAG, "[PAS] spoof: no remote prefs ($t) - defaults")
                 null
             }
             if (prefs == null) {
@@ -82,9 +82,9 @@ object SpoofCore {
                 } catch (_: InterruptedException) {
                 }
                 apply(prefs)
-                Log.i(TAG, "[NVD] spoof: remote prefs attached")
+                Log.i(TAG, "[PAS] spoof: remote prefs attached")
             }
-        }, "nvd-spoof").start()
+        }, "pas-spoof").start()
     }
 
     private fun apply(prefs: SharedPreferences) {
@@ -104,7 +104,7 @@ object SpoofCore {
         SpoofState.gsfId = (prefs.getString("gsf_id", "") ?: "").trim()
         Log.i(
             TAG,
-            "[NVD] id spoof: widevine=${SpoofState.widevineOn} gsf=${SpoofState.gsfOn}"
+            "[PAS] id spoof: widevine=${SpoofState.widevineOn} gsf=${SpoofState.gsfOn}"
         )
 
         // Recon diagnostics toggle: independent of the native addon gate, but
@@ -113,7 +113,7 @@ object SpoofCore {
         val reconOn = prefs.getBoolean("recon_enabled", false)
         SpoofState.reconOn = reconOn
         runCatching { nativeSetRecon(reconOn) }
-        Log.i(TAG, "[NVD] recon logging: $reconOn")
+        Log.i(TAG, "[PAS] recon logging: $reconOn")
 
         // CPU / GPU spoof values (resolved from the shared catalog; active only
         // together with the native addon so all surfaces stay consistent).
@@ -131,7 +131,7 @@ object SpoofCore {
         SpoofState.gpuGlVersion = gpuEntry.glVersion
         Log.i(
             TAG,
-            "[NVD] cpu/gpu spoof: cpu=$cpuOnEff (${cpuEntry.display}) " +
+            "[PAS] cpu/gpu spoof: cpu=$cpuOnEff (${cpuEntry.display}) " +
                 "gpu=$gpuOnEff (${gpuEntry.renderer})"
         )
         // Delivered before the config gate so the native worker can decide
@@ -161,7 +161,7 @@ object SpoofCore {
         }
 
         if (!nativeOn) {
-            Log.i(TAG, "[NVD] spoof: native addon disabled - Java hooks only")
+            Log.i(TAG, "[PAS] spoof: native addon disabled - Java hooks only")
             return
         }
 
@@ -174,7 +174,7 @@ object SpoofCore {
                 ok++
             } else {
                 fail++
-                Log.i(TAG, "[NVD] spoof: java field FAILED: $label")
+                Log.i(TAG, "[PAS] spoof: java field FAILED: $label")
             }
         }
 
@@ -203,7 +203,7 @@ object SpoofCore {
         }
         Log.i(
             TAG,
-            "[NVD] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn arm64=$abiArm64 cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
+            "[PAS] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn arm64=$abiArm64 cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
         )
     }
 

@@ -1,4 +1,4 @@
-package com.kimera.novpndetect.hooks
+package com.kimera.pas.hooks
 
 import android.content.ContentResolver
 import android.database.MatrixCursor
@@ -7,10 +7,10 @@ import android.os.Bundle
 import android.os.CancellationSignal
 import android.util.Log
 import io.github.libxposed.api.XposedModule
-import com.kimera.novpndetect.TAG
-import com.kimera.novpndetect.XHook
-import com.kimera.novpndetect.hookSafe
-import com.kimera.novpndetect.spoof.SpoofState
+import com.kimera.pas.TAG
+import com.kimera.pas.XHook
+import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 
 /**
  * GSF ID (Google Services Framework android_id) spoof.
@@ -55,7 +55,7 @@ class HookGsfId : XHook {
                         )
                 val cursor = if (matched) gsfCursor() else null
                 if (cursor != null) {
-                    module.log(Log.INFO, TAG, "[NVD] GSF android_id -> spoofed")
+                    module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed")
                     cursor
                 } else {
                     chain.proceed()
@@ -85,7 +85,7 @@ class HookGsfId : XHook {
                         )
                 val cursor = if (matched) gsfCursor() else null
                 if (cursor != null) {
-                    module.log(Log.INFO, TAG, "[NVD] GSF android_id -> spoofed (bundle)")
+                    module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (bundle)")
                     cursor
                 } else {
                     chain.proceed()

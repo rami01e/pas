@@ -1,4 +1,4 @@
-#include "nvd.h"
+#include "pas.h"
 
 #include <errno.h>
 #include <ifaddrs.h>
@@ -11,7 +11,7 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 // ---------------------------------------------------------------------------
 // getifaddrs / freeifaddrs
@@ -222,4 +222,4 @@ void InstallIfaceHooks() {
     HookLibcSym("if_nametoindex", (void*)HideIfNameToIndex);
 }
 
-}  // namespace nvd
+}  // namespace pas

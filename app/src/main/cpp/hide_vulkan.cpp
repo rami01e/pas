@@ -17,7 +17,7 @@
 // identity is touched - the driver keeps serving its real formats, limits
 // and API behavior.
 
-#include "nvd.h"
+#include "pas.h"
 
 #include <jni.h>
 #include <stdint.h>
@@ -32,7 +32,7 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 // Extensions that never exist on the emulated GPU profile and would unmask
 // the emulator on inspection (NetEase MuMu advertises VK_NEMU_api_batch).
@@ -79,9 +79,9 @@ static void LogVkHeaderProbes() {
 // regardless of how old or new the build's Vulkan headers are.
 static volatile bool g_drvprops_logged = false;
 
-static const uint32_t kNvdDriverPropsSType = 1000196000u;
+static const uint32_t kPasDriverPropsSType = 1000196000u;
 
-struct NvdDriverProps {
+struct PasDriverProps {
     VkStructureType sType;
     void* pNext;
     uint32_t driverID;
@@ -92,7 +92,7 @@ struct NvdDriverProps {
 
 static void PatchDriverPropsNode(void* node) {
     if (node == nullptr || !GpuSpoofActive()) return;
-    auto* d = (NvdDriverProps*)node;
+    auto* d = (PasDriverProps*)node;
     snprintf(d->driverName, sizeof(d->driverName), "%s", GpuSpoofDriverName().c_str());
     snprintf(d->driverInfo, sizeof(d->driverInfo), "%s", GpuSpoofDriverInfo().c_str());
     d->conformance[0] = 1;
@@ -111,7 +111,7 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
     int guard = 0;
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
          s = s->pNext, guard++) {
-        if ((uint32_t)s->sType == kNvdDriverPropsSType) {
+        if ((uint32_t)s->sType == kPasDriverPropsSType) {
             PatchDriverPropsNode((void*)s);
         }
     }
@@ -260,7 +260,7 @@ static VkResult MyVkEnumerateInstanceExtensionProperties(const char* layer, uint
 // queries are answered from the spoofed profile on that path too.
 // ---------------------------------------------------------------------------
 
-typedef void* (*NvdGipaFn)(VkInstance instance, const char* name);
+typedef void* (*PasGipaFn)(VkInstance instance, const char* name);
 
 static void* g_real_gipa = nullptr;
 static volatile unsigned g_chain_logged = 0;
@@ -301,7 +301,7 @@ static int TargetIndex(const char* name) {
 static void* ResolveRealTarget(int id) {
     void* r = g_vk_real[id];
     if (r) return r;
-    NvdGipaFn gipa = (NvdGipaFn)g_real_gipa;
+    PasGipaFn gipa = (PasGipaFn)g_real_gipa;
     if (gipa) {
         r = gipa(VK_NULL_HANDLE, kVkNames[id]);
         if (r) g_vk_real[id] = r;
@@ -424,7 +424,7 @@ static void* MyVkGetInstanceProcAddrGOT(VkInstance instance, const char* name) {
 }
 
 static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
-    NvdGipaFn gipa = (NvdGipaFn)g_real_gipa;
+    PasGipaFn gipa = (PasGipaFn)g_real_gipa;
     if (!gipa) return nullptr;
     void* real = gipa(instance, name);
     if (!GpuSpoofActive() || !name || !real) return real;
@@ -517,4 +517,4 @@ void InstallVulkanHooks() {
         (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
 }
 
-}  // namespace nvd
+}  // namespace pas

@@ -1,4 +1,4 @@
 <resources>
-    <string name="app_name">NoVPNDetect</string>
-    <string name="module_description">Prevent some apps detect your phone connected to VPN.</string>
+    <string name="app_name">PerAppSpoofer</string>
+    <string name="module_description">Per-app device identity and environment spoofing for testing (by KiMeRa).</string>
 </resources>

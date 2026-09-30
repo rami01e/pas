@@ -1,4 +1,4 @@
-package com.kimera.novpndetect.ui
+package com.kimera.pas.ui
 
 import android.content.Context
 import android.content.SharedPreferences
@@ -9,15 +9,15 @@ import io.github.libxposed.service.XposedServiceHelper
  * Module-app side of the settings.
  *
  * Values are written into the framework's remote preferences (group
- * "nvd_spoof") through the Vector service; the scoped processes read them via
+ * "pas_spoof") through the Vector service; the scoped processes read them via
  * XposedInterface#getRemotePreferences. A local copy keeps the UI state and
  * is synced to the remote side as soon as the service (re)binds, so a save
  * made while the service was disconnected still reaches the scoped apps.
  */
 object SpoofSettings {
 
-    const val GROUP = "nvd_spoof"
-    private const val LOCAL = "nvd_spoof_local"
+    const val GROUP = "pas_spoof"
+    private const val LOCAL = "pas_spoof_local"
 
     private val KEYS = arrayOf(
         "native_enabled", "safe_mode",

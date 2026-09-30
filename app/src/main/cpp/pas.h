@@ -26,7 +26,7 @@ typedef NativeOnModuleLoaded (*NativeInit)(const NativeAPIEntries* entries);
 
 // ---- shared helpers ----
 
-namespace nvd {
+namespace pas {
 
 void Log(const char* fmt, ...);
 
@@ -105,7 +105,7 @@ void* GpuChainResolveDlsym(const char* symbol, void* real);
 // points actually flow through the module while "Recon logging" is on.
 void GpuDiag(const char* tag, const char* detail);
 
-// Caller filter shared with the GPU hook installer (defined in nvd.cpp).
+// Caller filter shared with the GPU hook installer (defined in pas.cpp).
 bool CallerAllowHooks(const char* caller_path_name, void* arg);
 void InstallIoctlHooks();
 void InstallPropSpoofHooks();
@@ -118,4 +118,4 @@ bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, s
 void SignalSpoofConfigReady(bool compatMode, bool nativeEnabled);
 bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut, bool* nativeOut);
 
-}  // namespace nvd
+}  // namespace pas

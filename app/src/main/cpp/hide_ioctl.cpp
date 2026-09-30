@@ -5,7 +5,7 @@
 // enumerate through SIOCGIFCONF. Both are answered by the kernel directly, so
 // they must be filtered here to keep the same view as every other hook.
 
-#include "nvd.h"
+#include "pas.h"
 
 #include <errno.h>
 #include <string.h>
@@ -15,7 +15,7 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 static bool IfrNameHidden(const struct ifreq* ifr) {
     char name[IFNAMSIZ + 1];
@@ -100,4 +100,4 @@ void InstallIoctlHooks() {
     HookLibcSym("ioctl", (void*)HideIoctl);
 }
 
-}  // namespace nvd
+}  // namespace pas

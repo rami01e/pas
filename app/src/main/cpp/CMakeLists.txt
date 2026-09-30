@@ -1,13 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
-project(nvd C CXX)
+project(pas C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(bytehook REQUIRED CONFIG)
 
-add_library(nvd SHARED
-    nvd.cpp
+add_library(pas SHARED
+    pas.cpp
     hide_iface.cpp
     hide_fs.cpp
     hide_net.cpp
@@ -17,13 +17,13 @@ add_library(nvd SHARED
     hide_gpu.cpp
     hide_vulkan.cpp)
 
-target_compile_options(nvd PRIVATE -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden)
+target_compile_options(pas PRIVATE -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden)
 
 if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
-    target_link_options(nvd PRIVATE "-Wl,-z,max-page-size=16384")
+    target_link_options(pas PRIVATE "-Wl,-z,max-page-size=16384")
 endif()
 
-target_link_libraries(nvd
+target_link_libraries(pas
     log
     dl
     bytehook::bytehook)

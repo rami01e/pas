@@ -1,11 +1,11 @@
-#include "nvd.h"
+#include "pas.h"
 
 #include <errno.h>
 #include <sys/socket.h>
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 #ifndef SO_BINDTODEVICE
 #define SO_BINDTODEVICE 25
@@ -49,4 +49,4 @@ void InstallNetHooks() {
     HookLibcSym("setsockopt", (void*)HideSetSockOpt);
 }
 
-}  // namespace nvd
+}  // namespace pas

@@ -1,11 +1,11 @@
-package com.kimera.novpndetect.hooks
+package com.kimera.pas.hooks
 
 import android.util.Log
 import io.github.libxposed.api.XposedModule
-import com.kimera.novpndetect.TAG
-import com.kimera.novpndetect.XHook
-import com.kimera.novpndetect.hookSafe
-import com.kimera.novpndetect.spoof.SpoofState
+import com.kimera.pas.TAG
+import com.kimera.pas.XHook
+import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 
 /**
  * Recon diagnostics: while "Recon logging" is enabled, package-manager and
@@ -34,7 +34,7 @@ class HookRecon : XHook {
             module.hook(method).intercept { chain ->
                 val pkg = chain.getArg(0) as? String
                 if (SpoofState.reconOn && pkg != null && ReconFilter.hitName(pkg)) {
-                    module.log(Log.INFO, TAG, "[NVD] recon(java): $name $pkg")
+                    module.log(Log.INFO, TAG, "[PAS] recon(java): $name $pkg")
                 }
                 chain.proceed()
             }
@@ -53,7 +53,7 @@ class HookRecon : XHook {
             module.hook(method).intercept { chain ->
                 val key = chain.getArg(1) as? String
                 if (SpoofState.reconOn && key != null && ReconFilter.hitSettings(key)) {
-                    module.log(Log.INFO, TAG, "[NVD] recon(java): settings $key")
+                    module.log(Log.INFO, TAG, "[PAS] recon(java): settings $key")
                 }
                 chain.proceed()
             }

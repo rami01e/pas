@@ -2,7 +2,7 @@
 #define _LARGEFILE64_SOURCE 1
 #endif
 
-#include "nvd.h"
+#include "pas.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -20,7 +20,7 @@
 
 #include "bytehook.h"
 
-namespace nvd {
+namespace pas {
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -106,7 +106,7 @@ static SpecialAction ResolveSpecial(const char* path) {
 
 static int CreateMemfdWith(const char* data, size_t len, int flags) {
 #ifdef SYS_memfd_create
-    int mfd = (int)syscall(SYS_memfd_create, "nvd-special",
+    int mfd = (int)syscall(SYS_memfd_create, "pas-special",
                            (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0);
 #else
     int mfd = -1;
@@ -603,7 +603,7 @@ static int CreateFilteredFd(const char* path, int flags) {
     std::string out;
     FilterLines(raw, kind, &out);
 #ifdef SYS_memfd_create
-    int mfd = (int)syscall(SYS_memfd_create, "nvd-file",
+    int mfd = (int)syscall(SYS_memfd_create, "pas-file",
                            (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0);
 #else
     int mfd = -1;
@@ -833,7 +833,7 @@ FILE* HideFopen64(const char* path, const char* mode) {
 // (Stateless: entry names matching VPN interface patterns are simply omitted.)
 // ---------------------------------------------------------------------------
 
-struct NvdLinuxDirent64 {
+struct PasLinuxDirent64 {
     uint64_t d_ino;
     int64_t d_off;
     unsigned short d_reclen;
@@ -849,10 +849,10 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
     char* p = base;
     char* end = base + total;
     char* out = base;
-    while (p + sizeof(NvdLinuxDirent64) <= end) {
-        auto* d = (NvdLinuxDirent64*)p;
+    while (p + sizeof(PasLinuxDirent64) <= end) {
+        auto* d = (PasLinuxDirent64*)p;
         size_t rl = d->d_reclen;
-        if (rl < sizeof(NvdLinuxDirent64) || p + rl > end) break;
+        if (rl < sizeof(PasLinuxDirent64) || p + rl > end) break;
         if (!IsHiddenIfaceName(d->d_name)) {
             if (out != p) memmove(out, p, rl);
             out += rl;
@@ -946,10 +946,10 @@ static std::string BuildFakeCpuinfoPath() {
         std::string dir = std::string(b) + pkg + "/cache";
 #ifdef __NR_faccessat
         if (syscall(__NR_faccessat, AT_FDCWD, dir.c_str(), W_OK, 0) == 0) {
-            return dir + "/.nvd_tmp";
+            return dir + "/.pas_tmp";
         }
 #else
-        return dir + "/.nvd_tmp";
+        return dir + "/.pas_tmp";
 #endif
     }
     return std::string();
@@ -1248,29 +1248,29 @@ static ssize_t MyWrite(int fd, const void* buf, size_t count) {
 // guarded by comparing the pipe/file inode.
 // ---------------------------------------------------------------------------
 
-#define NVD_RDC_SLOTS 16
+#define PAS_RDC_SLOTS 16
 
-struct NvdRdcSlot {
+struct PasRdcSlot {
     int fd;
     unsigned pos;
     unsigned char mode;
     unsigned long long ino;
 };
 
-static NvdRdcSlot g_rdc[NVD_RDC_SLOTS];
+static PasRdcSlot g_rdc[PAS_RDC_SLOTS];
 static volatile int g_rdc_active = 0;
 static std::string g_rdc_fake;
 static bool g_rdc_fake_ready = false;
 
 static int RdcFind(int fd) {
-    for (int i = 0; i < NVD_RDC_SLOTS; i++) {
+    for (int i = 0; i < PAS_RDC_SLOTS; i++) {
         if (g_rdc[i].mode == 1 && g_rdc[i].fd == fd) return i;
     }
     return -1;
 }
 
 static int RdcClaim(int fd) {
-    for (int i = 0; i < NVD_RDC_SLOTS; i++) {
+    for (int i = 0; i < PAS_RDC_SLOTS; i++) {
         if (g_rdc[i].mode == 0) {
             g_rdc[i].fd = fd;
             g_rdc[i].pos = 0;
@@ -1284,7 +1284,7 @@ static int RdcClaim(int fd) {
 }
 
 static void RdcClear(int idx) {
-    if (idx >= 0 && idx < NVD_RDC_SLOTS && g_rdc[idx].mode == 1) {
+    if (idx >= 0 && idx < PAS_RDC_SLOTS && g_rdc[idx].mode == 1) {
         g_rdc[idx].mode = 0;
         if (g_rdc_active > 0) g_rdc_active--;
     }
@@ -1409,12 +1409,12 @@ void InstallCpuDeepHooks() {
     Log("native: cpu deep hooks installed (exec/syscall/write/read)");
 }
 
-}  // namespace nvd
+}  // namespace pas
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetRecon(JNIEnv* env, jobject thiz,
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetRecon(JNIEnv* env, jobject thiz,
                                                            jboolean reconOn) {
     (void)env;
     (void)thiz;
-    nvd::SetRecon(reconOn == JNI_TRUE);
+    pas::SetRecon(reconOn == JNI_TRUE);
 }

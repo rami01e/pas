@@ -1,12 +1,12 @@
-package com.kimera.novpndetect.hooks
+package com.kimera.pas.hooks
 
 import android.media.MediaDrm
 import android.util.Log
 import io.github.libxposed.api.XposedModule
-import com.kimera.novpndetect.TAG
-import com.kimera.novpndetect.XHook
-import com.kimera.novpndetect.hookSafe
-import com.kimera.novpndetect.spoof.SpoofState
+import com.kimera.pas.TAG
+import com.kimera.pas.XHook
+import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 
 /**
  * Widevine property spoof: reports security level L1, a generated
@@ -34,10 +34,10 @@ class HookMediaDrm : XHook {
                 if (!SpoofState.widevineOn) {
                     chain.proceed()
                 } else if (key == "securityLevel") {
-                    module.log(Log.INFO, TAG, "[NVD] MediaDrm securityLevel -> L1")
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm securityLevel -> L1")
                     "L1"
                 } else if (key == "maxHdcpLevel") {
-                    module.log(Log.INFO, TAG, "[NVD] MediaDrm maxHdcpLevel -> $MAX_HDCP_LEVEL")
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm maxHdcpLevel -> $MAX_HDCP_LEVEL")
                     MAX_HDCP_LEVEL
                 } else if (key == "version") {
                     // Cosmetic alignment: only rewrite values shaped like a
@@ -45,7 +45,7 @@ class HookMediaDrm : XHook {
                     // stays untouched.
                     val orig = chain.proceed() as? String
                     if (orig != null && WIDEVINE_VERSION_LIKE.containsMatchIn(orig)) {
-                        module.log(Log.INFO, TAG, "[NVD] MediaDrm version -> $WIDEVINE_VERSION")
+                        module.log(Log.INFO, TAG, "[PAS] MediaDrm version -> $WIDEVINE_VERSION")
                         WIDEVINE_VERSION
                     } else {
                         orig
@@ -64,7 +64,7 @@ class HookMediaDrm : XHook {
                 val key = chain.getArg(0) as? String
                 val hex = SpoofState.widevineId
                 if (SpoofState.widevineOn && key == "deviceUniqueId" && isSpoofableHex(hex)) {
-                    module.log(Log.INFO, TAG, "[NVD] MediaDrm deviceUniqueId -> spoofed")
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm deviceUniqueId -> spoofed")
                     hexToBytes(hex)
                 } else {
                     chain.proceed()
