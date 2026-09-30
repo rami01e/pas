@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.DialogInterface
 import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
@@ -777,7 +778,7 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun addAbiHead() {
+    private fun LinearLayout.addAbiHead() {
         addView(rowHead(abiSw, "CPU ABI", null))
         val line = LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -897,16 +898,20 @@ class MainActivity : Activity() {
             typeface = Typeface.MONOSPACE
             setTextColor(cText)
             setSingleLine(true)
+            setPadding(dp(16), dp(8), dp(16), dp(8))
             inputType =
                 if (digitsOnly) InputType.TYPE_CLASS_NUMBER
                 else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         }
-        AlertDialog.Builder(this)
-            .setTitle(title)
-            .setView(et, dp(16), dp(8), dp(16), 0)
-            .setPositiveButton("OK") { _, _ -> onOk(et.text.toString()) }
-            .setNegativeButton("Cancel", null)
-            .show()
+        val dlg = AlertDialog.Builder(this)
+        dlg.setTitle(title)
+        dlg.setView(et)
+        dlg.setPositiveButton(
+            "OK",
+            DialogInterface.OnClickListener { _, _ -> onOk(et.text.toString()) }
+        )
+        dlg.setNegativeButton("Cancel", null as DialogInterface.OnClickListener?)
+        dlg.show()
     }
 
     private fun editWidevine() {
