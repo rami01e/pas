@@ -233,13 +233,6 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(8) }
-        )
-        content.addView(
-            actionButton("Open Vector manager", null, false) { openVectorManager() },
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(12) }
         )
 
@@ -1471,92 +1464,6 @@ class MainActivity : Activity() {
             .show()
     }
 
-    private fun openVectorManager() {
-        val pm = packageManager
-        fun launch(pkg: String): Boolean {
-            val i = pm.getLaunchIntentForPackage(pkg) ?: return false
-            return try {
-                startActivity(i)
-                true
-            } catch (t: Throwable) {
-                false
-            }
-        }
-        fun openInfo(pkg: String) {
-            try {
-                startActivity(
-                    Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:$pkg")
-                    )
-                )
-                toast("Opened app info - tap Open there for the Scope screen")
-            } catch (t: Throwable) {
-                toast("Vector manager not found - tell me its package name")
-            }
-        }
-        for (p in listOf(
-            "org.lsposed.manager", "io.github.lsposed.manager", "com.vector.manager",
-            "org.lsposed.vector", "io.github.vector"
-        )) {
-            if (launch(p)) {
-                toast("Opening Vector\u2026 scope lives in the module card")
-                return
-            }
-        }
-        // Scan apps by package / label (the manager may use a custom package id).
-        try {
-            for (app in pm.getInstalledApplications(0)) {
-                val pkg = app.packageName
-                if (pkg == packageName) continue
-                val low = pkg.lowercase()
-                val label = try {
-                    app.loadLabel(pm).toString()
-                } catch (t: Throwable) {
-                    ""
-                }
-                val match = low.contains("lsposed") || low.contains("vector") ||
-                    label.contains("vector", true) || label.contains("lsposed", true)
-                if (match && launch(pkg)) {
-                    toast("Opening Vector\u2026 scope lives in the module card")
-                    return
-                }
-            }
-        } catch (t: Throwable) {
-            // fall through
-        }
-        // Component scan: the manager declares the libxposed framework service.
-        try {
-            for (p in pm.getInstalledPackages(
-                PackageManager.GET_SERVICES or PackageManager.GET_RECEIVERS or PackageManager.GET_PROVIDERS
-            )) {
-                val pkg = p.packageName
-                if (pkg == packageName) continue
-                var hit = false
-                p.services?.forEach { s ->
-                    if (s.name.contains("xposed", true) || s.name.contains("lsposed", true)) hit = true
-                }
-                if (!hit) p.receivers?.forEach { r ->
-                    if (r.name.contains("xposed", true) || r.name.contains("lsposed", true)) hit = true
-                }
-                if (!hit) p.providers?.forEach { pr ->
-                    if (pr.name.contains("xposed", true) || pr.name.contains("lsposed", true)) hit = true
-                }
-                if (hit) {
-                    if (launch(pkg)) {
-                        toast("Opening Vector\u2026 scope lives in the module card")
-                    } else {
-                        openInfo(pkg)
-                    }
-                    return
-                }
-            }
-        } catch (t: Throwable) {
-            // fall through
-        }
-        toast("Vector manager not found - long-press its icon \u2192 App info, and tell me the package name.")
-    }
-
     // ------------------------------------------------------------------
     // force-close scoped apps
     // ------------------------------------------------------------------
@@ -1611,16 +1518,35 @@ class MainActivity : Activity() {
                 val lspd = runSu(
                     "for D in /data/adb/lspd/log /data/adb/vector/log; do " +
                         "cat \$D/modules_*.log \$D/verbose_*.log 2>/dev/null; done " +
-                        "| grep -a PerAppSpoofer | tail -n 900"
+                        "| grep -a PerAppSpoofer | grep -av 'native: recon: ' | tail -n 500"
                 )
                 if (lspd != null) rootWorks = true
                 if (!lspd.isNullOrBlank()) {
-                    out.append("=== LSPosed/Vector log ===\n").append(lspd).append("\n\n")
+                    out.append("=== LSPosed/Vector log (core) ===\n").append(lspd).append("\n\n")
                 }
-                val lc = runSu("logcat -d -t 9000 | grep -a PerAppSpoofer | tail -n 900")
-                if (lc != null) rootWorks = true
-                if (!lc.isNullOrBlank()) {
-                    out.append("=== logcat ===\n").append(lc)
+                val focus = runSu(
+                    "logcat -d -t 20000 | grep -a PerAppSpoofer | " +
+                        "grep -aE 'MediaDrm|LinkProperties|getByName|webrtc|spoof applied|hook failed|avail|gl loader-chain' | tail -n 250"
+                )
+                if (focus != null) rootWorks = true
+                if (!focus.isNullOrBlank()) {
+                    out.append("=== focus (media / interfaces) ===\n").append(focus).append("\n\n")
+                }
+                val core = runSu(
+                    "logcat -d -t 20000 | grep -a PerAppSpoofer | grep -av 'native: recon: ' | " +
+                        "grep -av 'recon(java)' | tail -n 400"
+                )
+                if (core != null) rootWorks = true
+                if (!core.isNullOrBlank()) {
+                    out.append("=== logcat (core) ===\n").append(core).append("\n\n")
+                }
+                val recon = runSu(
+                    "logcat -d -t 20000 | grep -a PerAppSpoofer | " +
+                        "grep -aE 'native: recon: |recon\\(java\\)' | tail -n 200"
+                )
+                if (recon != null) rootWorks = true
+                if (!recon.isNullOrBlank()) {
+                    out.append("=== recon tail ===\n").append(recon)
                 }
             } catch (t: Throwable) {
                 out.append("error: ").append(t.toString())

@@ -61,21 +61,16 @@ class HookConnectivityManager : XHook {
             }
         }
         hookSafe(module, "ConnectivityManager.getLinkProperties") {
-            val m1 = ConnectivityManager::class.java.getMethod("getLinkProperties")
-            module.hook(m1).intercept { chain ->
-                val r = chain.proceed()
-                if (SpoofState.reconOn) {
-                    module.log(Log.INFO, TAG, "ConnectivityManager.getLinkProperties -> $r")
+            runCatching {
+                ConnectivityManager::class.java.getMethod("getLinkProperties", Network::class.java)
+            }.getOrNull()?.let { m ->
+                module.hook(m).intercept { chain ->
+                    val r = chain.proceed()
+                    if (SpoofState.reconOn) {
+                        module.log(Log.INFO, TAG, "ConnectivityManager.getLinkProperties(${chain.getArg(0)}) -> $r")
+                    }
+                    r
                 }
-                r
-            }
-            val m2 = ConnectivityManager::class.java.getMethod("getLinkProperties", Network::class.java)
-            module.hook(m2).intercept { chain ->
-                val r = chain.proceed()
-                if (SpoofState.reconOn) {
-                    module.log(Log.INFO, TAG, "ConnectivityManager.getLinkProperties(${chain.getArg(0)}) -> $r")
-                }
-                r
             }
         }
         hookSafe(module, "ConnectivityManager.getNetworkInfo(Network)") {

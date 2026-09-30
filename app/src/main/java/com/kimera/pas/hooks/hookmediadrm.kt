@@ -24,10 +24,10 @@ class HookMediaDrm : XHook {
     override fun injectHook(module: XposedModule) {
         hookPropertyString(module)
         hookPropertyByteArray(module)
-        hookSecurityLevel(module)
         hookIsCryptoSchemeSupported(module)
         hookMaxSecurityLevel(module)
         hookOpenSession(module)
+        hookChromiumBridge(module)
         val has3 = runCatching {
             MediaDrm::class.java.getMethod(
                 "isCryptoSchemeSupported", UUID::class.java, String::class.java, Integer.TYPE
@@ -70,7 +70,14 @@ class HookMediaDrm : XHook {
                         orig
                     }
                 } else {
-                    chain.proceed()
+                    val orig = chain.proceed()
+                    if (SpoofState.widevineOn) {
+                        module.log(
+                            Log.INFO, TAG,
+                            "[PAS] MediaDrm.getPropertyString($key) -> ${orig?.toString()?.take(80)}"
+                        )
+                    }
+                    orig
                 }
             }
         }
@@ -86,22 +93,12 @@ class HookMediaDrm : XHook {
                     module.log(Log.INFO, TAG, "[PAS] MediaDrm deviceUniqueId -> spoofed")
                     hexToBytes(hex)
                 } else {
-                    chain.proceed()
-                }
-            }
-        }
-    }
-
-    private fun hookSecurityLevel(module: XposedModule) {
-        hookSafe(module, "MediaDrm.getSecurityLevel") {
-            val method = MediaDrm::class.java.getMethod("getSecurityLevel")
-            module.hook(method).intercept { chain ->
-                if (SpoofState.widevineOn) {
-                    // MediaDrm.SECURITY_LEVEL_HW_SECURE_ALL
-                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.getSecurityLevel -> 5")
-                    5
-                } else {
-                    chain.proceed()
+                    val orig = chain.proceed()
+                    if (SpoofState.widevineOn) {
+                        val n = (orig as? ByteArray)?.size ?: -1
+                        module.log(Log.INFO, TAG, "[PAS] MediaDrm.getPropertyByteArray($key) -> $n bytes")
+                    }
+                    orig
                 }
             }
         }
@@ -205,6 +202,81 @@ class HookMediaDrm : XHook {
         }
     }
 
+    /**
+     * Chromium's own EME layer (Chrome and WebView share
+     * org.chromium.media.MediaDrmBridge). The browser decides which
+     * robustness levels a container supports through this class, and the
+     * check can run in a process where the platform-side hooks see nothing -
+     * mirroring the substitutions here covers both browsers directly.
+     */
+    private fun hookChromiumBridge(module: XposedModule) {
+        val cls = try {
+            Class.forName("org.chromium.media.MediaDrmBridge")
+        } catch (t: Throwable) {
+            null
+        }
+        if (cls == null) {
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge: class not present")
+            return
+        }
+        val m1 = runCatching {
+            cls.getDeclaredMethod("isCryptoSchemeSupported", ByteArray::class.java)
+        }.getOrNull()
+        if (m1 != null) {
+            m1.isAccessible = true
+            module.hook(m1).intercept { chain ->
+                val arg = chain.getArg(0) as? ByteArray
+                val orig = chain.proceed()
+                if (SpoofState.widevineOn && isWidevineBytes(arg)) {
+                    module.log(
+                        Log.INFO, TAG,
+                        "[PAS] MediaDrmBridge.isCryptoSchemeSupported -> true (orig=$orig)"
+                    )
+                    true
+                } else {
+                    orig
+                }
+            }
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.isCryptoSchemeSupported: hooked")
+        } else {
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.isCryptoSchemeSupported: absent")
+        }
+        val m2 = runCatching {
+            cls.getDeclaredMethod("getSupportedContainers", ByteArray::class.java, Integer.TYPE)
+        }.getOrNull()
+        if (m2 != null) {
+            m2.isAccessible = true
+            module.hook(m2).intercept { chain ->
+                val arg = chain.getArg(0) as? ByteArray
+                val level = (chain.getArg(1) as? Int) ?: -1
+                val orig = chain.proceed()
+                if (SpoofState.widevineOn && isWidevineBytes(arg) && level >= 2) {
+                    val list = (orig as? Array<*>)?.map { it?.toString() ?: "" } ?: emptyList()
+                    val missing = mutableListOf<String>()
+                    if (!list.contains("video/mp4")) missing.add("video/mp4")
+                    if (!list.contains("video/webm")) missing.add("video/webm")
+                    if (missing.isNotEmpty()) {
+                        module.log(
+                            Log.INFO, TAG,
+                            "[PAS] MediaDrmBridge.getSupportedContainers(level=$level) +$missing (orig=$list)"
+                        )
+                        (list + missing).toTypedArray()
+                    } else {
+                        orig
+                    }
+                } else {
+                    orig
+                }
+            }
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.getSupportedContainers: hooked")
+        } else {
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.getSupportedContainers: absent")
+        }
+    }
+
+    private fun isWidevineBytes(b: ByteArray?): Boolean =
+        b != null && b.size == 16 && b.contentEquals(WIDEVINE_BYTES)
+
     private fun isSpoofableHex(s: String): Boolean {
         if (s.isEmpty() || s.length % 2 != 0 || s.length > 128) return false
         for (c in s) {
@@ -228,5 +300,11 @@ class HookMediaDrm : XHook {
         const val MAX_HDCP_LEVEL = "HDCP-2.2"
         val WIDEVINE_VERSION_LIKE = Regex("""^\d+\.\d+\.\d+""")
         val WIDEVINE_UUID: UUID = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
+        val WIDEVINE_BYTES: ByteArray = byteArrayOf(
+            0xed.toByte(), 0xef.toByte(), 0x8b.toByte(), 0xa9.toByte(),
+            0x79.toByte(), 0xd6.toByte(), 0x4a.toByte(), 0xce.toByte(),
+            0xa3.toByte(), 0xc8.toByte(), 0x27.toByte(), 0xdc.toByte(),
+            0xd5.toByte(), 0x1d.toByte(), 0x21.toByte(), 0xed.toByte()
+        )
     }
 }
