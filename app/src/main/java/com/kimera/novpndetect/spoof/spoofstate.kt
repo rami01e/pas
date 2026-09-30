@@ -49,4 +49,8 @@ object SpoofState {
     /** glGetString(GL_VERSION) replacement for the Java GL readers. */
     @Volatile
     var gpuGlVersion: String = ""
+
+    /** Recon diagnostics logging ("recon_enabled"); read by HookRecon per call. */
+    @Volatile
+    var reconOn: Boolean = false
 }

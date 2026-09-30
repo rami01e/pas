@@ -54,6 +54,7 @@ class MainActivity : Activity() {
     private lateinit var wvEdit: EditText
     private lateinit var gsfCheck: CheckBox
     private lateinit var gsfEdit: EditText
+    private lateinit var reconCheck: CheckBox
     private lateinit var spoofStatus: TextView
     private lateinit var logsHeader: TextView
     private lateinit var logsContainer: LinearLayout
@@ -184,6 +185,13 @@ class MainActivity : Activity() {
             row(gsfCheck, gsfEdit, { gsfEdit.setText(randomGsf()) }, { clearGsf() },
                 editWeight = true)
         )
+
+        // ---------------- Diagnostics ----------------
+        content.addView(sectionLabel("Diagnostics", pad))
+        reconCheck = CheckBox(this).apply {
+            text = "Recon logging (verbose; for diagnosing app detections)"
+        }
+        content.addView(reconCheck)
 
         // ---------------- Logs (folded by default) ----------------
         logsHeader = sectionLabel("Logs (tap to expand) \u25B8", pad).apply {
@@ -486,6 +494,7 @@ class MainActivity : Activity() {
         wvEdit.setText(sp.getString("widevine_id", "") ?: "")
         gsfCheck.isChecked = sp.getBoolean("gsf_enabled", false)
         gsfEdit.setText(sp.getString("gsf_id", "") ?: "")
+        reconCheck.isChecked = sp.getBoolean("recon_enabled", false)
         suppressDirty = false
     }
 
@@ -503,7 +512,8 @@ class MainActivity : Activity() {
         "widevine_enabled" to wvCheck.isChecked,
         "widevine_id" to wvEdit.text.toString().trim().lowercase(),
         "gsf_enabled" to gsfCheck.isChecked,
-        "gsf_id" to gsfEdit.text.toString().trim()
+        "gsf_id" to gsfEdit.text.toString().trim(),
+        "recon_enabled" to reconCheck.isChecked
     )
 
     private fun savedMap(): HashMap<String, Any?> {
@@ -522,7 +532,8 @@ class MainActivity : Activity() {
             "widevine_enabled" to sp.getBoolean("widevine_enabled", false),
             "widevine_id" to (sp.getString("widevine_id", "") ?: ""),
             "gsf_enabled" to sp.getBoolean("gsf_enabled", false),
-            "gsf_id" to (sp.getString("gsf_id", "") ?: "")
+            "gsf_id" to (sp.getString("gsf_id", "") ?: ""),
+            "recon_enabled" to sp.getBoolean("recon_enabled", false)
         )
     }
 
@@ -553,6 +564,7 @@ class MainActivity : Activity() {
         gpuCheck.setOnCheckedChangeListener(checkListener)
         wvCheck.setOnCheckedChangeListener(checkListener)
         gsfCheck.setOnCheckedChangeListener(checkListener)
+        reconCheck.setOnCheckedChangeListener(checkListener)
 
         abiGroup.setOnCheckedChangeListener { _, _ -> updateDirty() }
         val spinnerListener = object : AdapterView.OnItemSelectedListener {

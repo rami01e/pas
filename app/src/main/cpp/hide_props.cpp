@@ -187,6 +187,7 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
 
 int HidePropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("prop", name, 0);
     if (!name || !value || (!g_sdk_on && !g_abi_on && !CpuSpoofActive())) {
         return BYTEHOOK_CALL_PREV(HidePropGet, name, value);
     }
@@ -218,6 +219,7 @@ struct ReadCbCtx {
 };
 
 static void SpoofReadCb(void* cookie, const char* name, const char* value, uint32_t serial) {
+    ReconNote("prop-cb", name, 0);
     auto* ctx = (ReadCbCtx*)cookie;
     if (name && ((g_sdk_on || g_abi_on || CpuSpoofActive()) && IsSpoofTarget(name))) {
         char repl[PROP_VALUE_MAX];

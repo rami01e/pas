@@ -85,6 +85,18 @@ void InstallGpuHooks();
 void InstallVulkanHooks();
 void InstallCpuDeepHooks();
 
+// recon diagnostics (hide_fs.cpp): suspicious-probe logging, enabled from the
+// module GUI; used to map a target app's detection surface.
+void SetRecon(bool on);
+bool ReconEnabled();
+void ReconNote(const char* op, const char* detail, long res);
+void InstallReconHooks();
+
+// GL resolver-chain substitution (hide_gpu.cpp), used by the dlsym wrapper in
+// hide_vulkan.cpp. Returns the bytehook-free representative for GL entry
+// points resolved dynamically, or nullptr when not handled.
+void* GpuChainResolveDlsym(const char* symbol, void* real);
+
 // Caller filter shared with the GPU hook installer (defined in nvd.cpp).
 bool CallerAllowHooks(const char* caller_path_name, void* arg);
 void InstallIoctlHooks();

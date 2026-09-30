@@ -67,6 +67,10 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
             d->conformanceVersion.minor = 3;
             d->conformanceVersion.subminor = 1;
             d->conformanceVersion.patch = 0;
+            if (!g_drvprops_logged) {
+                g_drvprops_logged = true;
+                Log("native: vulkan driverprops patched");
+            }
         }
     }
 #endif
@@ -223,6 +227,7 @@ typedef void* (*NvdGipaFn)(VkInstance instance, const char* name);
 
 static void* g_real_gipa = nullptr;
 static volatile unsigned g_chain_logged = 0;
+static volatile bool g_drvprops_logged = false;
 
 enum VkTargetId {
     VK_T_PROP = 0,
@@ -399,6 +404,11 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
 static void* MyDlsym(void* handle, const char* symbol) {
     BYTEHOOK_STACK_SCOPE();
     void* real = BYTEHOOK_CALL_PREV(MyDlsym, handle, symbol);
+    {
+        // GL entry points resolved through dlsym (ANGLE-style consumers).
+        void* sub = GpuChainResolveDlsym(symbol, real);
+        if (sub != nullptr) return sub;
+    }
     if (!symbol || symbol[0] != 'v' || symbol[1] != 'k') return real;
     if (strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
         g_real_gipa = real;

@@ -26,7 +26,8 @@ object SpoofSettings {
         "cpu_enabled", "cpu_value",
         "gpu_enabled", "gpu_value",
         "widevine_enabled", "widevine_id",
-        "gsf_enabled", "gsf_id"
+        "gsf_enabled", "gsf_id",
+        "recon_enabled"
     )
 
     @Volatile

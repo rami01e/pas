@@ -14,6 +14,7 @@ import com.kimera.novpndetect.hooks.HookNetworkCapabilities
 import com.kimera.novpndetect.hooks.HookNetworkInfo
 import com.kimera.novpndetect.hooks.HookNetworkInterface
 import com.kimera.novpndetect.hooks.HookNetworkRequestBuilder
+import com.kimera.novpndetect.hooks.HookRecon
 
 const val TAG = "NoVPNDetect"
 
@@ -52,6 +53,7 @@ class XposedInit : XposedModule() {
                 HookMediaDrm(),
                 HookGsfId(),
                 HookGpu(),
+                HookRecon(),
             )
 
         hooks.forEach {

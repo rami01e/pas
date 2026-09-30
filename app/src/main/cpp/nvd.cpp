@@ -364,6 +364,17 @@ bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut, bool* nativeOut) {
     return ready;
 }
 
+static std::string ProcName() {
+    char buf[256];
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, "/proc/self/cmdline", O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return std::string("?");
+    ssize_t n = syscall(__NR_read, fd, buf, sizeof(buf) - 1);
+    syscall(__NR_close, fd);
+    if (n <= 0) return std::string("?");
+    buf[n] = '\0';
+    return std::string(buf);
+}
+
 static void* InitWorker(void* arg) {
     (void)arg;
     Log("native: worker start");
@@ -374,7 +385,9 @@ static void* InitWorker(void* arg) {
     bool compat = false;
     bool nativeOn = true;
     bool ready = WaitSpoofConfigReady(2500, &compat, &nativeOn);
-    Log("native: config ready=%d compat=%d native=%d", (int)ready, (int)compat, (int)nativeOn);
+    Log("native: config ready=%d compat=%d native=%d cpu=%d gpu=%d recon=%d proc=%s",
+        (int)ready, (int)compat, (int)nativeOn, (int)CpuSpoofActive(), (int)GpuSpoofActive(),
+        (int)ReconEnabled(), ProcName().c_str());
     if (!nativeOn) {
         Log("native: addon disabled by user - no hooks installed");
         return nullptr;
@@ -401,6 +414,10 @@ static void* InitWorker(void* arg) {
         Log("native: stage4b gpu gl+vulkan hooks");
     } else {
         Log("native: gpu spoof off - gl/vulkan hooks skipped");
+    }
+    if (ReconEnabled()) {
+        InstallReconHooks();
+        Log("native: stage4c recon hooks");
     }
     // setsockopt (SO_BINDTODEVICE hiding) is a core hiding primitive and stays
     // on in every mode, including compatibility mode.

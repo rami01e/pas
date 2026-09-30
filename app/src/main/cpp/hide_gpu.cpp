@@ -181,6 +181,89 @@ static const unsigned char* MyGlGetString(unsigned int name) {
     return BYTEHOOK_CALL_PREV(MyGlGetString, name);
 }
 
+// ---------------------------------------------------------------------------
+// Resolver-chain coverage (Chrome / WebView / ANGLE-style consumers): GL
+// entry points are often obtained through eglGetProcAddress or dlsym instead
+// of direct calls. Those resolvers are wrapped so a request for glGetString
+// answers with the spoofed strings. The pointer handed back is bytehook-free
+// because resolver results are called directly (outside bytehook frames).
+// ---------------------------------------------------------------------------
+
+typedef void* (*NvdEglGpaFn)(const char*);
+typedef const unsigned char* (*NvdGlGetStringFn)(unsigned int);
+
+static void* volatile g_real_gl_get_string = nullptr;
+static void* volatile g_real_egl_gpa = nullptr;
+static volatile unsigned g_gl_chain_logged = 0;
+
+static void GlChainLog(const char* name, const char* how) {
+    unsigned bit = (strcmp(name, "glGetString") == 0) ? 1u : 2u;
+    if (g_gl_chain_logged & bit) return;
+    g_gl_chain_logged |= bit;
+    Log("native: gl loader-chain %s: %s", how, name);
+}
+
+static const unsigned char* RepGlGetString(unsigned int name) {
+    if (g_gpu_on) {
+        if (name == 0x1F00) return (const unsigned char*)g_gpu_vendor;
+        if (name == 0x1F01) return (const unsigned char*)g_gpu_renderer;
+        if (name == 0x1F02 && g_gpu_gl_version[0] != '\0') {
+            return (const unsigned char*)g_gpu_gl_version;
+        }
+    }
+    auto real = (NvdGlGetStringFn)g_real_gl_get_string;
+    return real ? real(name) : nullptr;
+}
+
+static void* RepEglGetProcAddress(const char* name);
+
+void* GpuChainResolveDlsym(const char* symbol, void* real) {
+    if (!g_gpu_on || symbol == nullptr || real == nullptr) return nullptr;
+    if (strcmp(symbol, "glGetString") == 0) {
+        g_real_gl_get_string = real;
+        GlChainLog("glGetString", "dlsym");
+        return (void*)RepGlGetString;
+    }
+    if (strcmp(symbol, "eglGetProcAddress") == 0) {
+        g_real_egl_gpa = real;
+        return (void*)RepEglGetProcAddress;
+    }
+    return nullptr;
+}
+
+static void* RepEglGetProcAddress(const char* name) {
+    if (g_gpu_on && name != nullptr) {
+        if (strcmp(name, "glGetString") == 0) {
+            auto real = (NvdEglGpaFn)g_real_egl_gpa;
+            void* r = real ? real(name) : nullptr;
+            if (r != nullptr) g_real_gl_get_string = r;
+            GlChainLog("glGetString", "eglGetProcAddress");
+            return (void*)RepGlGetString;
+        }
+        if (strcmp(name, "eglGetProcAddress") == 0) {
+            return (void*)RepEglGetProcAddress;
+        }
+    }
+    auto real = (NvdEglGpaFn)g_real_egl_gpa;
+    return real ? real(name) : nullptr;
+}
+
+static void* MyEglGetProcAddress(const char* name) {
+    BYTEHOOK_STACK_SCOPE();
+    void* real = BYTEHOOK_CALL_PREV(MyEglGetProcAddress, name);
+    if (!g_gpu_on || name == nullptr) return real;
+    if (strcmp(name, "glGetString") == 0) {
+        if (real != nullptr) g_real_gl_get_string = real;
+        GlChainLog("glGetString", "eglGetProcAddress");
+        return (void*)RepGlGetString;
+    }
+    if (strcmp(name, "eglGetProcAddress") == 0) {
+        if (real != nullptr) g_real_egl_gpa = real;
+        return (void*)RepEglGetProcAddress;
+    }
+    return real;
+}
+
 static void OnGpuHooked(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                         const char* sym_name, void* new_func, void* prev_func, void* arg) {
     (void)stub;
@@ -190,6 +273,17 @@ static void OnGpuHooked(bytehook_stub_t stub, int status_code, const char* calle
     (void)prev_func;
     (void)arg;
     Log("native: gpu hook glGetString status=%d", status_code);
+}
+
+static void OnGpuHookedEgl(bytehook_stub_t stub, int status_code, const char* caller_path_name,
+                           const char* sym_name, void* new_func, void* prev_func, void* arg) {
+    (void)stub;
+    (void)caller_path_name;
+    (void)sym_name;
+    (void)new_func;
+    (void)prev_func;
+    (void)arg;
+    Log("native: gpu hook eglGetProcAddress status=%d", status_code);
 }
 
 void InstallGpuHooks() {
@@ -202,6 +296,15 @@ void InstallGpuHooks() {
         Log("native: glGetString hook failed");
     } else {
         Log("native: glGetString hook installed");
+    }
+    bytehook_stub_t stubEgl = bytehook_hook_partial(CallerAllowHooks, nullptr, "libEGL.so",
+                                                    "eglGetProcAddress",
+                                                    (void*)MyEglGetProcAddress, OnGpuHookedEgl,
+                                                    nullptr);
+    if (!stubEgl) {
+        Log("native: eglGetProcAddress hook failed");
+    } else {
+        Log("native: eglGetProcAddress hook installed");
     }
 }
 

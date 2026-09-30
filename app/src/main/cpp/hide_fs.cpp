@@ -4,8 +4,10 @@
 
 #include "nvd.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <jni.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -122,6 +124,101 @@ static int CreateMemfdWith(const char* data, size_t len, int flags) {
     }
     syscall(SYS_lseek, mfd, 0, SEEK_SET);
     return mfd;
+}
+
+// ---------------------------------------------------------------------------
+// recon logging (diagnostics): when enabled (module GUI toggle), suspicious
+// probes made by the scoped app are written to the module log so its detection
+// surface can be mapped. Pure logging - no behavior changes; hard-capped so a
+// probing loop cannot flood the log.
+// ---------------------------------------------------------------------------
+
+static volatile bool g_recon = false;
+static volatile int g_recon_emitted = 0;
+static volatile bool g_recon_capped = false;
+
+void SetRecon(bool on) {
+    g_recon = on;
+    Log("native: recon logging %s", on ? "on" : "off");
+}
+
+bool ReconEnabled() {
+    return g_recon;
+}
+
+static const char* const kReconTokens[] = {
+    "magisk", "kernelsu", "ksu", "supersu", "superuser", "zygisk", "lsposed", "lspd",
+    "shamiko", "riru", "xposed", "edxposed", "frida", "substrate", "gadget", "data/adb",
+    "busybox", "selinux", "magiskpolicy", "qemu", "goldfish", "ranchu", "emulator",
+    "bluestacks", "vmos", "mumu", "nemu", "netease", "houdini", "nativebridge",
+    "libndk", "waydroid", "genymotion", "cuttlefish", "windvane", "self/maps",
+    "self/smaps", "self/status", "self/task", "self/cmdline", "self/environ", "self/fd",
+    "mountinfo", "/proc/mounts", "proc/net", "tracerpid", "cpuinfo", "cpufreq", "soc0",
+    "midr", "identification", "/su", " su", "debuggable", "ro.secure", "ptrace",
+    "zygisk-module", "ro.boot", "ro.hardware",
+};
+
+static bool ReconHit(const char* s) {
+    if (s == nullptr || s[0] == '\0') return false;
+    char low[192];
+    size_t m = 0;
+    for (; s[m] != '\0' && m < sizeof(low) - 1; m++) {
+        char c = s[m];
+        low[m] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    low[m] = '\0';
+    for (size_t i = 0; i < sizeof(kReconTokens) / sizeof(kReconTokens[0]); i++) {
+        if (strstr(low, kReconTokens[i]) != nullptr) return true;
+    }
+    return false;
+}
+
+void ReconNote(const char* op, const char* detail, long res) {
+    if (!g_recon || detail == nullptr) return;
+    if (!ReconHit(detail)) return;
+    if (g_recon_emitted >= 600) {
+        if (!g_recon_capped) {
+            g_recon_capped = true;
+            Log("native: recon: emission cap reached (further probes suppressed)");
+        }
+        return;
+    }
+    g_recon_emitted++;
+    Log("native: recon: %s %s -> %ld", op, detail, res);
+}
+
+static void ReconNoteN(const char* op, const char* buf, size_t n, long res) {
+    if (!g_recon || buf == nullptr || n == 0) return;
+    char tmp[192];
+    size_t m = n > sizeof(tmp) - 1 ? sizeof(tmp) - 1 : n;
+    for (size_t i = 0; i < m; i++) {
+        char c = buf[i];
+        tmp[i] = (c == '\n' || c == '\r' || c == '\0') ? ' ' : c;
+    }
+    tmp[m] = '\0';
+    ReconNote(op, tmp, res);
+}
+
+static void ReconExec(char* const argv[], const char* path) {
+    if (!g_recon) return;
+    char buf[192];
+    size_t off = 0;
+    buf[0] = '\0';
+    if (path != nullptr) {
+        snprintf(buf, sizeof(buf), "%s", path);
+        off = strlen(buf);
+    }
+    if (argv != nullptr) {
+        for (int i = 0; argv[i] != nullptr && i < 8; i++) {
+            size_t al = strlen(argv[i]);
+            if (off + al + 2 >= sizeof(buf)) break;
+            buf[off++] = ' ';
+            memcpy(buf + off, argv[i], al);
+            off += al;
+            buf[off] = '\0';
+        }
+    }
+    ReconNote("exec", buf, 0);
 }
 
 // Raw build.prop-style files that integrity checkers read directly. When the
@@ -511,6 +608,7 @@ static int CreateFilteredFd(const char* path, int flags) {
 
 int HideOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("open", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -537,6 +635,7 @@ int HideOpen(const char* path, int flags, ...) {
 
 int HideOpen64(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("open", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -563,6 +662,7 @@ int HideOpen64(const char* path, int flags, ...) {
 
 int HideOpen2(const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("open", path, (long)flags);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return -1;
@@ -578,6 +678,7 @@ int HideOpen2(const char* path, int flags) {
 
 int HideOpenAt(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("openat", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -606,6 +707,7 @@ int HideOpenAt(int dirfd, const char* path, int flags, ...) {
 
 int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("openat", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -634,6 +736,7 @@ int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
 
 int HideOpenAt2(int dirfd, const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("openat", path, (long)flags);
     if (path && path[0] == '/') {
         if (IsHiddenPath(path)) {
             errno = ENOENT;
@@ -651,6 +754,7 @@ int HideOpenAt2(int dirfd, const char* path, int flags) {
 
 FILE* HideFopen(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("fopen", path, 0);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return nullptr;
@@ -677,6 +781,7 @@ FILE* HideFopen(const char* path, const char* mode) {
 
 FILE* HideFopen64(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("fopen", path, 0);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return nullptr;
@@ -741,6 +846,7 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
 
 int HideAccess(const char* path, int mode) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("access", path, (long)mode);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return -1;
@@ -750,6 +856,7 @@ int HideAccess(const char* path, int mode) {
 
 int HideFAccessAt(int dirfd, const char* path, int mode, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("faccessat", path, (long)mode);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return -1;
@@ -759,6 +866,7 @@ int HideFAccessAt(int dirfd, const char* path, int mode, int flags) {
 
 int HideStat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("stat", path, 0);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return -1;
@@ -768,6 +876,7 @@ int HideStat(const char* path, struct stat* buf) {
 
 int HideLstat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("lstat", path, 0);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return -1;
@@ -777,6 +886,7 @@ int HideLstat(const char* path, struct stat* buf) {
 
 int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    ReconNote("fstatat", path, 0);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
         return -1;
@@ -923,6 +1033,7 @@ static void FreeRewrittenArgv(char** argv, int n) {
 
 static int MyExecVe(const char* path, char* const argv[], char* const envp[]) {
     BYTEHOOK_STACK_SCOPE();
+    ReconExec(argv, path);
     char** na = nullptr;
     int n = 0;
     if (RewriteArgvForCpuinfo(argv, &na, &n)) {
@@ -936,6 +1047,7 @@ static int MyExecVe(const char* path, char* const argv[], char* const envp[]) {
 
 static int MyExecV(const char* path, char* const argv[]) {
     BYTEHOOK_STACK_SCOPE();
+    ReconExec(argv, path);
     char** na = nullptr;
     int n = 0;
     if (RewriteArgvForCpuinfo(argv, &na, &n)) {
@@ -949,6 +1061,7 @@ static int MyExecV(const char* path, char* const argv[]) {
 
 static int MyExecVp(const char* file, char* const argv[]) {
     BYTEHOOK_STACK_SCOPE();
+    ReconExec(argv, file);
     char** na = nullptr;
     int n = 0;
     if (RewriteArgvForCpuinfo(argv, &na, &n)) {
@@ -963,6 +1076,7 @@ static int MyExecVp(const char* file, char* const argv[]) {
 static int MyPosixSpawn(pid_t* pid, const char* path, const void* fileActions, const void* attr,
                         char* const argv[], char* const envp[]) {
     BYTEHOOK_STACK_SCOPE();
+    ReconExec(argv, path);
     char** na = nullptr;
     int n = 0;
     if (RewriteArgvForCpuinfo(argv, &na, &n)) {
@@ -977,6 +1091,7 @@ static int MyPosixSpawn(pid_t* pid, const char* path, const void* fileActions, c
 static int MyPosixSpawnP(pid_t* pid, const char* file, const void* fileActions, const void* attr,
                          char* const argv[], char* const envp[]) {
     BYTEHOOK_STACK_SCOPE();
+    ReconExec(argv, file);
     char** na = nullptr;
     int n = 0;
     if (RewriteArgvForCpuinfo(argv, &na, &n)) {
@@ -1001,6 +1116,15 @@ static long MySyscall(long number, ...) {
     long a4 = va_arg(ap, long);
     long a5 = va_arg(ap, long);
     va_end(ap);
+#ifdef __NR_openat
+    if (number == __NR_openat) ReconNote("syscall-openat", (const char*)a1, 0);
+#endif
+#ifdef __NR_open
+    if (number == __NR_open) ReconNote("syscall-open", (const char*)a0, 0);
+#endif
+#ifdef __NR_ptrace
+    if (number == __NR_ptrace) ReconNote("syscall-ptrace", "ptrace", 0);
+#endif
 #ifdef __NR_openat
     if (CpuSpoofActive() && number == __NR_openat) {
         const char* cpath = (const char*)a1;
@@ -1073,6 +1197,9 @@ static std::string ReplaceCpuinfoRefsBuf(const char* p, size_t n, const std::str
 
 static ssize_t MyWrite(int fd, const void* buf, size_t count) {
     BYTEHOOK_STACK_SCOPE();
+    if (ReconEnabled() && buf != nullptr && count > 0 && count <= 4096) {
+        ReconNoteN("pipe-write", (const char*)buf, count, (long)fd);
+    }
     if (CpuSpoofActive() && buf != nullptr && count > 0 && count <= 8192 &&
         BufHasCpuinfoRef((const char*)buf, count)) {
         const std::string& fake = FakeCpuinfoPath();
@@ -1088,6 +1215,147 @@ static ssize_t MyWrite(int fd, const void* buf, size_t count) {
         }
     }
     return BYTEHOOK_CALL_PREV(MyWrite, fd, buf, count);
+}
+
+// ---------------------------------------------------------------------------
+// pipe / stream cpuinfo catch: some readers (helper processes, root shells,
+// libsu-style wrappers) receive the cpuinfo text over a pipe instead of
+// opening the file in-process. Those frames pass through read(2) here, so the
+// first frame that looks like a raw host dump is swapped for the ARM view;
+// the fd keeps serving the fake afterwards (EOF when exhausted). fd reuse is
+// guarded by comparing the pipe/file inode.
+// ---------------------------------------------------------------------------
+
+#define NVD_RDC_SLOTS 16
+
+struct NvdRdcSlot {
+    int fd;
+    unsigned pos;
+    unsigned char mode;
+    unsigned long long ino;
+};
+
+static NvdRdcSlot g_rdc[NVD_RDC_SLOTS];
+static volatile int g_rdc_active = 0;
+static std::string g_rdc_fake;
+static bool g_rdc_fake_ready = false;
+
+static int RdcFind(int fd) {
+    for (int i = 0; i < NVD_RDC_SLOTS; i++) {
+        if (g_rdc[i].mode == 1 && g_rdc[i].fd == fd) return i;
+    }
+    return -1;
+}
+
+static int RdcClaim(int fd) {
+    for (int i = 0; i < NVD_RDC_SLOTS; i++) {
+        if (g_rdc[i].mode == 0) {
+            g_rdc[i].fd = fd;
+            g_rdc[i].pos = 0;
+            g_rdc[i].ino = 0;
+            g_rdc[i].mode = 1;
+            g_rdc_active++;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void RdcClear(int idx) {
+    if (idx >= 0 && idx < NVD_RDC_SLOTS && g_rdc[idx].mode == 1) {
+        g_rdc[idx].mode = 0;
+        if (g_rdc_active > 0) g_rdc_active--;
+    }
+}
+
+static unsigned long long RdcInode(int fd) {
+    struct stat st;
+    if (fstat(fd, &st) != 0) return 0;
+    return (unsigned long long)st.st_ino;
+}
+
+static bool RdcMemHas(const char* p, size_t n, const char* tok) {
+    size_t tl = strlen(tok);
+    if (tl == 0 || n < tl) return false;
+    for (size_t i = 0; i + tl <= n; i++) {
+        if (p[i] == tok[0] && memcmp(p + i, tok, tl) == 0) return true;
+    }
+    return false;
+}
+
+static bool RdcLooksRaw(const char* p, size_t n) {
+    if (n < 96) return false;
+    if (memcmp(p, "processor", 9) != 0) return false;
+    if (!RdcMemHas(p, n, "vendor_id") && !RdcMemHas(p, n, "model name")) return false;
+    if (!RdcMemHas(p, n, "GenuineIntel") && !RdcMemHas(p, n, "AuthenticAMD")) return false;
+    if (!RdcMemHas(p, n, "cpu family") && !RdcMemHas(p, n, "stepping")) return false;
+    return true;
+}
+
+static void RdcBuildFake() {
+    g_rdc_fake_ready = true;
+    std::string raw;
+    if (!ReadWholeFile("/proc/cpuinfo", &raw)) return;
+    std::string out;
+    RewriteCpuinfoContent(raw, &out);
+    if (!out.empty()) g_rdc_fake = out;
+}
+
+static ssize_t MyRead(int fd, void* buf, size_t count) {
+    BYTEHOOK_STACK_SCOPE();
+    if (CpuSpoofActive() && g_rdc_active > 0 && buf != nullptr) {
+        int idx = RdcFind(fd);
+        if (idx >= 0) {
+            unsigned long long ino = RdcInode(fd);
+            if (ino != 0 && g_rdc[idx].ino != 0 && ino != g_rdc[idx].ino) {
+                RdcClear(idx);  // fd was reused for a different object
+            } else {
+                size_t len = g_rdc_fake.size();
+                if (g_rdc[idx].pos >= len) return 0;
+                size_t chunk = len - g_rdc[idx].pos;
+                if (chunk > count) chunk = count;
+                memcpy(buf, g_rdc_fake.data() + g_rdc[idx].pos, chunk);
+                g_rdc[idx].pos += (unsigned)chunk;
+                return (ssize_t)chunk;
+            }
+        }
+    }
+    ssize_t n = BYTEHOOK_CALL_PREV(MyRead, fd, buf, count);
+    if (n >= 96 && CpuSpoofActive() && buf != nullptr) {
+        const char* p = (const char*)buf;
+        if (p[0] == 'p' && RdcLooksRaw(p, (size_t)n)) {
+            if (!g_rdc_fake_ready) RdcBuildFake();
+            if (!g_rdc_fake.empty()) {
+                int idx = RdcClaim(fd);
+                if (idx >= 0) {
+                    g_rdc[idx].ino = RdcInode(fd);
+                    size_t chunk = g_rdc_fake.size();
+                    if (chunk > (size_t)n) chunk = (size_t)n;
+                    memcpy(buf, g_rdc_fake.data(), chunk);
+                    g_rdc[idx].pos = (unsigned)chunk;
+                    Log("native: cpuinfo read-catch fd=%d served ARM view", fd);
+                    return (ssize_t)chunk;
+                }
+            }
+        }
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
+// recon extras: directory listings (location probes are often done with
+// opendir) - logged, never modified.
+// ---------------------------------------------------------------------------
+
+static DIR* MyOpendir(const char* name) {
+    BYTEHOOK_STACK_SCOPE();
+    ReconNote("opendir", name, 0);
+    return BYTEHOOK_CALL_PREV(MyOpendir, name);
+}
+
+void InstallReconHooks() {
+    HookLibcSym("opendir", (void*)MyOpendir);
+    Log("native: recon hooks installed");
 }
 
 void InstallFsHooks() {
@@ -1115,7 +1383,16 @@ void InstallCpuDeepHooks() {
     HookLibcSym("posix_spawnp", (void*)MyPosixSpawnP);
     HookLibcSym("syscall", (void*)MySyscall);
     HookLibcSym("write", (void*)MyWrite);
-    Log("native: cpu deep hooks installed (exec/syscall/write)");
+    HookLibcSym("read", (void*)MyRead);
+    Log("native: cpu deep hooks installed (exec/syscall/write/read)");
 }
 
 }  // namespace nvd
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetRecon(JNIEnv* env, jobject thiz,
+                                                           jboolean reconOn) {
+    (void)env;
+    (void)thiz;
+    nvd::SetRecon(reconOn == JNI_TRUE);
+}

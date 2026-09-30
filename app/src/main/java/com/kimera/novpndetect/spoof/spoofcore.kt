@@ -60,6 +60,8 @@ object SpoofCore {
         gpuDriverInfo: String
     )
 
+    external fun nativeSetRecon(reconOn: Boolean)
+
     /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
         Thread({
@@ -103,6 +105,14 @@ object SpoofCore {
             TAG,
             "[NVD] id spoof: widevine=${SpoofState.widevineOn} gsf=${SpoofState.gsfOn}"
         )
+
+        // Recon diagnostics toggle: independent of the native addon gate, but
+        // delivered before nativeSetConfig so the native worker can install
+        // the recon hook group when it starts.
+        val reconOn = prefs.getBoolean("recon_enabled", false)
+        SpoofState.reconOn = reconOn
+        runCatching { nativeSetRecon(reconOn) }
+        Log.i(TAG, "[NVD] recon logging: $reconOn")
 
         // CPU / GPU spoof values (resolved from the shared catalog; active only
         // together with the native addon so all surfaces stay consistent).
