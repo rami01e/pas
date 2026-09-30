@@ -261,9 +261,16 @@ static void OnHooked(bytehook_stub_t stub, int status_code, const char* caller_p
                      const char* sym_name, void* new_func, void* prev_func, void* arg) {
     (void)stub;
     (void)new_func;
+    (void)prev_func;
     (void)arg;
-    Log("native: hook %s <- %s status=%d", sym_name ? sym_name : "?",
-        caller_path_name ? caller_path_name : "?", status_code);
+    // Successful chaining is routine and extremely chatty (hundreds of lines
+    // per process); keep only failures on the log. "dlsym" is exempt: its
+    // activation is rare and is the key signal while diagnosing GL resolution
+    // for browser-style consumers.
+    const char* sym = sym_name ? sym_name : "?";
+    if (status_code == 0 && strcmp(sym, "dlsym") != 0) return;
+    Log("native: hook %s <- %s status=%d", sym, caller_path_name ? caller_path_name : "?",
+        status_code);
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +325,11 @@ void HookLibcSym(const char* sym, void* proxy) {
     bytehook_stub_t stub = bytehook_hook_partial(CallerAllow, nullptr, "libc.so", sym, proxy,
                                                  OnHooked, nullptr);
     if (!stub) Log("native: bytehook_hook_partial failed for %s", sym);
+}
+
+void* HookChainStub(const char* owner_regex, const char* sym, void* proxy) {
+    return (void*)bytehook_hook_partial(CallerAllow, nullptr, owner_regex, sym, proxy, OnHooked,
+                                        nullptr);
 }
 
 static void OnModuleLoadedCb(const char* name, void* handle) {

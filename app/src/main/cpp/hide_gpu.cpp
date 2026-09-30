@@ -34,6 +34,7 @@ static char g_cpu_model[64] = {0};
 static char g_cpu_part[16] = {0};
 static char g_cpu_info_model[96] = {0};
 static char g_cpu_features[256] = {0};
+static char g_cpu_hwline[256] = {0};
 static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
 
@@ -54,7 +55,7 @@ static void CopyStr(char* dst, size_t cap, const char* src) {
 
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
-                  int maxKHz) {
+                  int maxKHz, const char* hwLine) {
     g_cpu_on = false;
     CopyStr(g_cpu_display, sizeof(g_cpu_display), display);
     CopyStr(g_cpu_mfr, sizeof(g_cpu_mfr), mfr);
@@ -62,6 +63,7 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
     CopyStr(g_cpu_part, sizeof(g_cpu_part), part);
     CopyStr(g_cpu_info_model, sizeof(g_cpu_info_model), cpuInfoModel);
     CopyStr(g_cpu_features, sizeof(g_cpu_features), features);
+    CopyStr(g_cpu_hwline, sizeof(g_cpu_hwline), hwLine);
     g_cpu_min_khz = minKHz;
     g_cpu_max_khz = maxKHz;
     g_cpu_on = cpuOn && g_cpu_display[0] != '\0';
@@ -114,6 +116,10 @@ std::string CpuSpoofCpuinfoModel() {
 
 std::string CpuSpoofFeatures() {
     return std::string(g_cpu_features);
+}
+
+std::string CpuSpoofHwLine() {
+    return std::string(g_cpu_hwline);
 }
 
 int CpuSpoofMinKHz() {
@@ -169,60 +175,113 @@ std::string GpuSpoofDriverInfo() {
 // ---------------------------------------------------------------------------
 
 // GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01, GL_VERSION = 0x1F02
-static const unsigned char* MyGlGetString(unsigned int name) {
-    BYTEHOOK_STACK_SCOPE();
-    if (g_gpu_on) {
-        if (name == 0x1F00) return (const unsigned char*)g_gpu_vendor;
-        if (name == 0x1F01) return (const unsigned char*)g_gpu_renderer;
-        if (name == 0x1F02 && g_gpu_gl_version[0] != '\0') {
-            return (const unsigned char*)g_gpu_gl_version;
-        }
-    }
-    return BYTEHOOK_CALL_PREV(MyGlGetString, name);
-}
-
-// ---------------------------------------------------------------------------
-// Resolver-chain coverage (Chrome / WebView / ANGLE-style consumers): GL
-// entry points are often obtained through eglGetProcAddress or dlsym instead
-// of direct calls. Those resolvers are wrapped so a request for glGetString
-// answers with the spoofed strings. The pointer handed back is bytehook-free
-// because resolver results are called directly (outside bytehook frames).
-// ---------------------------------------------------------------------------
+// GL identity entry points are covered on every path ANGLE-style consumers
+// use: direct PLT calls (bytehook), eglGetProcAddress resolution and dlsym
+// resolution. Resolver results are bytehook-free representatives because
+// those pointers are called directly (outside bytehook frames).
 
 typedef void* (*NvdEglGpaFn)(const char*);
 typedef const unsigned char* (*NvdGlGetStringFn)(unsigned int);
+typedef const unsigned char* (*NvdGlGetStringiFn)(unsigned int, unsigned int);
 
 static void* volatile g_real_gl_get_string = nullptr;
+static void* volatile g_real_gl_get_stringi = nullptr;
 static void* volatile g_real_egl_gpa = nullptr;
 static volatile unsigned g_gl_chain_logged = 0;
+static volatile int g_gl_diag = 0;
+
+// Recon-gated GL diagnosis: records which GL/EGL entry points actually flow
+// through the module inside this process (capped; driven by the GUI "Recon
+// logging" toggle). This is how we see what Chrome's ANGLE really calls.
+void GpuDiag(const char* tag, const char* detail) {
+    if (!ReconEnabled()) return;
+    int n = __sync_fetch_and_add(&g_gl_diag, 1);
+    if (n == 240) {
+        Log("native: recon: gl trace cap reached");
+        return;
+    }
+    if (n > 240) return;
+    Log("native: recon: gl %s %s", tag, detail ? detail : "");
+}
+
+static void DiagGlStr(const char* tag, unsigned name, int spoofed) {
+    if (!ReconEnabled()) return;
+    char b[48];
+    snprintf(b, sizeof(b), "0x%x spoof=%d", name, spoofed);
+    GpuDiag(tag, b);
+}
 
 static void GlChainLog(const char* name, const char* how) {
-    unsigned bit = (strcmp(name, "glGetString") == 0) ? 1u : 2u;
+    unsigned bit = (strcmp(name, "glGetString") == 0) ? 1u
+                   : (strcmp(name, "glGetStringi") == 0) ? 4u : 2u;
     if (g_gl_chain_logged & bit) return;
     g_gl_chain_logged |= bit;
     Log("native: gl loader-chain %s: %s", how, name);
 }
 
-static const unsigned char* RepGlGetString(unsigned int name) {
-    if (g_gpu_on) {
-        if (name == 0x1F00) return (const unsigned char*)g_gpu_vendor;
-        if (name == 0x1F01) return (const unsigned char*)g_gpu_renderer;
-        if (name == 0x1F02 && g_gpu_gl_version[0] != '\0') {
-            return (const unsigned char*)g_gpu_gl_version;
-        }
+// Maps the identity names to the spoofed strings; false => not handled here.
+static bool SpoofGlName(unsigned name, const unsigned char** out) {
+    if (!g_gpu_on) return false;
+    if (name == 0x1F00) {
+        *out = (const unsigned char*)g_gpu_vendor;
+        return true;
     }
+    if (name == 0x1F01) {
+        *out = (const unsigned char*)g_gpu_renderer;
+        return true;
+    }
+    if (name == 0x1F02 && g_gpu_gl_version[0] != '\0') {
+        *out = (const unsigned char*)g_gpu_gl_version;
+        return true;
+    }
+    return false;
+}
+
+static const unsigned char* MyGlGetString(unsigned int name) {
+    BYTEHOOK_STACK_SCOPE();
+    const unsigned char* spoofed = nullptr;
+    bool spoof = SpoofGlName(name, &spoofed);
+    DiagGlStr("glgs", name, spoof ? 1 : 0);
+    if (spoof) return spoofed;
+    return BYTEHOOK_CALL_PREV(MyGlGetString, name);
+}
+
+static const unsigned char* RepGlGetString(unsigned int name) {
+    const unsigned char* spoofed = nullptr;
+    bool spoof = SpoofGlName(name, &spoofed);
+    DiagGlStr("glgs", name, spoof ? 1 : 0);
+    if (spoof) return spoofed;
     auto real = (NvdGlGetStringFn)g_real_gl_get_string;
     return real ? real(name) : nullptr;
+}
+
+static const unsigned char* RepGlGetStringi(unsigned int name, unsigned int index) {
+    const unsigned char* spoofed = nullptr;
+    bool spoof = index == 0 && SpoofGlName(name, &spoofed);
+    DiagGlStr("glgsi", name, spoof ? 1 : 0);
+    if (spoof) return spoofed;
+    auto real = (NvdGlGetStringiFn)g_real_gl_get_stringi;
+    return real ? real(name, index) : nullptr;
 }
 
 static void* RepEglGetProcAddress(const char* name);
 
 void* GpuChainResolveDlsym(const char* symbol, void* real) {
-    if (!g_gpu_on || symbol == nullptr || real == nullptr) return nullptr;
+    if (symbol == nullptr) return nullptr;
+    if (strcmp(symbol, "glGetString") == 0 || strcmp(symbol, "glGetStringi") == 0 ||
+        strcmp(symbol, "eglGetProcAddress") == 0) {
+        GpuDiag("dlsym", symbol);
+    }
+    if (!g_gpu_on || real == nullptr) return nullptr;
     if (strcmp(symbol, "glGetString") == 0) {
         g_real_gl_get_string = real;
         GlChainLog("glGetString", "dlsym");
         return (void*)RepGlGetString;
+    }
+    if (strcmp(symbol, "glGetStringi") == 0) {
+        g_real_gl_get_stringi = real;
+        GlChainLog("glGetStringi", "dlsym");
+        return (void*)RepGlGetStringi;
     }
     if (strcmp(symbol, "eglGetProcAddress") == 0) {
         g_real_egl_gpa = real;
@@ -232,6 +291,7 @@ void* GpuChainResolveDlsym(const char* symbol, void* real) {
 }
 
 static void* RepEglGetProcAddress(const char* name) {
+    if (name != nullptr) GpuDiag("eglgpa", name);
     if (g_gpu_on && name != nullptr) {
         if (strcmp(name, "glGetString") == 0) {
             auto real = (NvdEglGpaFn)g_real_egl_gpa;
@@ -239,6 +299,13 @@ static void* RepEglGetProcAddress(const char* name) {
             if (r != nullptr) g_real_gl_get_string = r;
             GlChainLog("glGetString", "eglGetProcAddress");
             return (void*)RepGlGetString;
+        }
+        if (strcmp(name, "glGetStringi") == 0) {
+            auto real = (NvdEglGpaFn)g_real_egl_gpa;
+            void* r = real ? real(name) : nullptr;
+            if (r != nullptr) g_real_gl_get_stringi = r;
+            GlChainLog("glGetStringi", "eglGetProcAddress");
+            return (void*)RepGlGetStringi;
         }
         if (strcmp(name, "eglGetProcAddress") == 0) {
             return (void*)RepEglGetProcAddress;
@@ -248,14 +315,29 @@ static void* RepEglGetProcAddress(const char* name) {
     return real ? real(name) : nullptr;
 }
 
+static const unsigned char* MyGlGetStringi(unsigned int name, unsigned int index) {
+    BYTEHOOK_STACK_SCOPE();
+    const unsigned char* spoofed = nullptr;
+    bool spoof = index == 0 && SpoofGlName(name, &spoofed);
+    DiagGlStr("glgsi", name, spoof ? 1 : 0);
+    if (spoof) return spoofed;
+    return BYTEHOOK_CALL_PREV(MyGlGetStringi, name, index);
+}
+
 static void* MyEglGetProcAddress(const char* name) {
     BYTEHOOK_STACK_SCOPE();
     void* real = BYTEHOOK_CALL_PREV(MyEglGetProcAddress, name);
+    if (name != nullptr) GpuDiag("eglgpa", name);
     if (!g_gpu_on || name == nullptr) return real;
     if (strcmp(name, "glGetString") == 0) {
         if (real != nullptr) g_real_gl_get_string = real;
         GlChainLog("glGetString", "eglGetProcAddress");
         return (void*)RepGlGetString;
+    }
+    if (strcmp(name, "glGetStringi") == 0) {
+        if (real != nullptr) g_real_gl_get_stringi = real;
+        GlChainLog("glGetStringi", "eglGetProcAddress");
+        return (void*)RepGlGetStringi;
     }
     if (strcmp(name, "eglGetProcAddress") == 0) {
         if (real != nullptr) g_real_egl_gpa = real;
@@ -264,48 +346,64 @@ static void* MyEglGetProcAddress(const char* name) {
     return real;
 }
 
+static volatile int g_gpu_hooklog = 0;
+
+static void LogGpuHookActivation(const char* sym, int status, const char* caller) {
+    if (g_gpu_hooklog >= 32) return;
+    g_gpu_hooklog++;
+    char c[128];
+    snprintf(c, sizeof(c), "%s", caller ? caller : "?");
+    Log("native: gpu hook %s status=%d caller=%s", sym, status, c);
+}
+
 static void OnGpuHooked(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                         const char* sym_name, void* new_func, void* prev_func, void* arg) {
     (void)stub;
-    (void)caller_path_name;
     (void)sym_name;
     (void)new_func;
     (void)prev_func;
     (void)arg;
-    Log("native: gpu hook glGetString status=%d", status_code);
+    LogGpuHookActivation("glGetString", status_code, caller_path_name);
+}
+
+static void OnGpuHookedGsi(bytehook_stub_t stub, int status_code, const char* caller_path_name,
+                           const char* sym_name, void* new_func, void* prev_func, void* arg) {
+    (void)stub;
+    (void)sym_name;
+    (void)new_func;
+    (void)prev_func;
+    (void)arg;
+    LogGpuHookActivation("glGetStringi", status_code, caller_path_name);
 }
 
 static void OnGpuHookedEgl(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                            const char* sym_name, void* new_func, void* prev_func, void* arg) {
     (void)stub;
-    (void)caller_path_name;
     (void)sym_name;
     (void)new_func;
     (void)prev_func;
     (void)arg;
-    Log("native: gpu hook eglGetProcAddress status=%d", status_code);
+    LogGpuHookActivation("eglGetProcAddress", status_code, caller_path_name);
 }
 
 void InstallGpuHooks() {
     // Same caller filter as the rest of the module: never patch PLT/GOT of
-    // ARM-translated application libraries.
-    bytehook_stub_t stub = bytehook_hook_partial(CallerAllowHooks, nullptr, "libGLESv2.so",
+    // ARM-translated application libraries. The owner regexes stay broad so
+    // the emulator's driver naming variants (libGLESv2_*.so, libEGL_*.so)
+    // match as well.
+    bytehook_stub_t stub = bytehook_hook_partial(CallerAllowHooks, nullptr, "libGLES",
                                                  "glGetString", (void*)MyGlGetString,
                                                  OnGpuHooked, nullptr);
-    if (!stub) {
-        Log("native: glGetString hook failed");
-    } else {
-        Log("native: glGetString hook installed");
-    }
-    bytehook_stub_t stubEgl = bytehook_hook_partial(CallerAllowHooks, nullptr, "libEGL.so",
+    Log("native: gpu hook glGetString stub=%d", stub != nullptr);
+    bytehook_stub_t stubI = bytehook_hook_partial(CallerAllowHooks, nullptr, "libGLES",
+                                                  "glGetStringi", (void*)MyGlGetStringi,
+                                                  OnGpuHookedGsi, nullptr);
+    Log("native: gpu hook glGetStringi stub=%d", stubI != nullptr);
+    bytehook_stub_t stubEgl = bytehook_hook_partial(CallerAllowHooks, nullptr, "libEGL",
                                                     "eglGetProcAddress",
                                                     (void*)MyEglGetProcAddress, OnGpuHookedEgl,
                                                     nullptr);
-    if (!stubEgl) {
-        Log("native: eglGetProcAddress hook failed");
-    } else {
-        Log("native: eglGetProcAddress hook installed");
-    }
+    Log("native: gpu hook eglGetProcAddress stub=%d", stubEgl != nullptr);
 }
 
 }  // namespace nvd
@@ -316,7 +414,7 @@ Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject th
                                                          jstring cpuMfr, jstring cpuModel,
                                                          jstring cpuPart, jstring cpuInfoModel,
                                                          jstring cpuFeatures, jint minKhz,
-                                                         jint maxKhz) {
+                                                         jint maxKhz, jstring cpuHwLine) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -331,8 +429,10 @@ Java_com_kimera_novpndetect_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject th
     std::string part = toStr(cpuPart);
     std::string infoModel = toStr(cpuInfoModel);
     std::string features = toStr(cpuFeatures);
+    std::string hwLine = toStr(cpuHwLine);
     nvd::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
-                      infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz);
+                      infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz,
+                      hwLine.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL

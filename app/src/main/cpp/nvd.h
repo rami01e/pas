@@ -31,6 +31,10 @@ namespace nvd {
 void Log(const char* fmt, ...);
 
 void HookLibcSym(const char* sym, void* proxy);
+// Same as HookLibcSym but with an explicit owner-ELF regex and a stub result
+// so callers can log/verify activation ("dlsym" needs the owner probe:
+// modern bionic serves dlsym through libdl.so's forwarding stub).
+void* HookChainStub(const char* owner_regex, const char* sym, void* proxy);
 
 bool IsHiddenIfaceName(const char* name);
 bool IsHiddenPath(const char* path);
@@ -57,7 +61,7 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool comp
 // CPU model / GPU (OpenGL + Vulkan) spoof (hide_gpu.cpp, hide_vulkan.cpp)
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
-                  int maxKHz);
+                  int maxKHz, const char* hwLine);
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
@@ -69,6 +73,7 @@ std::string CpuSpoofModel();
 std::string CpuSpoofPart();
 std::string CpuSpoofCpuinfoModel();
 std::string CpuSpoofFeatures();
+std::string CpuSpoofHwLine();
 int CpuSpoofMinKHz();
 int CpuSpoofMaxKHz();
 bool GpuSpoofActive();
@@ -96,6 +101,9 @@ void InstallReconHooks();
 // hide_vulkan.cpp. Returns the bytehook-free representative for GL entry
 // points resolved dynamically, or nullptr when not handled.
 void* GpuChainResolveDlsym(const char* symbol, void* real);
+// Recon-gated GL/Vulkan resolver tracing (hide_gpu.cpp): logs which entry
+// points actually flow through the module while "Recon logging" is on.
+void GpuDiag(const char* tag, const char* detail);
 
 // Caller filter shared with the GPU hook installer (defined in nvd.cpp).
 bool CallerAllowHooks(const char* caller_path_name, void* arg);

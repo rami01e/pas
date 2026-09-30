@@ -47,7 +47,14 @@ object DeviceCatalog {
         val hardware: String,
         /** /sys cpufreq min/max, kHz. */
         val minKHz: Int,
-        val maxKHz: Int
+        val maxKHz: Int,
+        /**
+         * /proc/cpuinfo "Hardware" row. Samsung kernels print the machine
+         * string here (e.g. "exynos850 (Samsung A13 EUR OPEN REV02B board
+         * based on EXYNOS850)"); hardware-info apps display it. Empty =>
+         * a generic variation is derived in SpoofCore.apply().
+         */
+        val hardwareLine: String = ""
     )
 
     data class Gpu(
@@ -72,8 +79,9 @@ object DeviceCatalog {
         // ---- Exynos (2022-2026 devices + the reference E850) ----
         Cpu(
             "Samsung Exynos 850", "Samsung", "S5E3830", "0x0d05",
-            "ARMv8 Processor rev 1 (v8)", FEATURES_ARM32, "exynos850", 546000, 2002000
-        ), // Galaxy A13 (reference profile)
+            "ARMv8 Processor rev 1 (v8)", FEATURES_ARM32, "exynos850", 546000, 2002000,
+            "exynos850 (Samsung A13 EUR OPEN REV02B board based on EXYNOS850)"
+        ), // Galaxy A13 (reference profile; Hardware row verified on the real device)
         Cpu(
             "Samsung Exynos 1280", "Samsung", "S5E8825", "0xd41",
             AARCH64_MODEL, FEATURES_ARM64, "exynos1280", 300000, 2200000

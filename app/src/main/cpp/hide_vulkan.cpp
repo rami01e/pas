@@ -466,14 +466,19 @@ static void* MyDlsym(void* handle, const char* symbol) {
 // install
 // ---------------------------------------------------------------------------
 
+static volatile int g_vk_hooklog = 0;
+
 static void OnVkHooked(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                        const char* sym_name, void* new_func, void* prev_func, void* arg) {
     (void)stub;
-    (void)caller_path_name;
     (void)new_func;
     (void)prev_func;
     (void)arg;
-    Log("native: vulkan hook %s status=%d", sym_name ? sym_name : "?", status_code);
+    if (g_vk_hooklog >= 32) return;
+    g_vk_hooklog++;
+    char c[128];
+    snprintf(c, sizeof(c), "%s", caller_path_name ? caller_path_name : "?");
+    Log("native: vulkan hook %s status=%d caller=%s", sym_name ? sym_name : "?", status_code, c);
 }
 
 void InstallVulkanHooks() {
@@ -499,9 +504,15 @@ void InstallVulkanHooks() {
                                                      s.sym, s.fn, OnVkHooked, nullptr);
         if (stub) ok++;
     }
-    // ANGLE-style consumers fetch the entry points through dlsym; cover that
-    // path as well.
-    HookLibcSym("dlsym", (void*)MyDlsym);
+    // ANGLE-style consumers (Chrome / WebView) fetch the GL entry points
+    // through dlsym; cover that path as well. The stub is requested for both
+    // owner candidates (dlsym is served by libdl.so's forwarding stub on
+    // modern bionic) and the results are logged so a dead chain is visible
+    // in the capture.
+    void* dStub = HookChainStub("libc.so", "dlsym", (void*)MyDlsym);
+    Log("native: dlsym chain libc.so stub=%d", dStub != nullptr);
+    void* dStub2 = HookChainStub("libdl.so", "dlsym", (void*)MyDlsym);
+    Log("native: dlsym chain libdl.so stub=%d", dStub2 != nullptr);
     Log("native: vulkan hooks installed %d/%d (+dlsym chain)", ok,
         (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
 }

@@ -44,7 +44,8 @@ object SpoofCore {
         cpuInfoModel: String,
         cpuFeatures: String,
         cpuMinKHz: Int,
-        cpuMaxKHz: Int
+        cpuMaxKHz: Int,
+        cpuHwLine: String
     )
 
     external fun nativeSetGpu(
@@ -139,7 +140,10 @@ object SpoofCore {
             nativeSetCpu(
                 cpuOnEff, cpuEntry.display, cpuEntry.manufacturer, cpuEntry.socModel,
                 cpuEntry.part, cpuEntry.cpuinfoModel, cpuEntry.features,
-                cpuEntry.minKHz, cpuEntry.maxKHz
+                cpuEntry.minKHz, cpuEntry.maxKHz,
+                cpuEntry.hardwareLine.ifEmpty {
+                    "${cpuEntry.hardware} (Samsung board based on ${cpuEntry.socModel})"
+                }
             )
         }
         runCatching {

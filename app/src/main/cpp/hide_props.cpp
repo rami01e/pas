@@ -123,6 +123,40 @@ bool SpoofActive() {
     return g_sdk_on || g_abi_on || CpuSpoofActive();
 }
 
+// Recon value logging: while recon is on, record the RAW values (pre-spoof)
+// of the device-identity properties a target app reads, so a capture shows
+// exactly what the environment reports on every surface. Capped.
+static volatile int g_prop_diag = 0;
+
+static bool PropDiagName(const char* name) {
+    if (!name) return false;
+    static const char* const kDiag[] = {
+        "hardware", "soc", "board", "platform", "egl", "gles", "vulkan", "nemu",
+        "qemu", "goldfish", "ranchu", "emulator", "product.model", "product.device",
+        "product.name", "product.brand", "product.manufacturer", "arch", "abi",
+        "version.sdk", "build.fingerprint", "bootloader", "verifiedboot", "flash",
+    };
+    char low[160];
+    size_t m = 0;
+    for (; name[m] != '\0' && m < sizeof(low) - 1; m++) {
+        char c = name[m];
+        low[m] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+    }
+    low[m] = '\0';
+    for (size_t i = 0; i < sizeof(kDiag) / sizeof(kDiag[0]); i++) {
+        if (strstr(low, kDiag[i]) != nullptr) return true;
+    }
+    return false;
+}
+
+static void ReconPropValue(const char* name, const char* value) {
+    if (!ReconEnabled() || name == nullptr || value == nullptr) return;
+    if (!PropDiagName(name)) return;
+    if (g_prop_diag >= 150) return;
+    g_prop_diag++;
+    Log("native: recon: propv %s = %s", name, value);
+}
+
 static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_t cap,
                             size_t* outLen);
 
@@ -188,11 +222,11 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
 int HidePropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("prop", name, 0);
-    if (!name || !value || (!g_sdk_on && !g_abi_on && !CpuSpoofActive())) {
-        return BYTEHOOK_CALL_PREV(HidePropGet, name, value);
-    }
-    if (!IsSpoofTarget(name)) {
-        return BYTEHOOK_CALL_PREV(HidePropGet, name, value);
+    const bool active = g_sdk_on || g_abi_on || CpuSpoofActive();
+    if (!name || !value || !active || !IsSpoofTarget(name)) {
+        int r = BYTEHOOK_CALL_PREV(HidePropGet, name, value);
+        if (value != nullptr && value[0] != '\0') ReconPropValue(name, value);
+        return r;
     }
     char orig[PROP_VALUE_MAX];
     orig[0] = '\0';
@@ -200,6 +234,8 @@ int HidePropGet(const char* name, char* value) {
     if (n < 0) n = 0;
     if (n > PROP_VALUE_MAX - 1) n = PROP_VALUE_MAX - 1;
     orig[n] = '\0';
+    // Record the environment's raw (pre-spoof) value for the capture.
+    ReconPropValue(name, orig);
     char repl[PROP_VALUE_MAX];
     size_t rl = 0;
     if (BuildSpoofValue(name, orig, repl, sizeof(repl), &rl)) {
@@ -220,6 +256,7 @@ struct ReadCbCtx {
 
 static void SpoofReadCb(void* cookie, const char* name, const char* value, uint32_t serial) {
     ReconNote("prop-cb", name, 0);
+    ReconPropValue(name, value);
     auto* ctx = (ReadCbCtx*)cookie;
     if (name && ((g_sdk_on || g_abi_on || CpuSpoofActive()) && IsSpoofTarget(name))) {
         char repl[PROP_VALUE_MAX];

@@ -155,7 +155,9 @@ static const char* const kReconTokens[] = {
     "self/smaps", "self/status", "self/task", "self/cmdline", "self/environ", "self/fd",
     "mountinfo", "/proc/mounts", "proc/net", "tracerpid", "cpuinfo", "cpufreq", "soc0",
     "midr", "identification", "/su", " su", "debuggable", "ro.secure", "ptrace",
-    "zygisk-module", "ro.boot", "ro.hardware",
+    "zygisk-module", "ro.boot", "ro.hardware", "topology", "related_cpus",
+    "affected_cpus", "core_id", "cluster", "devicetree", "compatible", "serial",
+    "board", "platform", "vendor_id", "bogomips", "physical_package",
 };
 
 static bool ReconHit(const char* s) {
@@ -320,6 +322,14 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
         e = (e == std::string::npos) ? raw.size() : e + 1;
         std::string line(raw, p, e - p);
         if (!CpuinfoKeyMatch(line.c_str(), "processor")) {
+            // Hardware/Revision/Serial rows are replaced by the authentic
+            // ARM tail appended after the per-core blocks.
+            if (CpuinfoKeyMatch(line.c_str(), "Hardware") ||
+                CpuinfoKeyMatch(line.c_str(), "Revision") ||
+                CpuinfoKeyMatch(line.c_str(), "Serial")) {
+                p = e;
+                continue;
+            }
             out->append(line);
             p = e;
             continue;
@@ -375,6 +385,18 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
             if (CpuinfoKeyMatch(raw.c_str() + p, "processor")) break;
             p = e2;
         }
+    }
+    // Authentic ARM tail rows (Samsung-style Hardware string + revision and
+    // serial placeholders), so hardware-info readers that inspect the tail
+    // section stay consistent with the spoofed model too.
+    const std::string hwLine = CpuSpoofHwLine();
+    if (CpuSpoofActive() && !hwLine.empty()) {
+        out->push_back('\n');
+        out->append("Hardware\t: ");
+        out->append(hwLine);
+        out->push_back('\n');
+        out->append("Revision\t: 0000\n");
+        out->append("Serial\t\t: 0000000000000000\n");
     }
 }
 
