@@ -9,6 +9,7 @@ import kotlin.collections.iterator
 import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 
 class HookLinkProperties : XHook {
 
@@ -27,6 +28,7 @@ class HookLinkProperties : XHook {
         hookGetInterfaceName(module)
         hookGetRoutes(module)
         hookGetDnsServers(module)
+        hookGetLinkAddresses(module)
     }
 
     private fun hookGetInterfaceName(module: XposedModule) {
@@ -57,6 +59,21 @@ class HookLinkProperties : XHook {
                 } else {
                     result
                 }
+            }
+        }
+    }
+
+    /** Recon: log-only pass-through so captures show which addresses apps read. */
+    private fun hookGetLinkAddresses(module: XposedModule) {
+        hookSafe(module, "LinkProperties.getLinkAddresses") {
+            val method = LinkProperties::class.java.getMethod("getLinkAddresses")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                if (SpoofState.reconOn) {
+                    val list = (result as? List<*>)?.joinToString { it.toString() } ?: "?"
+                    module.log(Log.INFO, TAG, "LinkProperties.getLinkAddresses -> [$list]")
+                }
+                result
             }
         }
     }

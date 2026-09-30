@@ -66,6 +66,42 @@ object SpoofSettings {
         null
     }
 
+    /**
+     * Ask the framework to add apps to the module scope. The framework may
+     * show its own confirmation UI; [onResult] relays the outcome.
+     */
+    fun requestScope(packages: List<String>, onResult: (ok: Boolean, detail: String) -> Unit) {
+        val svc = service
+        if (svc == null) {
+            onResult(false, "Vector service not connected")
+            return
+        }
+        try {
+            svc.requestScope(packages, object : XposedService.OnScopeEventListener {
+                override fun onScopeRequestApproved(approved: MutableList<String>) {
+                    onResult(true, "${approved.size} app(s) approved")
+                }
+
+                override fun onScopeRequestFailed(message: String) {
+                    onResult(false, message)
+                }
+            })
+        } catch (t: Throwable) {
+            onResult(false, t.message ?: "request failed")
+        }
+    }
+
+    /** Remove apps from the module scope. Returns false on failure. */
+    fun removeScope(packages: List<String>): Boolean {
+        val svc = service ?: return false
+        return try {
+            svc.removeScope(packages)
+            true
+        } catch (t: Throwable) {
+            false
+        }
+    }
+
     fun load(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(LOCAL, Context.MODE_PRIVATE)
 

@@ -2,6 +2,7 @@ package com.kimera.pas.hooks
 
 import android.app.PendingIntent
 import android.net.ConnectivityManager
+import android.net.Network
 import android.net.NetworkRequest
 import android.os.Handler
 import android.util.Log
@@ -9,6 +10,7 @@ import io.github.libxposed.api.XposedModule
 import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 
 class HookConnectivityManager : XHook {
 
@@ -18,7 +20,46 @@ class HookConnectivityManager : XHook {
     override fun injectHook(module: XposedModule) {
         hookNetworkInfo(module)
         hookRequestNetwork(module)
+        hookEnumeration(module)
         // TODO: will apps detect VPN from isVpnLockdownEnabled?
+    }
+
+    /** Recon: log-only pass-throughs around the network enumeration paths. */
+    private fun hookEnumeration(module: XposedModule) {
+        hookSafe(module, "ConnectivityManager.getActiveNetwork") {
+            val method = ConnectivityManager::class.java.getMethod("getActiveNetwork")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                if (SpoofState.reconOn) {
+                    module.log(Log.INFO, TAG, "ConnectivityManager.getActiveNetwork -> $result")
+                }
+                result
+            }
+        }
+        hookSafe(module, "ConnectivityManager.getAllNetworks") {
+            val method = ConnectivityManager::class.java.getMethod("getAllNetworks")
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                if (SpoofState.reconOn) {
+                    val arr = result as? Array<*>
+                    val names = arr?.take(8)?.joinToString { it.toString() } ?: "?"
+                    module.log(Log.INFO, TAG, "ConnectivityManager.getAllNetworks -> ${arr?.size ?: 0}: $names")
+                }
+                result
+            }
+        }
+        hookSafe(module, "ConnectivityManager.getNetworkCapabilities") {
+            val method = ConnectivityManager::class.java.getMethod(
+                "getNetworkCapabilities", Network::class.java
+            )
+            module.hook(method).intercept { chain ->
+                val result = chain.proceed()
+                if (SpoofState.reconOn) {
+                    module.log(Log.INFO, TAG, "ConnectivityManager.getNetworkCapabilities -> $result")
+                }
+                result
+            }
+        }
     }
 
     private fun hookNetworkInfo(module: XposedModule) {

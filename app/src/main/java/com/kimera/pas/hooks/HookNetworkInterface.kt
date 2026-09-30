@@ -27,7 +27,7 @@ class HookNetworkInterface : XHook {
         hookSafe(module, "NetworkInterface.isVirtual") {
             val method = NetworkInterface::class.java.getMethod("isVirtual")
             module.hook(method).intercept { chain ->
-                module.log(Log.INFO, TAG, "NetworkInterface.isVirtual")
+                if (SpoofState.reconOn) module.log(Log.INFO, TAG, "NetworkInterface.isVirtual")
                 // VPNs are always virtual
                 false
             }
@@ -39,7 +39,7 @@ class HookNetworkInterface : XHook {
             val method = NetworkInterface::class.java.getMethod("getName")
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
-                module.log(Log.INFO, TAG, "NetworkInterface.getName ($result)")
+                if (SpoofState.reconOn) module.log(Log.INFO, TAG, "NetworkInterface.getName ($result)")
                 // breaks VPN name detection
                 if (result is String) {
                     if (result.startsWith("tun") || result.startsWith("ppp") || result.startsWith("pptp")) {
@@ -92,7 +92,7 @@ class HookNetworkInterface : XHook {
             val method = NetworkInterface::class.java.getMethod("isUp")
             module.hook(method).intercept { chain ->
                 val name = (chain.getThisObject() as NetworkInterface).name
-                module.log(Log.INFO, TAG, "NetworkInterface.isUp() on interface $name")
+                if (SpoofState.reconOn) module.log(Log.INFO, TAG, "NetworkInterface.isUp() on interface $name")
                 if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp")) false else chain.proceed()
             }
         }

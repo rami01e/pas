@@ -7,6 +7,7 @@ import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 import com.kimera.pas.spoof.SpoofState
+import java.util.UUID
 
 /**
  * Widevine property spoof: reports security level L1, a generated
@@ -24,6 +25,8 @@ class HookMediaDrm : XHook {
         hookPropertyString(module)
         hookPropertyByteArray(module)
         hookSecurityLevel(module)
+        hookIsCryptoSchemeSupported(module)
+        hookMaxSecurityLevel(module)
     }
 
     private fun hookPropertyString(module: XposedModule) {
@@ -87,6 +90,68 @@ class HookMediaDrm : XHook {
         }
     }
 
+    /**
+     * EME capability negotiation surfaces: browsers gate "HW_SECURE_ALL"
+     * (L1) support on these calls, not only on the property strings. Real
+     * hardware-backed L1 playback still needs a secure decoder - only the
+     * capability surfaces are covered here.
+     */
+    private fun hookIsCryptoSchemeSupported(module: XposedModule) {
+        val uuidCls = UUID::class.java
+        hookSafe(module, "MediaDrm.isCryptoSchemeSupported(UUID)") {
+            val method = MediaDrm::class.java.getMethod("isCryptoSchemeSupported", uuidCls)
+            module.hook(method).intercept { chain ->
+                val uuid = chain.getArg(0) as? UUID
+                if (SpoofState.widevineOn && uuid == WIDEVINE_UUID) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.isCryptoSchemeSupported(uuid) -> true")
+                    true
+                } else {
+                    chain.proceed()
+                }
+            }
+        }
+        hookSafe(module, "MediaDrm.isCryptoSchemeSupported(UUID, String)") {
+            val method = MediaDrm::class.java.getMethod(
+                "isCryptoSchemeSupported", uuidCls, String::class.java
+            )
+            module.hook(method).intercept { chain ->
+                val uuid = chain.getArg(0) as? UUID
+                if (SpoofState.widevineOn && uuid == WIDEVINE_UUID) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.isCryptoSchemeSupported(uuid, mime) -> true")
+                    true
+                } else {
+                    chain.proceed()
+                }
+            }
+        }
+        // 3-arg overload exists on API 28+; skip silently elsewhere (minSdk 26).
+        runCatching {
+            MediaDrm::class.java.getMethod(
+                "isCryptoSchemeSupported", uuidCls, String::class.java, Integer.TYPE
+            )
+        }.getOrNull()?.let { method ->
+            module.hook(method).intercept { chain ->
+                val uuid = chain.getArg(0) as? UUID
+                val level = (chain.getArg(2) as? Int) ?: -1
+                if (SpoofState.widevineOn && uuid == WIDEVINE_UUID && level in 0..5) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.isCryptoSchemeSupported(uuid, mime, $level) -> true")
+                    true
+                } else {
+                    chain.proceed()
+                }
+            }
+        }
+    }
+
+    private fun hookMaxSecurityLevel(module: XposedModule) {
+        // getMaxSecurityLevel() exists on API 28+; skip silently elsewhere.
+        runCatching { MediaDrm::class.java.getMethod("getMaxSecurityLevel") }.getOrNull()?.let { method ->
+            module.hook(method).intercept { chain ->
+                if (SpoofState.widevineOn) 5 else chain.proceed()
+            }
+        }
+    }
+
     private fun isSpoofableHex(s: String): Boolean {
         if (s.isEmpty() || s.length % 2 != 0 || s.length > 128) return false
         for (c in s) {
@@ -109,5 +174,6 @@ class HookMediaDrm : XHook {
         const val WIDEVINE_VERSION = "16.1.1@015"
         const val MAX_HDCP_LEVEL = "HDCP-2.2"
         val WIDEVINE_VERSION_LIKE = Regex("""^\d+\.\d+\.\d+""")
+        val WIDEVINE_UUID: UUID = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
     }
 }
