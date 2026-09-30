@@ -55,6 +55,7 @@ class MainActivity : Activity() {
     private lateinit var gsfCheck: CheckBox
     private lateinit var gsfEdit: EditText
     private lateinit var reconCheck: CheckBox
+    private lateinit var webrtcCheck: CheckBox
     private lateinit var spoofStatus: TextView
     private lateinit var logsHeader: TextView
     private lateinit var logsContainer: LinearLayout
@@ -63,6 +64,7 @@ class MainActivity : Activity() {
     private lateinit var bottomBar: LinearLayout
 
     private var busy = false
+    private var forceBusy = false
     private var suppressDirty = false
     private var currentSdk = 0
     private val rng = SecureRandom()
@@ -103,6 +105,19 @@ class MainActivity : Activity() {
             setPadding(0, pad / 4, 0, pad / 2)
         }
         content.addView(spoofStatus)
+
+        // Force-close every app in the module scope (root). Useful after
+        // changing settings: scoped apps pick the new config up on restart.
+        content.addView(
+            Button(this).apply {
+                text = "Force-close scoped apps"
+                setOnClickListener { forceCloseScoped() }
+            },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = pad / 2 }
+        )
 
         content.addView(sectionLabel("Spoof / native addon", pad))
 
@@ -185,6 +200,13 @@ class MainActivity : Activity() {
             row(gsfCheck, gsfEdit, { gsfEdit.setText(randomGsf()) }, { clearGsf() },
                 editWeight = true)
         )
+
+        // ---------------- Network ----------------
+        content.addView(sectionLabel("Network", pad))
+        webrtcCheck = CheckBox(this).apply {
+            text = "WebRTC local IP visible (realistic)"
+        }
+        content.addView(webrtcCheck)
 
         // ---------------- Diagnostics ----------------
         content.addView(sectionLabel("Diagnostics", pad))
@@ -495,6 +517,7 @@ class MainActivity : Activity() {
         gsfCheck.isChecked = sp.getBoolean("gsf_enabled", false)
         gsfEdit.setText(sp.getString("gsf_id", "") ?: "")
         reconCheck.isChecked = sp.getBoolean("recon_enabled", false)
+        webrtcCheck.isChecked = sp.getBoolean("webrtc_localip", true)
         suppressDirty = false
     }
 
@@ -513,7 +536,8 @@ class MainActivity : Activity() {
         "widevine_id" to wvEdit.text.toString().trim().lowercase(),
         "gsf_enabled" to gsfCheck.isChecked,
         "gsf_id" to gsfEdit.text.toString().trim(),
-        "recon_enabled" to reconCheck.isChecked
+        "recon_enabled" to reconCheck.isChecked,
+        "webrtc_localip" to webrtcCheck.isChecked
     )
 
     private fun savedMap(): HashMap<String, Any?> {
@@ -533,7 +557,8 @@ class MainActivity : Activity() {
             "widevine_id" to (sp.getString("widevine_id", "") ?: ""),
             "gsf_enabled" to sp.getBoolean("gsf_enabled", false),
             "gsf_id" to (sp.getString("gsf_id", "") ?: ""),
-            "recon_enabled" to sp.getBoolean("recon_enabled", false)
+            "recon_enabled" to sp.getBoolean("recon_enabled", false),
+            "webrtc_localip" to sp.getBoolean("webrtc_localip", true)
         )
     }
 
@@ -565,6 +590,7 @@ class MainActivity : Activity() {
         wvCheck.setOnCheckedChangeListener(checkListener)
         gsfCheck.setOnCheckedChangeListener(checkListener)
         reconCheck.setOnCheckedChangeListener(checkListener)
+        webrtcCheck.setOnCheckedChangeListener(checkListener)
 
         abiGroup.setOnCheckedChangeListener { _, _ -> updateDirty() }
         val spinnerListener = object : AdapterView.OnItemSelectedListener {
@@ -619,6 +645,38 @@ class MainActivity : Activity() {
     private fun revertToSaved() {
         loadSaved()
         updateDirty()
+    }
+
+    // ------------------------------------------------------------------
+    // force-close scoped apps
+    // ------------------------------------------------------------------
+
+    private fun forceCloseScoped() {
+        if (forceBusy) return
+        val scope = SpoofSettings.scopePackages()
+        if (scope == null) {
+            toast("Scope unavailable - Vector service not connected. Reopen the app and retry.")
+            return
+        }
+        val targets = scope.filter { it.isNotBlank() && it != packageName }
+        if (targets.isEmpty()) {
+            toast("Scope is empty - add target apps in Vector first.")
+            return
+        }
+        forceBusy = true
+        toast("Force-closing ${targets.size} scoped app(s)...")
+        Thread {
+            val cmd = targets.joinToString("; ") { "am force-stop '$it'" }
+            val out = runSu(cmd)
+            val ok = out != null && !out.contains("su exit code")
+            runOnUiThread {
+                forceBusy = false
+                toast(
+                    if (ok) "Force-closed ${targets.size} scoped app(s)"
+                    else "Force-close failed - root denied or su error."
+                )
+            }
+        }.start()
     }
 
     private fun refreshSpoofStatus() {

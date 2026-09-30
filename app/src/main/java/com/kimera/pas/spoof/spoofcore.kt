@@ -115,6 +115,11 @@ object SpoofCore {
         runCatching { nativeSetRecon(reconOn) }
         Log.i(TAG, "[PAS] recon logging: $reconOn")
 
+        // "WebRTC local IP" option (default: visible/realistic). Consumed live
+        // by the network-interface hooks.
+        SpoofState.webrtcLocalIp = prefs.getBoolean("webrtc_localip", true)
+        Log.i(TAG, "[PAS] net: webrtc local ip = ${SpoofState.webrtcLocalIp}")
+
         // CPU / GPU spoof values (resolved from the shared catalog; active only
         // together with the native addon so all surfaces stay consistent).
         val cpuEntry = DeviceCatalog.cpu(prefs.getString("cpu_value", null))

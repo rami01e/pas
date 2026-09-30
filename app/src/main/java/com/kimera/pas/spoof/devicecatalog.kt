@@ -178,6 +178,7 @@ object DeviceCatalog {
     val GPUS = listOf(
         // ---- ARM Mali (Exynos pairing) ----
         mali("Mali-G52 MC2", 0x72120000L), // Exynos 850 (verified id)
+        mali("Mali-G57 MC2", 0x90010000L), // Galaxy A16 5G (Dimensity 6300) / Helio G99 class (approx id)
         mali("Mali-G68", 0x90060000L), // Exynos 1280 (approx id)
         mali("Mali-G68 MP2", 0x90060000L), // Exynos 1330 (approx id)
         mali("Mali-G68 MP5", 0x90060000L), // Exynos 1380 (approx id)

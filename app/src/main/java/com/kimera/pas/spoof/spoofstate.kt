@@ -53,4 +53,13 @@ object SpoofState {
     /** Recon diagnostics logging ("recon_enabled"); read by HookRecon per call. */
     @Volatile
     var reconOn: Boolean = false
+
+    /**
+     * "WebRTC local IP" option (default true): when on, network-interface
+     * resolution stays realistic so browsers can gather local (host)
+     * candidates; when off, non-VPN interface resolution is suppressed as an
+     * extra privacy measure.
+     */
+    @Volatile
+    var webrtcLocalIp: Boolean = true
 }

@@ -178,7 +178,7 @@ static bool ReconHit(const char* s) {
 void ReconNote(const char* op, const char* detail, long res) {
     if (!g_recon || detail == nullptr) return;
     if (!ReconHit(detail)) return;
-    if (g_recon_emitted >= 600) {
+    if (g_recon_emitted >= 1500) {
         if (!g_recon_capped) {
             g_recon_capped = true;
             Log("native: recon: emission cap reached (further probes suppressed)");

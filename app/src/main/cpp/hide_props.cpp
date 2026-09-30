@@ -149,10 +149,82 @@ static bool PropDiagName(const char* name) {
     return false;
 }
 
+// Recon noise control: MuMu/emulator infra properties ("nemud.*") carry no
+// detection signal, and repeated reads of an unchanged value add nothing to
+// a capture - the value line is emitted only when the value changes.
+static bool ReconPropIgnored(const char* name) {
+    return name != nullptr && strncmp(name, "nemud.", 6) == 0;
+}
+
+// Returns true when (name, value) was already logged before.
+static bool ReconPropSeen(const char* name, const char* value) {
+    static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+    struct Entry {
+        char key[64];
+        char val[96];
+    };
+    static Entry entries[48];
+    static size_t count = 0;
+    static size_t next = 0;
+    if (name == nullptr || value == nullptr) return true;
+    char k[64];
+    char v[96];
+    snprintf(k, sizeof(k), "%s", name);
+    snprintf(v, sizeof(v), "%s", value);
+    pthread_mutex_lock(&mtx);
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(entries[i].key, k) == 0) {
+            bool same = strcmp(entries[i].val, v) == 0;
+            if (!same) snprintf(entries[i].val, sizeof(entries[i].val), "%s", v);
+            pthread_mutex_unlock(&mtx);
+            return same;
+        }
+    }
+    {
+        // Evict the oldest entry once the table is full so the dedupe keeps
+        // working for the whole session.
+        size_t slot = (count < 48) ? count++ : next;
+        snprintf(entries[slot].key, sizeof(entries[slot].key), "%s", k);
+        snprintf(entries[slot].val, sizeof(entries[slot].val), "%s", v);
+        next = (slot + 1) % 48;
+    }
+    pthread_mutex_unlock(&mtx);
+    return false;
+}
+
+// Returns true when this (kind, key) pair was already reported once.
+// First-touch dedupe for the "prop" / "prop-cb" op lines; value changes are
+// still reported through ReconPropValue.
+static bool ReconPropHitOnce(const char* kind, const char* name) {
+    static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+    static char keys[64][80];
+    static size_t count = 0;
+    static size_t next = 0;
+    if (name == nullptr) return true;
+    char k[80];
+    snprintf(k, sizeof(k), "%s:%s", kind, name);
+    pthread_mutex_lock(&mtx);
+    for (size_t i = 0; i < count; i++) {
+        if (strcmp(keys[i], k) == 0) {
+            pthread_mutex_unlock(&mtx);
+            return true;
+        }
+    }
+    {
+        size_t slot = (count < 64) ? count++ : next;
+        snprintf(keys[slot], sizeof(keys[slot]), "%s", k);
+        next = (slot + 1) % 64;
+    }
+    pthread_mutex_unlock(&mtx);
+    return false;
+}
+
 static void ReconPropValue(const char* name, const char* value) {
     if (!ReconEnabled() || name == nullptr || value == nullptr) return;
+    if (ReconPropIgnored(name)) return;
     if (!PropDiagName(name)) return;
-    if (g_prop_diag >= 150) return;
+    if (ReconPropSeen(name, value)) return;
+    if (g_prop_diag >= 400) return;
     g_prop_diag++;
     Log("native: recon: propv %s = %s", name, value);
 }
@@ -221,7 +293,9 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
 
 int HidePropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
-    ReconNote("prop", name, 0);
+    if (ReconEnabled() && !ReconPropIgnored(name) && !ReconPropHitOnce("prop", name)) {
+        ReconNote("prop", name, 0);
+    }
     const bool active = g_sdk_on || g_abi_on || CpuSpoofActive();
     if (!name || !value || !active || !IsSpoofTarget(name)) {
         int r = BYTEHOOK_CALL_PREV(HidePropGet, name, value);
@@ -255,7 +329,9 @@ struct ReadCbCtx {
 };
 
 static void SpoofReadCb(void* cookie, const char* name, const char* value, uint32_t serial) {
-    ReconNote("prop-cb", name, 0);
+    if (ReconEnabled() && !ReconPropIgnored(name) && !ReconPropHitOnce("prop-cb", name)) {
+        ReconNote("prop-cb", name, 0);
+    }
     ReconPropValue(name, value);
     auto* ctx = (ReadCbCtx*)cookie;
     if (name && ((g_sdk_on || g_abi_on || CpuSpoofActive()) && IsSpoofTarget(name))) {

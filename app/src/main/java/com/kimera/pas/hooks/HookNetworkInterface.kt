@@ -6,6 +6,7 @@ import java.net.NetworkInterface
 import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 import com.kimera.pas.util.getRandomString
 
 class HookNetworkInterface : XHook {
@@ -60,15 +61,27 @@ class HookNetworkInterface : XHook {
         hookSafe(module, "NetworkInterface.getByName") {
             val method = NetworkInterface::class.java.getMethod("getByName", String::class.java)
             module.hook(method).intercept { chain ->
-                val name = chain.getArg(0) as String
-                module.log(Log.INFO, TAG, "NetworkInterface.getByName ($name)")
-                // Note: the inverted contains check below is preserved verbatim from upstream.
-                if (!renamedInterfaces.contains(name)) {
-                    chain.proceed(arrayOf<Any?>(renamedInterfaces[name]))
-                } else if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp")) {
-                    null
-                } else {
-                    chain.proceed()
+                val name = chain.getArg(0) as? String
+                module.log(
+                    Log.INFO, TAG,
+                    "NetworkInterface.getByName ($name) webrtc=${SpoofState.webrtcLocalIp}"
+                )
+                if (name == null) {
+                    // Non-string lookup: leave the call untouched.
+                    return@intercept chain.proceed()
+                }
+                when {
+                    // VPN-style interfaces never resolve.
+                    name.startsWith("tun") || name.startsWith("ppp") ||
+                        name.startsWith("pptp") || name.startsWith("wg") -> null
+                    // "WebRTC local IP" off: suppress non-VPN resolution too,
+                    // so browsers cannot gather local (host) candidates.
+                    !SpoofState.webrtcLocalIp -> null
+                    // Everything else resolves normally. (The previous
+                    // upstream code passed a wrapped array here, which made
+                    // every non-tun lookup fail - breaking local-candidate
+                    // enumeration in browsers.)
+                    else -> chain.proceed()
                 }
             }
         }

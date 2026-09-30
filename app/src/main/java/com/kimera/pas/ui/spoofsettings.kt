@@ -27,7 +27,7 @@ object SpoofSettings {
         "gpu_enabled", "gpu_value",
         "widevine_enabled", "widevine_id",
         "gsf_enabled", "gsf_id",
-        "recon_enabled"
+        "recon_enabled", "webrtc_localip"
     )
 
     @Volatile
@@ -55,6 +55,16 @@ object SpoofSettings {
     }
 
     fun isConnected(): Boolean = service != null
+
+    /**
+     * The module scope (package names) as reported by the Vector service.
+     * Returns null when the service is unavailable or the query fails.
+     */
+    fun scopePackages(): List<String>? = try {
+        service?.scope
+    } catch (t: Throwable) {
+        null
+    }
 
     fun load(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(LOCAL, Context.MODE_PRIVATE)
