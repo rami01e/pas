@@ -480,3 +480,11 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuOptions(JNIEnv* env, jobject thi
     (void)thiz;
     pas::SetGpuOptions(chain == JNI_TRUE, vulkan == JNI_TRUE);
 }
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetVulkanNemuExt(JNIEnv* env, jobject thiz,
+                                                           jboolean hide) {
+    (void)env;
+    (void)thiz;
+    pas::SetVulkanNemuExtHide(hide == JNI_TRUE);
+}

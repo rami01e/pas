@@ -88,7 +88,6 @@ class MainActivity : Activity() {
     private lateinit var nativeSw: SwitchView
     private lateinit var nativeChip: TextView
     private lateinit var compatSw: SwitchView
-    private lateinit var compatChip: TextView
 
     private lateinit var sdkSw: SwitchView
     private lateinit var sdkValue: TextView
@@ -111,7 +110,8 @@ class MainActivity : Activity() {
     private lateinit var webrtcChip: TextView
     private var webrtcOn = true
     private lateinit var reconSw: SwitchView
-    private lateinit var reconChip: TextView
+    private lateinit var nemuSw: SwitchView
+    private lateinit var nemuChip: TextView
 
     private lateinit var scopeChip: TextView
 
@@ -328,7 +328,14 @@ class MainActivity : Activity() {
         chainChip = chipView("On", cCyan)
         toggleRow(
             spoofBody, false, chainSw, "GL dlsym chain",
-            "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
+            "GL symbol substitution via dlsym / eglGetProcAddress (auto-skipped in WebView processes)", chainChip
+        )
+
+        nemuSw = SwitchView(this)
+        nemuChip = chipView("On", cCyan)
+        toggleRow(
+            spoofBody, false, nemuSw, "Hide NEMU ext",
+            "Drop VK_NEMU_api_batch from Vulkan extension lists (Off = keep it visible, for testing)", nemuChip
         )
 
         // WebRTC local IP: on = Balanced (default), off = RKN (strict).
@@ -336,7 +343,7 @@ class MainActivity : Activity() {
         webrtcChip = chipView("Balanced", cCyan)
         toggleRow(
             spoofBody, false, webrtcSw, "WebRTC local IP",
-            "On (default): browsers see your local IP - RKN-clean (Balanced) \u00b7 Off: strict hiding (RKN)",
+            "On (default): browsers see your REAL local IP - RKN-clean \u00b7 Off: strict hiding (RKN)",
             webrtcChip
         )
 
@@ -356,36 +363,42 @@ class MainActivity : Activity() {
             { editGsf() }, { gsfEditVal = randomGsf(); updateGsfValue(); updateDirty() },
             { clearGsf() })
 
-        // ---------------- DIAGNOSTICS panel ----------------
-        val (diagPanel, diagBody) = panel("Diagnostics", null, null)
-        addPanel(diagPanel)
-
-        compatSw = SwitchView(this)
-        compatChip = chipView("On", cAmber)
-        toggleRow(
-            diagBody, true, compatSw, "Compatibility mode",
-            "Skip extended hook groups (netlink / ioctl / props)", compatChip
-        )
-
-        reconSw = SwitchView(this)
-        reconChip = chipView("Off", cText2)
-        toggleRow(
-            diagBody, false, reconSw, "Recon logging",
-            "Verbose probe capture for detection mapping", reconChip
-        )
-
         // ---------------- LOGS panel ----------------
         logsChev = TextView(this).apply {
             text = "\u25B8"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             setTextColor(cText3)
         }
+        compatSw = SwitchView(this)
+        reconSw = SwitchView(this)
         val logsTrailing = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        logsTrailing.addView(micro("Reload") { loadLogs() })
-        logsTrailing.addView(micro("Copy") { copyLogs() })
+        logsTrailing.addView(
+            TextView(this).apply {
+                text = "SAFE MODE"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.08f
+                setTextColor(cText3)
+                setPadding(0, 0, dp(4), 0)
+            }
+        )
+        logsTrailing.addView(compatSw)
+        logsTrailing.addView(
+            TextView(this).apply {
+                text = "RECON"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.08f
+                setTextColor(cText3)
+                setPadding(dp(10), 0, dp(4), 0)
+            }
+        )
+        logsTrailing.addView(reconSw)
+        logsTrailing.addView(micro("\uD83D\uDD04\uFE0F") { loadLogs() })
+        logsTrailing.addView(micro("\u26C1") { copyLogs() })
         logsTrailing.addView(
             logsChev,
             LinearLayout.LayoutParams(
@@ -904,7 +917,7 @@ class MainActivity : Activity() {
     }
 
     private fun updateWebrtcChip() {
-        webrtcChip.text = if (webrtcOn) "Balanced" else "RKN"
+        webrtcChip.text = if (webrtcOn) "REAL" else "RKN"
         styleChip(webrtcChip, if (webrtcOn) cCyan else cGreen)
     }
 
@@ -1194,6 +1207,7 @@ class MainActivity : Activity() {
         updateWebrtcChip()
         vulkanSw.checked = sp.getBoolean("gpu_vulkan", true)
         chainSw.checked = sp.getBoolean("gpu_chain", true)
+        nemuSw.checked = sp.getBoolean("gpu_nemu_ext", true)
         reconSw.checked = sp.getBoolean("recon_enabled", false)
         suppressDirty = false
         refreshRowVisuals()
@@ -1222,6 +1236,7 @@ class MainActivity : Activity() {
         "webrtc_localip" to webrtcOn,
         "recon_enabled" to reconSw.checked,
         "gpu_chain" to chainSw.checked,
+        "gpu_nemu_ext" to nemuSw.checked,
         "gpu_vulkan" to vulkanSw.checked
     )
 
@@ -1253,6 +1268,7 @@ class MainActivity : Activity() {
             "webrtc_localip" to sp.getBoolean("webrtc_localip", true),
             "recon_enabled" to sp.getBoolean("recon_enabled", false),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
+            "gpu_nemu_ext" to sp.getBoolean("gpu_nemu_ext", true),
             "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
         )
     }
@@ -1270,11 +1286,10 @@ class MainActivity : Activity() {
             styleChip(tv, color)
         }
         chip(nativeChip, if (nativeSw.checked) "On" else "Off", if (nativeSw.checked) cCyan else cText2)
-        chip(compatChip, if (compatSw.checked) "On" else "Off", if (compatSw.checked) cAmber else cText2)
         chip(vulkanChip, if (vulkanSw.checked) "On" else "Off", if (vulkanSw.checked) cCyan else cText2)
         chip(chainChip, if (chainSw.checked) "On" else "Off", if (chainSw.checked) cCyan else cText2)
+        chip(nemuChip, if (nemuSw.checked) "On" else "Off", if (nemuSw.checked) cCyan else cText2)
         updateWebrtcChip()
-        chip(reconChip, if (reconSw.checked) "On" else "Off", if (reconSw.checked) cAmber else cText2)
         sdkValue.setTextColor(if (sdkSw.checked) cAmber else cText3)
         cpuValue.setTextColor(if (cpuSw.checked) cAmber else cText3)
         gpuValue.setTextColor(if (gpuSw.checked) cAmber else cText3)
@@ -1308,7 +1323,12 @@ class MainActivity : Activity() {
         gsfSw.onToggle = toggle
         vulkanSw.onToggle = toggle
         chainSw.onToggle = toggle
-        webrtcSw.onToggle = toggle
+        nemuSw.onToggle = toggle
+        webrtcSw.onToggle = { checked ->
+            webrtcOn = checked
+            refreshRowVisuals()
+            updateDirty()
+        }
         reconSw.onToggle = toggle
     }
 

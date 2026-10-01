@@ -36,9 +36,16 @@ namespace pas {
 
 // Extensions that never exist on the emulated GPU profile and would unmask
 // the emulator on inspection (NetEase MuMu advertises VK_NEMU_api_batch).
+static volatile bool g_hide_nemu_ext = true;
+
+void SetVulkanNemuExtHide(bool hide) {
+    g_hide_nemu_ext = hide;
+    Log("native: vulkan nemu-ext hide=%d", (int)hide);
+}
+
 static bool IsHiddenExtName(const char* name) {
     if (!name) return false;
-    if (strstr(name, "NEMU") != nullptr) return true;
+    if (g_hide_nemu_ext && strstr(name, "NEMU") != nullptr) return true;
     if (strcmp(name, "VK_KHR_push_descriptor") == 0) return true;
     return false;
 }
