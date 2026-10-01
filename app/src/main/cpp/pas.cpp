@@ -210,7 +210,7 @@ void RefreshHiddenNames(bool force) {
     }
 }
 
-static std::atomic<int> g_webrtc_mode{0};  // 0 relaxed / 1 balanced / 2 rkn
+static std::atomic<int> g_webrtc_mode{1};  // 0 relaxed / 1 balanced (default) / 2 rkn
 
 int WebRtcMode() {
     return g_webrtc_mode.load();
