@@ -198,7 +198,8 @@ class HookMediaDrm : XHook {
         runCatching { MediaDrm::class.java.getMethod("getMaxSecurityLevel") }.getOrNull()?.let { method ->
             module.hook(method).intercept { chain ->
                 if (SpoofState.widevineOn) {
-                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.getMaxSecurityLevel -> 5")
+                    val orig = chain.proceed()
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.getMaxSecurityLevel (orig=$orig) -> 5")
                     5
                 } else {
                     chain.proceed()
@@ -316,7 +317,9 @@ class HookMediaDrm : XHook {
             }
             module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.getSupportedContainers(bytes): hooked")
         }
-        // Diagnostic: log CDM creation attempts with their requested level.
+        // CDM creation attempts (diagnostic + resilience): if the requested
+        // hardware level fails or yields nothing, retry once at level 3 so
+        // the capability negotiation can still complete.
         runCatching {
             cls.getDeclaredMethod(
                 "create", ByteArray::class.java, String::class.java, Integer.TYPE,
@@ -324,10 +327,72 @@ class HookMediaDrm : XHook {
             )
         }.getOrNull()?.let { m ->
             m.isAccessible = true
+            val isStatic = java.lang.reflect.Modifier.isStatic(m.modifiers)
             module.hook(m).intercept { chain ->
+                val recv: Any? = if (isStatic) null else chain.getThisObject()
+                val a0 = chain.getArg(0)
+                val a1 = chain.getArg(1)
                 val lvl = (chain.getArg(2) as? Int) ?: -1
-                val mime = chain.getArg(3) as? String
-                module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.create(level=$lvl mime=$mime)")
+                val a3 = chain.getArg(3)
+                val a4 = chain.getArg(4)
+                val a5 = chain.getArg(5)
+                val a6 = chain.getArg(6)
+                module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.create(level=$lvl info=$a3)")
+                fun retry(): Any? = runCatching {
+                    m.invoke(recv, a0, a1, 3, a3, a4, a5, a6)
+                }.onFailure {
+                    module.log(Log.INFO, TAG, "[PAS] create retry(level=3) threw: $it")
+                }.getOrNull()
+                try {
+                    val r = chain.proceed()
+                    if (r == null && SpoofState.widevineOn && lvl != 3) {
+                        module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.create(level=$lvl) returned null - retrying level=3")
+                        retry() ?: r
+                    } else {
+                        r
+                    }
+                } catch (t: Throwable) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.create(level=$lvl) threw: $t")
+                    if (SpoofState.widevineOn && lvl != 3) {
+                        retry() ?: throw t
+                    } else {
+                        throw t
+                    }
+                }
+            }
+        }
+        // Log-only surfaces: version / HDCP level / session plumbing.
+        runCatching { cls.getDeclaredMethod("getVersion") }.getOrNull()?.let { m ->
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val orig = chain.proceed()
+                if (SpoofState.widevineOn) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.getVersion -> $orig")
+                }
+                orig
+            }
+        }
+        runCatching { cls.getDeclaredMethod("getCurrentHdcpLevel") }.getOrNull()?.let { m ->
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val orig = chain.proceed()
+                if (SpoofState.widevineOn) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.getCurrentHdcpLevel -> $orig")
+                }
+                orig
+            }
+        }
+        runCatching {
+            cls.getDeclaredMethod(
+                "createSessionFromNative", ByteArray::class.java, String::class.java,
+                Integer.TYPE, Array<String>::class.java, java.lang.Long.TYPE
+            )
+        }.getOrNull()?.let { m ->
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                if (SpoofState.widevineOn) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.createSessionFromNative called")
+                }
                 chain.proceed()
             }
         }
@@ -351,18 +416,24 @@ class HookMediaDrm : XHook {
             Log.INFO, TAG,
             "[PAS] MediaDrmBridge scan: crypto=${scan1?.name ?: "?"} containers=${scan2?.name ?: "?"}"
         )
-        if (scan1 == null && scan2 == null && SpoofState.reconOn) {
+        if (SpoofState.reconOn) {
             val inv = StringBuilder()
             var n = 0
+            val kw = listOf(
+                "security", "level", "secure", "robust", "hdcp", "version",
+                "session", "crypto", "decrypt", "codec"
+            )
             for (m in methods) {
-                if (n >= 30) break
+                if (n >= 60) break
+                val mn = m.name.lowercase()
+                if (kw.none { mn.contains(it) }) continue
                 val kind = if (java.lang.reflect.Modifier.isStatic(m.modifiers)) "S" else "I"
                 inv.append(m.name).append('(')
                     .append(m.parameterTypes.joinToString(",") { it.simpleName })
                     .append("):").append(m.returnType.simpleName).append(':').append(kind).append(' ')
                 n++
             }
-            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge methods: $inv")
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge key methods: $inv")
         }
         val m1 = scan1
         if (m1 != null) {

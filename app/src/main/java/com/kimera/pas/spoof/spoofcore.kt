@@ -97,8 +97,8 @@ object SpoofCore {
         var sdkVal = prefs.getInt("sdk_value", 0)
         val abiOn = prefs.getBoolean("abi_enabled", false)
         val abiMode = when (prefs.getString("abi_value", "x86_64")) {
-            "arm64-v8a" -> 1
-            "mixed" -> 2
+            "arm64+armeabi" -> 1
+            "arm64-v8a", "mixed" -> 2
             else -> 0
         }
         val compat = prefs.getBoolean("safe_mode", true)
@@ -225,18 +225,22 @@ object SpoofCore {
         }
         if (abiOn) {
             val abi = if (abiMode == 0) "x86_64" else "arm64-v8a"
-            val abi2 = if (abiMode == 1) "armeabi-v7a" else "x86"
+            val abi2 = if (abiMode == 1) "armeabi-v7a" else "arm64-v8a"
             val all = when (abiMode) {
                 1 -> arrayOf("arm64-v8a", "armeabi-v7a", "armeabi")
-                2 -> arrayOf("arm64-v8a", "x86_64", "x86")
-                else -> arrayOf("x86_64", "x86")
+                2 -> arrayOf("arm64-v8a")
+                else -> arrayOf("x86_64", "arm64-v8a", "x86")
             }
             val a64 = when (abiMode) {
                 1 -> arrayOf("arm64-v8a")
-                2 -> arrayOf("arm64-v8a", "x86_64")
-                else -> arrayOf("x86_64")
+                2 -> arrayOf("arm64-v8a")
+                else -> arrayOf("x86_64", "arm64-v8a")
             }
-            val a32 = if (abiMode == 1) arrayOf("armeabi-v7a", "armeabi") else arrayOf("x86")
+            val a32 = when (abiMode) {
+                1 -> arrayOf("armeabi-v7a", "armeabi")
+                2 -> emptyArray<String>()
+                else -> arrayOf("x86")
+            }
             patch(Build::class.java, "CPU_ABI", abi, "CPU_ABI")
             patch(Build::class.java, "CPU_ABI2", abi2, "CPU_ABI2")
             patch(Build::class.java, "SUPPORTED_ABIS", all, "SUPPORTED_ABIS")

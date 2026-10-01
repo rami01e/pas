@@ -36,7 +36,7 @@ static volatile int g_sdk_val = 0;
 static char g_sdk_str[8] = {0};
 static char g_sdk_release[8] = {0};
 static volatile bool g_abi_on = false;
-static volatile int g_abi_mode = 0;  // 0=x86_64 / 1=arm64-v8a / 2=arm64-v8a (mixed)
+static volatile int g_abi_mode = 0;  // 0=x86_64 stock list / 1=arm64+armeabi / 2=arm64-v8a only
 
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled) {
@@ -261,21 +261,22 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         }
         if (strcmp(name, "ro.product.cpu.abi2") == 0) {
             // Only keep a value where the device already reports one.
-            if (orig && orig[0]) return SetStr(out, cap, outLen, m == 1 ? "armeabi-v7a" : "x86");
+            if (orig && orig[0]) return SetStr(out, cap, outLen, m == 1 ? "armeabi-v7a" : "arm64-v8a");
             return false;
         }
         if (strcmp(name, "ro.product.cpu.abilist") == 0) {
             if (m == 1) return SetStr(out, cap, outLen, "arm64-v8a,armeabi-v7a,armeabi");
-            if (m == 2) return SetStr(out, cap, outLen, "arm64-v8a,x86_64,x86");
-            return SetStr(out, cap, outLen, "x86_64,x86");
+            if (m == 2) return SetStr(out, cap, outLen, "arm64-v8a");
+            return SetStr(out, cap, outLen, "x86_64,arm64-v8a,x86");
         }
         if (strcmp(name, "ro.product.cpu.abilist64") == 0) {
             if (m == 1) return SetStr(out, cap, outLen, "arm64-v8a");
-            if (m == 2) return SetStr(out, cap, outLen, "arm64-v8a,x86_64");
-            return SetStr(out, cap, outLen, "x86_64");
+            if (m == 2) return SetStr(out, cap, outLen, "arm64-v8a");
+            return SetStr(out, cap, outLen, "x86_64,arm64-v8a");
         }
         if (strcmp(name, "ro.product.cpu.abilist32") == 0) {
             if (m == 1) return SetStr(out, cap, outLen, "armeabi-v7a,armeabi");
+            if (m == 2) return SetStr(out, cap, outLen, "");
             return SetStr(out, cap, outLen, "x86");
         }
         if (strcmp(name, "ro.product.cpu.arch") == 0) {
