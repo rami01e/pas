@@ -85,8 +85,13 @@ static void FreeBionicChain(struct ifaddrs* head) {
 
 int HideGetIfaddrs(struct ifaddrs** out) {
     BYTEHOOK_STACK_SCOPE();
+    void* caller = __builtin_return_address(0);
     struct ifaddrs* list = nullptr;
     int rc = BYTEHOOK_CALL_PREV(HideGetIfaddrs, &list);
+    if (BrowserCallerHere(caller)) {
+        if (out) *out = list;
+        return rc;
+    }
     if (rc != 0 || list == nullptr) {
         if (out) *out = list;
         return rc;
@@ -152,8 +157,10 @@ static void FreeOwnNameIndex(struct if_nameindex* arr) {
 
 struct if_nameindex* HideIfNameIndex() {
     BYTEHOOK_STACK_SCOPE();
+    void* caller = __builtin_return_address(0);
     struct if_nameindex* arr = BYTEHOOK_CALL_PREV(HideIfNameIndex);
     if (!arr) return arr;
+    if (BrowserCallerHere(caller)) return arr;
     size_t count = 0;
     while (arr[count].if_index != 0) count++;
     bool any = false;
@@ -194,7 +201,9 @@ void HideIfFreeNameIndex(struct if_nameindex* arr) {
 
 char* HideIfIndexToName(unsigned int ifindex, char* buf) {
     BYTEHOOK_STACK_SCOPE();
+    void* caller = __builtin_return_address(0);
     char* r = BYTEHOOK_CALL_PREV(HideIfIndexToName, ifindex, buf);
+    if (BrowserCallerHere(caller)) return r;
     if (r && IsHiddenIfaceName(r)) {
         errno = ENODEV;
         return nullptr;
@@ -204,6 +213,9 @@ char* HideIfIndexToName(unsigned int ifindex, char* buf) {
 
 unsigned int HideIfNameToIndex(const char* name) {
     BYTEHOOK_STACK_SCOPE();
+    if (BrowserCallerHere(__builtin_return_address(0))) {
+        return BYTEHOOK_CALL_PREV(HideIfNameToIndex, name);
+    }
     if (name && IsHiddenIfaceName(name)) {
         errno = ENODEV;
         return 0;

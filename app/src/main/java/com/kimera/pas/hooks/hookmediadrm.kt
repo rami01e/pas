@@ -69,6 +69,11 @@ class HookMediaDrm : XHook {
                     } else {
                         orig
                     }
+                } else if (key == "oemCryptoBuildInformation" && SpoofState.widevineOn) {
+                    val orig = chain.proceed() as? String
+                    val spoofed = orig?.replace("Level3", "Level1") ?: "OEMCrypto Level1"
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm oemCryptoBuildInformation -> $spoofed")
+                    spoofed
                 } else {
                     val orig = chain.proceed()
                     if (SpoofState.widevineOn) {
@@ -202,6 +207,53 @@ class HookMediaDrm : XHook {
         }
     }
 
+    /** Locate Chromium's MediaDrmBridge across the process classloaders. */
+    private fun findMediaDrmBridgeClass(module: XposedModule): Class<*>? {
+        val name = "org.chromium.media.MediaDrmBridge"
+        val loaders = ArrayList<Pair<String, ClassLoader?>>()
+        loaders.add("app" to com.kimera.pas.pasClassLoader)
+        loaders.add("context" to Thread.currentThread().contextClassLoader)
+        loaders.add(
+            "activity" to try {
+                val at = Class.forName("android.app.ActivityThread")
+                val app = at.getMethod("currentApplication").invoke(null)
+                (app as? android.content.Context)?.classLoader
+            } catch (t: Throwable) {
+                null
+            }
+        )
+        loaders.add(
+            "webview" to try {
+                val wvf = Class.forName("android.webkit.WebViewFactory")
+                val provider = wvf.getMethod("getProvider").invoke(null)
+                provider?.javaClass?.classLoader
+            } catch (t: Throwable) {
+                null
+            }
+        )
+        for ((tag, loader) in loaders) {
+            if (loader == null) {
+                module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge loader=$tag: null")
+                continue
+            }
+            var l: ClassLoader? = loader
+            var depth = 0
+            while (l != null && depth < 4) {
+                try {
+                    val c = Class.forName(name, false, l)
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge loader=$tag depth=$depth: found")
+                    return c
+                } catch (t: Throwable) {
+                    // climb the parent chain
+                }
+                l = l.parent
+                depth++
+            }
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge loader=$tag: not found")
+        }
+        return null
+    }
+
     /**
      * Chromium's own EME layer (Chrome and WebView share
      * org.chromium.media.MediaDrmBridge). The browser decides which
@@ -210,14 +262,7 @@ class HookMediaDrm : XHook {
      * mirroring the substitutions here covers both browsers directly.
      */
     private fun hookChromiumBridge(module: XposedModule) {
-        val cls = try {
-            Class.forName(
-                "org.chromium.media.MediaDrmBridge", false,
-                com.kimera.pas.pasClassLoader
-            )
-        } catch (t: Throwable) {
-            null
-        }
+        val cls = findMediaDrmBridgeClass(module)
         if (cls == null) {
             module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge: class not present")
             return

@@ -94,8 +94,14 @@ void InstallCpuDeepHooks();
 // module GUI; used to map a target app's detection surface.
 void SetRecon(bool on);
 bool ReconEnabled();
-void SetWebRtcVisible(bool on);
-bool WebRtcVisible();
+int WebRtcMode();
+void SetWebRtcMode(int mode);
+bool BrowserCallerHere(void* ra);
+bool CallerAllowGfx(const char* caller_path_name, void* arg);
+void* HookChainStubGfx(const char* owner_regex, const char* sym, void* proxy);
+void InstallGpuDlsymChain();
+bool VulkanSpoofActive();
+void SetGpuOptions(bool chain, bool vulkan);
 void ReconNote(const char* op, const char* detail, long res);
 void InstallReconHooks();
 

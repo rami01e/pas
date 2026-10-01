@@ -55,11 +55,9 @@ object SpoofState {
     var reconOn: Boolean = false
 
     /**
-     * "WebRTC local IP" option (default true): when on, network-interface
-     * resolution stays realistic so browsers can gather local (host)
-     * candidates; when off, non-VPN interface resolution is suppressed as an
-     * extra privacy measure.
+     * "WebRTC local IP" mode: 0 = relaxed (interfaces fully visible),
+     * 1 = balanced (relaxed only for browser callers), 2 = RKN (full hiding).
      */
     @Volatile
-    var webrtcLocalIp: Boolean = true
+    var webrtcMode: Int = 0
 }

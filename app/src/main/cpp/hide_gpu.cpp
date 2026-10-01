@@ -39,6 +39,8 @@ static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
 
 static volatile bool g_gpu_on = false;
+static volatile bool g_gpu_chain_on = true;
+static volatile bool g_gpu_vulkan_on = true;
 static char g_gpu_vendor[64] = {0};
 static char g_gpu_renderer[192] = {0};
 static char g_gpu_gl_version[192] = {0};
@@ -132,6 +134,16 @@ int CpuSpoofMaxKHz() {
 
 bool GpuSpoofActive() {
     return g_gpu_on;
+}
+
+bool VulkanSpoofActive() {
+    return g_gpu_vulkan_on;
+}
+
+void SetGpuOptions(bool chain, bool vulkan) {
+    g_gpu_chain_on = chain;
+    g_gpu_vulkan_on = vulkan;
+    Log("native: gpu options chain=%d vulkan=%d", (int)chain, (int)vulkan);
 }
 
 std::string GpuSpoofVendor() {
@@ -272,7 +284,7 @@ void* GpuChainResolveDlsym(const char* symbol, void* real) {
         strcmp(symbol, "eglGetProcAddress") == 0) {
         GpuDiag("dlsym", symbol);
     }
-    if (!g_gpu_on || real == nullptr) return nullptr;
+    if (!g_gpu_on || !g_gpu_chain_on || real == nullptr) return nullptr;
     if (strcmp(symbol, "glGetString") == 0) {
         g_real_gl_get_string = real;
         GlChainLog("glGetString", "dlsym");
@@ -292,7 +304,7 @@ void* GpuChainResolveDlsym(const char* symbol, void* real) {
 
 static void* RepEglGetProcAddress(const char* name) {
     if (name != nullptr) GpuDiag("eglgpa", name);
-    if (g_gpu_on && name != nullptr) {
+    if (g_gpu_on && g_gpu_chain_on && name != nullptr) {
         if (strcmp(name, "glGetString") == 0) {
             auto real = (PasEglGpaFn)g_real_egl_gpa;
             void* r = real ? real(name) : nullptr;
@@ -328,7 +340,7 @@ static void* MyEglGetProcAddress(const char* name) {
     BYTEHOOK_STACK_SCOPE();
     void* real = BYTEHOOK_CALL_PREV(MyEglGetProcAddress, name);
     if (name != nullptr) GpuDiag("eglgpa", name);
-    if (!g_gpu_on || name == nullptr) return real;
+    if (!g_gpu_on || !g_gpu_chain_on || name == nullptr) return real;
     if (strcmp(name, "glGetString") == 0) {
         if (real != nullptr) g_real_gl_get_string = real;
         GlChainLog("glGetString", "eglGetProcAddress");
@@ -459,4 +471,12 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
                       (unsigned long long)vendorId, (unsigned long long)deviceId,
                       (unsigned long long)driverVersion, (unsigned long long)apiVersion,
                       dName.c_str(), dInfo.c_str());
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuOptions(JNIEnv* env, jobject thiz,
+                                                        jboolean chain, jboolean vulkan) {
+    (void)env;
+    (void)thiz;
+    pas::SetGpuOptions(chain == JNI_TRUE, vulkan == JNI_TRUE);
 }

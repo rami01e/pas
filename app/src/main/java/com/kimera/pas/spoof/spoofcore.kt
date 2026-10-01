@@ -63,7 +63,9 @@ object SpoofCore {
 
     external fun nativeSetRecon(reconOn: Boolean)
 
-    external fun nativeSetWebrtc(webrtcVisible: Boolean)
+    external fun nativeSetWebrtcMode(mode: Int)
+
+    external fun nativeSetGpuOptions(chain: Boolean, vulkan: Boolean)
 
     /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
@@ -119,9 +121,21 @@ object SpoofCore {
 
         // "WebRTC local IP" option (default: visible/realistic). Consumed live
         // by the network-interface hooks.
-        SpoofState.webrtcLocalIp = prefs.getBoolean("webrtc_localip", true)
-        runCatching { nativeSetWebrtc(SpoofState.webrtcLocalIp) }
-        Log.i(TAG, "[PAS] net: webrtc local ip = ${SpoofState.webrtcLocalIp}")
+        val modeStr = prefs.getString("webrtc_mode", null)
+        SpoofState.webrtcMode = when (modeStr) {
+            "balanced" -> 1
+            "rkn" -> 2
+            "relaxed" -> 0
+            else -> if (prefs.getBoolean("webrtc_localip", true)) 0 else 2
+        }
+        runCatching { nativeSetWebrtcMode(SpoofState.webrtcMode) }
+        runCatching {
+            nativeSetGpuOptions(
+                prefs.getBoolean("gpu_chain", true),
+                prefs.getBoolean("gpu_vulkan", true)
+            )
+        }
+        Log.i(TAG, "[PAS] net: webrtc mode = ${SpoofState.webrtcMode}")
 
         // CPU / GPU spoof values (resolved from the shared catalog; active only
         // together with the native addon so all surfaces stay consistent).

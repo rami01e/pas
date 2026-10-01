@@ -1420,9 +1420,8 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetRecon(JNIEnv* env, jobject thiz,
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_kimera_pas_spoof_SpoofCore_nativeSetWebrtc(JNIEnv* env, jobject thiz,
-                                                    jboolean webrtcVisible) {
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetWebrtcMode(JNIEnv* env, jobject thiz, jint mode) {
     (void)env;
     (void)thiz;
-    pas::SetWebRtcVisible(webrtcVisible == JNI_TRUE);
+    pas::SetWebRtcMode((int)mode);
 }

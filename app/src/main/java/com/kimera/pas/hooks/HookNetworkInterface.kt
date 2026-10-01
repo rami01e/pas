@@ -64,7 +64,7 @@ class HookNetworkInterface : XHook {
                 val name = chain.getArg(0) as? String
                 module.log(
                     Log.INFO, TAG,
-                    "NetworkInterface.getByName ($name) webrtc=${SpoofState.webrtcLocalIp}"
+                    "NetworkInterface.getByName ($name) webrtcMode=${SpoofState.webrtcMode}"
                 )
                 if (name == null) {
                     // Non-string lookup: leave the call untouched.
@@ -74,9 +74,9 @@ class HookNetworkInterface : XHook {
                     // VPN-style interfaces never resolve.
                     name.startsWith("tun") || name.startsWith("ppp") ||
                         name.startsWith("pptp") || name.startsWith("wg") -> null
-                    // "WebRTC local IP" off: suppress non-VPN resolution too,
-                    // so browsers cannot gather local (host) candidates.
-                    !SpoofState.webrtcLocalIp -> null
+                    // RKN mode: suppress non-VPN resolution too so browsers
+                    // cannot gather local (host) candidates.
+                    SpoofState.webrtcMode == 2 -> null
                     // Everything else resolves normally. (The previous
                     // upstream code passed a wrapped array here, which made
                     // every non-tun lookup fail - breaking local-candidate

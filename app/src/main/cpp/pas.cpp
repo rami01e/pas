@@ -58,7 +58,7 @@ static bool AllDigits(const char* s) {
 bool IsHiddenIfaceName(const char* name) {
     // "WebRTC local IP" relaxed mode keeps every interface visible so
     // browsers can gather local (host) candidates like a clean device.
-    if (WebRtcVisible()) return false;
+    if (WebRtcMode() == 0) return false;
     if (!name || !*name) return false;
     struct Rule {
         const char* prefix;
@@ -209,16 +209,78 @@ void RefreshHiddenNames(bool force) {
     }
 }
 
-static std::atomic<bool> g_webrtc_visible{true};
+static std::atomic<int> g_webrtc_mode{0};  // 0 relaxed / 1 balanced / 2 rkn
 
-bool WebRtcVisible() {
-    return g_webrtc_visible.load();
+int WebRtcMode() {
+    return g_webrtc_mode.load();
 }
 
-void SetWebRtcVisible(bool on) {
-    g_webrtc_visible.store(on);
-    Log("native: webrtc visible=%d", on ? 1 : 0);
+void SetWebRtcMode(int mode) {
+    if (mode < 0 || mode > 2) mode = 0;
+    g_webrtc_mode.store(mode);
+    Log("native: webrtc mode=%d", mode);
     RefreshHiddenNames(true);
+}
+
+// ---------------------------------------------------------------------------
+// balanced mode: browser-caller detection via /proc/self/maps ranges
+// ---------------------------------------------------------------------------
+
+struct BrowserRange {
+    unsigned long long lo;
+    unsigned long long hi;
+};
+
+static std::mutex g_bmap_mtx;
+static std::vector<BrowserRange> g_browser_ranges;
+static long long g_bmap_last = 0;
+
+static void RefreshBrowserRangesLocked() {
+    g_browser_ranges.clear();
+    size_t cap = 1 << 20;
+    char* buf = (char*)malloc(cap);
+    if (!buf) return;
+    ssize_t len = SysReadFile("/proc/self/maps", buf, cap - 1);
+    if (len > 0) {
+        buf[len] = '\0';
+        char* p = buf;
+        while (p && *p) {
+            char* nl = strchr(p, '\n');
+            if (nl) *nl = '\0';
+            if ((strstr(p, "chrome") || strstr(p, "webviewchromium") ||
+                 strstr(p, "monochrome")) &&
+                strstr(p, "r-x")) {
+                unsigned long long lo = strtoull(p, nullptr, 16);
+                char* dash = strchr(p, '-');
+                unsigned long long hi = dash ? strtoull(dash + 1, nullptr, 16) : 0;
+                if (hi > lo) {
+                    BrowserRange r;
+                    r.lo = lo;
+                    r.hi = hi;
+                    g_browser_ranges.push_back(r);
+                }
+            }
+            if (!nl) break;
+            p = nl + 1;
+        }
+    }
+    free(buf);
+}
+
+bool BrowserCallerHere(void* ra) {
+    if (WebRtcMode() != 1) return false;
+    if (ra == nullptr) return false;
+    unsigned long long a = (unsigned long long)ra;
+    std::lock_guard<std::mutex> lk(g_bmap_mtx);
+    long long now = NowMs();
+    if (g_browser_ranges.empty() || (now - g_bmap_last) > 5000) {
+        g_bmap_last = now;
+        RefreshBrowserRangesLocked();
+    }
+    for (size_t i = 0; i < g_browser_ranges.size(); i++) {
+        if (a >= g_browser_ranges[i].lo && a < g_browser_ranges[i].hi) return true;
+    }
+    return false;
 }
 
 bool LineContainsHiddenName(const char* line) {
@@ -337,6 +399,25 @@ bool CallerAllowHooks(const char* caller_path_name, void* arg) {
     return CallerAllow(caller_path_name, arg);
 }
 
+// Graphics-family callers only: used for the dlsym loader chain so the
+// process-wide loader stays untouched for unrelated libraries.
+bool CallerAllowGfx(const char* caller_path_name, void* arg) {
+    if (!CallerAllow(caller_path_name, arg)) return false;
+    if (!caller_path_name) return false;
+    static const char* const kGfx[] = {
+        "GLES", "EGL", "libvulkan", "chrome", "webview", "monochrome", "hwui", "angle", "skia",
+    };
+    for (size_t i = 0; i < sizeof(kGfx) / sizeof(kGfx[0]); i++) {
+        if (strstr(caller_path_name, kGfx[i]) != nullptr) return true;
+    }
+    return false;
+}
+
+void* HookChainStubGfx(const char* owner_regex, const char* sym, void* proxy) {
+    return (void*)bytehook_hook_partial(CallerAllowGfx, nullptr, owner_regex, sym, proxy, OnHooked,
+                                        nullptr);
+}
+
 void HookLibcSym(const char* sym, void* proxy) {
     bytehook_stub_t stub = bytehook_hook_partial(CallerAllow, nullptr, "libc.so", sym, proxy,
                                                  OnHooked, nullptr);
@@ -438,7 +519,12 @@ static void* InitWorker(void* arg) {
     }
     if (GpuSpoofActive()) {
         InstallGpuHooks();
-        InstallVulkanHooks();
+        InstallGpuDlsymChain();
+        if (VulkanSpoofActive()) {
+            InstallVulkanHooks();
+        } else {
+            Log("native: vulkan spoof off - vulkan hooks skipped");
+        }
         Log("native: stage4b gpu gl+vulkan hooks");
     } else {
         Log("native: gpu spoof off - gl/vulkan hooks skipped");

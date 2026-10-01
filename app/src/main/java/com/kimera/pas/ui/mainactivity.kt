@@ -104,8 +104,12 @@ class MainActivity : Activity() {
     private lateinit var gsfSw: SwitchView
     private lateinit var gsfValue: TextView
 
-    private lateinit var webrtcSw: SwitchView
-    private lateinit var webrtcChip: TextView
+    private lateinit var vulkanSw: SwitchView
+    private lateinit var vulkanChip: TextView
+    private lateinit var chainSw: SwitchView
+    private lateinit var chainChip: TextView
+    private lateinit var webrtcValue: TextView
+    private var webrtcModeSel = 0
     private lateinit var reconSw: SwitchView
     private lateinit var reconChip: TextView
 
@@ -303,12 +307,75 @@ class MainActivity : Activity() {
         valueRow(spoofBody, false, gpuSw, "GPU", gpuValue,
             { pickGpu() }, { randomGpu() }, { clearGpu() })
 
-        webrtcSw = SwitchView(this)
-        webrtcChip = chipView("Visible", cCyan)
+        vulkanSw = SwitchView(this)
+        vulkanChip = chipView("On", cCyan)
         toggleRow(
-            spoofBody, false, webrtcSw, "WebRTC local IP",
-            "Loosens interface hiding so browsers can gather local candidates", webrtcChip
+            spoofBody, false, vulkanSw, "Vulkan identity",
+            "Vulkan driver identity (physical device properties)", vulkanChip
         )
+
+        chainSw = SwitchView(this)
+        chainChip = chipView("On", cCyan)
+        toggleRow(
+            spoofBody, false, chainSw, "GL dlsym chain",
+            "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
+        )
+
+        // WebRTC local IP: three modes (relaxed / balanced / rkn)
+        addRow(spoofBody, false) {
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "WebRTC local IP"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 13.5f)
+                    setTextColor(cText)
+                }
+            )
+            val line = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+            }
+            val valWrap = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                isClickable = true
+                setOnClickListener { pickWebrtcMode() }
+            }
+            webrtcValue = valueTextView()
+            valWrap.addView(webrtcValue)
+            valWrap.addView(
+                TextView(this@MainActivity).apply {
+                    text = "\u25BE"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 9f)
+                    setTextColor(cText3)
+                    setPadding(dp(4), 0, 0, 0)
+                }
+            )
+            line.addView(
+                valWrap,
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            line.addView(micro("Next") { cycleWebrtcMode() })
+            line.addView(micro("Reset") { resetWebrtcMode() })
+            addView(
+                line,
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(6) }
+            )
+            addView(
+                TextView(this@MainActivity).apply {
+                    text = "Relaxed = local IP visible - Balanced = browser-only relaxation - RKN = full hiding"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                    typeface = Typeface.MONOSPACE
+                    setTextColor(cText3)
+                },
+                LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { topMargin = dp(4) }
+            )
+        }
 
         // ---------------- JAVA panel ----------------
         val (javaPanel, javaBody) = panel("Java", null, null)
@@ -857,6 +924,44 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun webrtcModeLabel(idx: Int): String = when (idx) {
+        0 -> "Relaxed (local IP)"
+        1 -> "Balanced"
+        else -> "RKN (strict)"
+    }
+
+    private fun updateWebrtcValue() {
+        webrtcValue.text = webrtcModeLabel(webrtcModeSel)
+        webrtcValue.setTextColor(
+            when (webrtcModeSel) {
+                0 -> cAmber
+                1 -> cCyan
+                else -> cGreen
+            }
+        )
+    }
+
+    private fun pickWebrtcMode() {
+        val items = arrayOf(webrtcModeLabel(0), webrtcModeLabel(1), webrtcModeLabel(2))
+        pick("WebRTC local IP", items, webrtcModeSel) { idx ->
+            webrtcModeSel = idx
+            updateWebrtcValue()
+            updateDirty()
+        }
+    }
+
+    private fun cycleWebrtcMode() {
+        webrtcModeSel = (webrtcModeSel + 1) % 3
+        updateWebrtcValue()
+        updateDirty()
+    }
+
+    private fun resetWebrtcMode() {
+        webrtcModeSel = 0
+        updateWebrtcValue()
+        updateDirty()
+    }
+
     private fun pickSdk() {
         buildSdkOptions()
         pick("Spoof SDK", sdkLabels.toTypedArray(), sdkIndexFor(sdkValueSelected())) { idx ->
@@ -1131,7 +1236,16 @@ class MainActivity : Activity() {
         gsfSw.checked = sp.getBoolean("gsf_enabled", false)
         gsfEditVal = sp.getString("gsf_id", "") ?: ""
         updateGsfValue()
-        webrtcSw.checked = sp.getBoolean("webrtc_localip", true)
+        val modeStr = sp.getString("webrtc_mode", null)
+        webrtcModeSel = when (modeStr) {
+            "balanced" -> 1
+            "rkn" -> 2
+            "relaxed" -> 0
+            else -> if (sp.getBoolean("webrtc_localip", true)) 0 else 2
+        }
+        updateWebrtcValue()
+        vulkanSw.checked = sp.getBoolean("gpu_vulkan", true)
+        chainSw.checked = sp.getBoolean("gpu_chain", true)
         reconSw.checked = sp.getBoolean("recon_enabled", false)
         suppressDirty = false
         refreshRowVisuals()
@@ -1152,8 +1266,14 @@ class MainActivity : Activity() {
         "widevine_id" to wvEditVal.trim().lowercase(),
         "gsf_enabled" to gsfSw.checked,
         "gsf_id" to gsfEditVal.trim(),
-        "webrtc_localip" to webrtcSw.checked,
-        "recon_enabled" to reconSw.checked
+        "webrtc_mode" to when (webrtcModeSel) {
+            0 -> "relaxed"
+            1 -> "balanced"
+            else -> "rkn"
+        },
+        "recon_enabled" to reconSw.checked,
+        "gpu_chain" to chainSw.checked,
+        "gpu_vulkan" to vulkanSw.checked
     )
 
     private fun savedMap(): HashMap<String, Any?> {
@@ -1173,8 +1293,11 @@ class MainActivity : Activity() {
             "widevine_id" to (sp.getString("widevine_id", "") ?: ""),
             "gsf_enabled" to sp.getBoolean("gsf_enabled", false),
             "gsf_id" to (sp.getString("gsf_id", "") ?: ""),
-            "webrtc_localip" to sp.getBoolean("webrtc_localip", true),
-            "recon_enabled" to sp.getBoolean("recon_enabled", false)
+            "webrtc_mode" to (sp.getString("webrtc_mode", null)
+                ?: if (sp.getBoolean("webrtc_localip", true)) "relaxed" else "rkn"),
+            "recon_enabled" to sp.getBoolean("recon_enabled", false),
+            "gpu_chain" to sp.getBoolean("gpu_chain", true),
+            "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
         )
     }
 
@@ -1192,7 +1315,9 @@ class MainActivity : Activity() {
         }
         chip(nativeChip, if (nativeSw.checked) "On" else "Off", if (nativeSw.checked) cCyan else cText2)
         chip(compatChip, if (compatSw.checked) "On" else "Off", if (compatSw.checked) cAmber else cText2)
-        chip(webrtcChip, if (webrtcSw.checked) "Visible" else "Hidden", if (webrtcSw.checked) cCyan else cText2)
+        chip(vulkanChip, if (vulkanSw.checked) "On" else "Off", if (vulkanSw.checked) cCyan else cText2)
+        chip(chainChip, if (chainSw.checked) "On" else "Off", if (chainSw.checked) cCyan else cText2)
+        updateWebrtcValue()
         chip(reconChip, if (reconSw.checked) "On" else "Off", if (reconSw.checked) cAmber else cText2)
         sdkValue.setTextColor(if (sdkSw.checked) cAmber else cText3)
         cpuValue.setTextColor(if (cpuSw.checked) cAmber else cText3)
@@ -1215,7 +1340,8 @@ class MainActivity : Activity() {
         gpuSw.onToggle = toggle
         wvSw.onToggle = toggle
         gsfSw.onToggle = toggle
-        webrtcSw.onToggle = toggle
+        vulkanSw.onToggle = toggle
+        chainSw.onToggle = toggle
         reconSw.onToggle = toggle
     }
 

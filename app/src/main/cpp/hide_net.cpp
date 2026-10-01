@@ -18,7 +18,8 @@ namespace pas {
 
 int HideSetSockOpt(int fd, int level, int optname, const void* optval, socklen_t optlen) {
     BYTEHOOK_STACK_SCOPE();
-    if (level == SOL_SOCKET && optval != nullptr) {
+    bool relax = BrowserCallerHere(__builtin_return_address(0));
+    if (!relax && level == SOL_SOCKET && optval != nullptr) {
         if (optname == SO_BINDTODEVICE && optlen > 0) {
             const char* name = (const char*)optval;
             bool nul = false;

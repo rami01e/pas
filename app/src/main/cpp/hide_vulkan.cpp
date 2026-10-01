@@ -413,7 +413,7 @@ static void* const kVkProxies[VK_T_COUNT] = {
 static void* MyVkGetInstanceProcAddrGOT(VkInstance instance, const char* name) {
     BYTEHOOK_STACK_SCOPE();
     void* real = BYTEHOOK_CALL_PREV(MyVkGetInstanceProcAddrGOT, instance, name);
-    if (!GpuSpoofActive() || !name || !real) return real;
+    if (!GpuSpoofActive() || !VulkanSpoofActive() || !name || !real) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
         g_vk_real[id] = real;
@@ -427,7 +427,7 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
     PasGipaFn gipa = (PasGipaFn)g_real_gipa;
     if (!gipa) return nullptr;
     void* real = gipa(instance, name);
-    if (!GpuSpoofActive() || !name || !real) return real;
+    if (!GpuSpoofActive() || !VulkanSpoofActive() || !name || !real) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
         g_vk_real[id] = real;
@@ -437,29 +437,37 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
     return real;
 }
 
+static __thread int g_dlsym_depth = 0;
+
 static void* MyDlsym(void* handle, const char* symbol) {
     BYTEHOOK_STACK_SCOPE();
     void* real = BYTEHOOK_CALL_PREV(MyDlsym, handle, symbol);
-    {
-        // GL entry points resolved through dlsym (ANGLE-style consumers).
+    if (g_dlsym_depth > 0) return real;
+    g_dlsym_depth = 1;
+    void* out = real;
+    do {
+        if (real == nullptr) break;
         void* sub = GpuChainResolveDlsym(symbol, real);
-        if (sub != nullptr) return sub;
-    }
-    if (!symbol || symbol[0] != 'v' || symbol[1] != 'k') return real;
-    if (strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
-        g_real_gipa = real;
-        if (GpuSpoofActive() && real) return (void*)MyVkGetInstanceProcAddrPtr;
-        return real;
-    }
-    if (GpuSpoofActive() && real) {
+        if (sub != nullptr) {
+            out = sub;
+            break;
+        }
+        if (!symbol || symbol[0] != 'v' || symbol[1] != 'k') break;
+        if (!GpuSpoofActive() || !VulkanSpoofActive()) break;
+        if (strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
+            g_real_gipa = real;
+            out = (void*)MyVkGetInstanceProcAddrPtr;
+            break;
+        }
         int id = TargetIndex(symbol);
         if (id >= 0) {
             g_vk_real[id] = real;
             ChainLog(id, "dlsym direct");
-            return kVkProxies[id];
+            out = kVkProxies[id];
         }
-    }
-    return real;
+    } while (0);
+    g_dlsym_depth = 0;
+    return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -504,17 +512,18 @@ void InstallVulkanHooks() {
                                                      s.sym, s.fn, OnVkHooked, nullptr);
         if (stub) ok++;
     }
-    // ANGLE-style consumers (Chrome / WebView) fetch the GL entry points
-    // through dlsym; cover that path as well. The stub is requested for both
-    // owner candidates (dlsym is served by libdl.so's forwarding stub on
-    // modern bionic) and the results are logged so a dead chain is visible
-    // in the capture.
-    void* dStub = HookChainStub("libc.so", "dlsym", (void*)MyDlsym);
-    Log("native: dlsym chain libc.so stub=%d", dStub != nullptr);
-    void* dStub2 = HookChainStub("libdl.so", "dlsym", (void*)MyDlsym);
-    Log("native: dlsym chain libdl.so stub=%d", dStub2 != nullptr);
-    Log("native: vulkan hooks installed %d/%d (+dlsym chain)", ok,
+    Log("native: vulkan hooks installed %d/%d", ok,
         (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
+}
+
+// The GL loader chain: engines (Chrome / WebView / ANGLE-style) resolve GL
+// entry points through dlsym; cover that path for graphics-family callers
+// only (keeps the process-wide loader untouched for unrelated libraries).
+void InstallGpuDlsymChain() {
+    void* dStub = HookChainStubGfx("libc.so", "dlsym", (void*)MyDlsym);
+    Log("native: dlsym chain libc.so stub=%d", dStub != nullptr);
+    void* dStub2 = HookChainStubGfx("libdl.so", "dlsym", (void*)MyDlsym);
+    Log("native: dlsym chain libdl.so stub=%d", dStub2 != nullptr);
 }
 
 }  // namespace pas
