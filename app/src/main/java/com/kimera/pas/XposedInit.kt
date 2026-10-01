@@ -42,6 +42,19 @@ class XposedInit : XposedModule() {
         if (!hooksInstalled.compareAndSet(false, true)) {
             return
         }
+        // Zygote processes (system, app and webview zygotes) only exist to
+        // fork children. Hooks installed there are inherited by every forked
+        // child - the sandboxed WebView renderers were dying exactly this
+        // way. The module stays inert in any zygote.
+        val procName = try {
+            java.io.File("/proc/self/cmdline").readText().replace('\u0000', ' ').trim()
+        } catch (t: Throwable) {
+            ""
+        }
+        if (procName.contains("zygote")) {
+            log(Log.INFO, TAG, "[PAS] zygote process ($procName) - module inert")
+            return
+        }
         pasClassLoader = param.classLoader
         log(Log.INFO, TAG, "[PAS] onPackageReady: ${param.packageName} - installing hooks")
 

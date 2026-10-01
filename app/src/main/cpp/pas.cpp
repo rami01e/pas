@@ -532,6 +532,24 @@ static void* InitWorker(void* arg) {
     (void)arg;
     Log("native: worker start");
 
+    // Zygote processes only exist to fork children; hooks installed here are
+    // inherited by every forked child (this is how sandboxed WebView
+    // renderers were getting poisoned). The module never runs in a zygote.
+    {
+        char cbuf[256];
+        ssize_t cn = SysReadFile("/proc/self/cmdline", cbuf, sizeof(cbuf) - 1);
+        if (cn > 0) {
+            for (ssize_t i = 0; i < cn; i++) {
+                if (cbuf[i] == '\0') cbuf[i] = ' ';
+            }
+            cbuf[cn] = '\0';
+            if (strstr(cbuf, "zygote") != nullptr) {
+                Log("native: zygote process - module inert (%s)", cbuf);
+                return nullptr;
+            }
+        }
+    }
+
     // The Kotlin side delivers the configuration first: with the native addon
     // disabled nothing is installed at all (module behaves like the original,
     // Java-only); compatibility mode skips just the extended hook groups.

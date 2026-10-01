@@ -1390,19 +1390,35 @@ void InstallReconHooks() {
 // entry in the capture. Pure logging - no behavior changes.
 // ---------------------------------------------------------------------------
 
+static volatile int g_dlopen_diag = 0;
+
+// Library-load tracing bypasses the recon token filter on purpose: every
+// load matters when hunting a loading stall. Own cap so it cannot starve
+// the rest of the recon budget.
+static void ReconDlopen(const char* op, const char* detail, long res) {
+    if (!g_recon || detail == nullptr) return;
+    int n = __sync_fetch_and_add(&g_dlopen_diag, 1);
+    if (n == 150) {
+        Log("native: recon: dlopen trace cap reached");
+        return;
+    }
+    if (n > 150) return;
+    Log("native: recon: %s %s -> %ld", op, detail, res);
+}
+
 static void* MyDlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
-    ReconNote("dlopen", filename ? filename : "(null)", (long)flags);
+    ReconDlopen("dlopen", filename ? filename : "(null)", (long)flags);
     void* h = BYTEHOOK_CALL_PREV(MyDlopen, filename, flags);
-    ReconNote("dlopen-done", filename ? filename : "(null)", (long)(intptr_t)h);
+    ReconDlopen("dlopen-done", filename ? filename : "(null)", (long)(intptr_t)h);
     return h;
 }
 
 static void* MyAndroidDlopenExt(const char* filename, int flags, const void* extinfo) {
     BYTEHOOK_STACK_SCOPE();
-    ReconNote("android-dlopen-ext", filename ? filename : "(null)", (long)flags);
+    ReconDlopen("android-dlopen-ext", filename ? filename : "(null)", (long)flags);
     void* h = BYTEHOOK_CALL_PREV(MyAndroidDlopenExt, filename, flags, extinfo);
-    ReconNote("android-dlopen-ext-done", filename ? filename : "(null)", (long)(intptr_t)h);
+    ReconDlopen("android-dlopen-ext-done", filename ? filename : "(null)", (long)(intptr_t)h);
     return h;
 }
 
