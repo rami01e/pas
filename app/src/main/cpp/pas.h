@@ -55,7 +55,7 @@ void InstallFsHooks();
 void InstallNetHooks();
 void InstallNetlinkHooks();
 void StartInitWorker();
-void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode,
+void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled);
 
 // CPU model / GPU (OpenGL + Vulkan) spoof (hide_gpu.cpp, hide_vulkan.cpp)

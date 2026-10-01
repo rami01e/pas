@@ -36,9 +36,9 @@ static volatile int g_sdk_val = 0;
 static char g_sdk_str[8] = {0};
 static char g_sdk_release[8] = {0};
 static volatile bool g_abi_on = false;
-static volatile bool g_abi_arm64 = false;
+static volatile int g_abi_mode = 0;  // 0=x86_64 / 1=arm64-v8a / 2=arm64-v8a (mixed)
 
-void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool compatMode,
+void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled) {
     if (sdkVal < 21 || sdkVal > 45) sdkOn = false;
     g_sdk_on = false;
@@ -64,11 +64,12 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, bool abiArm64, bool comp
         g_sdk_on = true;
     }
     if (abiOn) {
-        g_abi_arm64 = abiArm64;
+        if (abiMode < 0 || abiMode > 2) abiMode = 0;
+        g_abi_mode = abiMode;
         g_abi_on = true;
     }
-    Log("native: spoof config sdk=%d(%d) abi=%d arm64=%d compat=%d native=%d", (int)g_sdk_on,
-        g_sdk_val, (int)g_abi_on, (int)g_abi_arm64, (int)compatMode, (int)nativeEnabled);
+    Log("native: spoof config sdk=%d(%d) abi=%d mode=%d compat=%d native=%d", (int)g_sdk_on,
+        g_sdk_val, (int)g_abi_on, g_abi_mode, (int)compatMode, (int)nativeEnabled);
     // Releases the hook-installation worker: with the native addon disabled it
     // installs nothing at all; compat mode skips only the extended groups.
     SignalSpoofConfigReady(compatMode, nativeEnabled);
@@ -254,26 +255,31 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         }
     }
     if (g_abi_on) {
-        const bool a = g_abi_arm64;
+        const int m = g_abi_mode;
         if (strcmp(name, "ro.product.cpu.abi") == 0) {
-            return SetStr(out, cap, outLen, a ? "arm64-v8a" : "x86_64");
+            return SetStr(out, cap, outLen, m == 0 ? "x86_64" : "arm64-v8a");
         }
         if (strcmp(name, "ro.product.cpu.abi2") == 0) {
             // Only keep a value where the device already reports one.
-            if (orig && orig[0]) return SetStr(out, cap, outLen, a ? "armeabi-v7a" : "x86");
+            if (orig && orig[0]) return SetStr(out, cap, outLen, m == 1 ? "armeabi-v7a" : "x86");
             return false;
         }
         if (strcmp(name, "ro.product.cpu.abilist") == 0) {
-            return SetStr(out, cap, outLen, a ? "arm64-v8a,armeabi-v7a,armeabi" : "x86_64,x86");
+            if (m == 1) return SetStr(out, cap, outLen, "arm64-v8a,armeabi-v7a,armeabi");
+            if (m == 2) return SetStr(out, cap, outLen, "arm64-v8a,x86_64,x86");
+            return SetStr(out, cap, outLen, "x86_64,x86");
         }
         if (strcmp(name, "ro.product.cpu.abilist64") == 0) {
-            return SetStr(out, cap, outLen, a ? "arm64-v8a" : "x86_64");
+            if (m == 1) return SetStr(out, cap, outLen, "arm64-v8a");
+            if (m == 2) return SetStr(out, cap, outLen, "arm64-v8a,x86_64");
+            return SetStr(out, cap, outLen, "x86_64");
         }
         if (strcmp(name, "ro.product.cpu.abilist32") == 0) {
-            return SetStr(out, cap, outLen, a ? "armeabi-v7a,armeabi" : "x86");
+            if (m == 1) return SetStr(out, cap, outLen, "armeabi-v7a,armeabi");
+            return SetStr(out, cap, outLen, "x86");
         }
         if (strcmp(name, "ro.product.cpu.arch") == 0) {
-            return SetStr(out, cap, outLen, a ? "arm64" : "x86_64");
+            return SetStr(out, cap, outLen, m == 0 ? "x86_64" : "arm64");
         }
     }
     if (CpuSpoofActive()) {
@@ -360,7 +366,7 @@ int HideUname(struct utsname* buf) {
     BYTEHOOK_STACK_SCOPE();
     int rc = BYTEHOOK_CALL_PREV(HideUname, buf);
     if (rc == 0 && buf != nullptr && g_abi_on) {
-        const char* m = g_abi_arm64 ? "aarch64" : "x86_64";
+        const char* m = (g_abi_mode == 0) ? "x86_64" : "aarch64";
         size_t n = strlen(m);
         if (n < sizeof(buf->machine)) {
             memcpy(buf->machine, m, n + 1);
@@ -376,14 +382,14 @@ int HideUname(struct utsname* buf) {
 uint64_t HideCpuFamily() {
     BYTEHOOK_STACK_SCOPE();
     if (g_abi_on) {
-        return g_abi_arm64 ? PAS_CPU_FAMILY_ARM64 : PAS_CPU_FAMILY_X86_64;
+        return (g_abi_mode == 0) ? PAS_CPU_FAMILY_X86_64 : PAS_CPU_FAMILY_ARM64;
     }
     return BYTEHOOK_CALL_PREV(HideCpuFamily);
 }
 
 uint64_t HideCpuFeatures() {
     BYTEHOOK_STACK_SCOPE();
-    if (g_abi_on && g_abi_arm64) {
+    if (g_abi_on && g_abi_mode != 0) {
         // Conservative AArch64 baseline: FP | ASIMD. Keep it minimal so code
         // that dispatches on optional features (AES, PMULL, ...) still takes
         // its portable path on the underlying x86 hardware.
@@ -405,12 +411,12 @@ void InstallPropSpoofHooks() {
 extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_pas_spoof_SpoofCore_nativeSetConfig(JNIEnv* env, jobject thiz,
                                                             jboolean sdkOn, jint sdkVal,
-                                                            jboolean abiOn, jboolean abiArm64,
+                                                            jboolean abiOn, jint abiMode,
                                                             jboolean compatMode,
                                                             jboolean nativeEnabled) {
     (void)env;
     (void)thiz;
     pas::SetSpoofConfig(sdkOn == JNI_TRUE, (int)sdkVal, abiOn == JNI_TRUE,
-                        abiArm64 == JNI_TRUE, compatMode == JNI_TRUE,
+                        (int)abiMode, compatMode == JNI_TRUE,
                         nativeEnabled == JNI_TRUE);
 }

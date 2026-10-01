@@ -93,8 +93,7 @@ class MainActivity : Activity() {
     private lateinit var sdkSw: SwitchView
     private lateinit var sdkValue: TextView
     private lateinit var abiSw: SwitchView
-    private lateinit var abiX86View: TextView
-    private lateinit var abiArmView: TextView
+    private lateinit var abiValue: TextView
     private lateinit var cpuSw: SwitchView
     private lateinit var cpuValue: TextView
     private lateinit var gpuSw: SwitchView
@@ -109,7 +108,7 @@ class MainActivity : Activity() {
     private lateinit var chainSw: SwitchView
     private lateinit var chainChip: TextView
     private lateinit var webrtcValue: TextView
-    private var webrtcModeSel = 0
+    private var webrtcModeSel = 1
     private lateinit var reconSw: SwitchView
     private lateinit var reconChip: TextView
 
@@ -133,7 +132,7 @@ class MainActivity : Activity() {
     private var sdkSel = 0
     private var cpuSel = 0
     private var gpuSel = 0
-    private var abiArm64 = false
+    private var abiModeSel = 0
     private var wvEditVal = ""
     private var gsfEditVal = ""
 
@@ -303,9 +302,9 @@ class MainActivity : Activity() {
             { pickSdk() }, { randomSdk() }, { clearSdk() })
 
         abiSw = SwitchView(this)
-        addRow(spoofBody, false) {
-            addAbiHead()
-        }
+        abiValue = valueTextView()
+        valueRow(spoofBody, false, abiSw, "CPU ABI", abiValue,
+            { pickAbi() }, { cycleAbi() }, { clearAbi() })
 
         cpuSw = SwitchView(this)
         cpuValue = valueTextView()
@@ -375,7 +374,7 @@ class MainActivity : Activity() {
             )
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Relaxed = local IP visible - Balanced = whole-browser relaxation - RKN = strict"
+                    text = "Balanced (default) = browser-only relaxation - RKN = strict - Relaxed = all visible"
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
                     typeface = Typeface.MONOSPACE
                     setTextColor(cText3)
@@ -906,60 +905,29 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun LinearLayout.addAbiHead() {
-        addView(rowHead(abiSw, "CPU ABI", null))
-        val line = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
-        val seg = LinearLayout(this@MainActivity).apply {
-            orientation = LinearLayout.HORIZONTAL
-            background = rounded(0x00000000, cBorder, 3)
-        }
-        abiX86View = TextView(this@MainActivity).apply {
-            text = "x86_64"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-            typeface = Typeface.MONOSPACE
-            setPadding(dp(9), dp(4), dp(9), dp(4))
-            isClickable = true
-            setOnClickListener { setAbi(false); updateDirty() }
-        }
-        abiArmView = TextView(this@MainActivity).apply {
-            text = "arm64-v8a"
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-            typeface = Typeface.MONOSPACE
-            setPadding(dp(9), dp(4), dp(9), dp(4))
-            isClickable = true
-            setOnClickListener { setAbi(true); updateDirty() }
-        }
-        seg.addView(abiX86View)
-        seg.addView(abiArmView)
-        line.addView(seg)
-        line.addView(
-            View(this@MainActivity),
-            LinearLayout.LayoutParams(0, 1, 1f)
-        )
-        line.addView(micro("Random") { randomAbi() })
-        line.addView(micro("Clear") { clearAbi() })
-        addView(
-            line,
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { leftMargin = dp(38); topMargin = dp(6) }
-        )
+    private fun abiModeLabel(idx: Int): String = when (idx) {
+        0 -> "x86_64"
+        1 -> "arm64-v8a"
+        else -> "arm64-v8a (mixed)"
     }
 
-    private fun updateAbiSeg() {
-        abiX86View.setTextColor(if (!abiArm64) cAmber else cText2)
-        abiX86View.background = if (!abiArm64) rounded(cBorder, null, 2) else null
-        abiArmView.setTextColor(if (abiArm64) cAmber else cText2)
-        abiArmView.background = if (abiArm64) rounded(cBorder, null, 2) else null
+    private fun updateAbiValue() {
+        abiValue.text = abiModeLabel(abiModeSel)
     }
 
-    private fun setAbi(arm: Boolean) {
-        abiArm64 = arm
-        updateAbiSeg()
+    private fun pickAbi() {
+        val items = arrayOf(abiModeLabel(0), abiModeLabel(1), abiModeLabel(2))
+        pick("CPU ABI", items, abiModeSel) { idx ->
+            abiModeSel = idx
+            updateAbiValue()
+            updateDirty()
+        }
+    }
+
+    private fun cycleAbi() {
+        abiModeSel = (abiModeSel + 1) % 3
+        updateAbiValue()
+        updateDirty()
     }
 
     // ------------------------------------------------------------------
@@ -979,7 +947,7 @@ class MainActivity : Activity() {
 
     private fun webrtcModeLabel(idx: Int): String = when (idx) {
         0 -> "Relaxed (local IP)"
-        1 -> "Balanced"
+        1 -> "Balanced (default)"
         else -> "RKN (strict)"
     }
 
@@ -1195,13 +1163,9 @@ class MainActivity : Activity() {
         updateDirty()
     }
 
-    private fun randomAbi() {
-        setAbi(rng.nextBoolean())
-        updateDirty()
-    }
-
     private fun clearAbi() {
-        setAbi(false)
+        abiModeSel = 0
+        updateAbiValue()
         abiSw.checked = false
         refreshRowVisuals()
         updateDirty()
@@ -1275,8 +1239,12 @@ class MainActivity : Activity() {
         sdkSel = sdkIndexFor(sp.getInt("sdk_value", currentSdk))
         updateSdkValue()
         abiSw.checked = sp.getBoolean("abi_enabled", false)
-        abiArm64 = (sp.getString("abi_value", "x86_64") ?: "x86_64") == "arm64-v8a"
-        updateAbiSeg()
+        abiModeSel = when (sp.getString("abi_value", "x86_64")) {
+            "arm64-v8a" -> 1
+            "mixed" -> 2
+            else -> 0
+        }
+        updateAbiValue()
         cpuSw.checked = sp.getBoolean("cpu_enabled", false)
         cpuSel = cpuIndexFor(sp.getString("cpu_value", "") ?: "")
         updateCpuValue()
@@ -1294,7 +1262,7 @@ class MainActivity : Activity() {
             "balanced" -> 1
             "rkn" -> 2
             "relaxed" -> 0
-            else -> if (sp.getBoolean("webrtc_localip", true)) 0 else 2
+            else -> if (sp.getBoolean("webrtc_localip", true)) 1 else 2
         }
         updateWebrtcValue()
         vulkanSw.checked = sp.getBoolean("gpu_vulkan", true)
@@ -1310,7 +1278,11 @@ class MainActivity : Activity() {
         "sdk_enabled" to sdkSw.checked,
         "sdk_value" to sdkValueSelected(),
         "abi_enabled" to abiSw.checked,
-        "abi_value" to (if (abiArm64) "arm64-v8a" else "x86_64"),
+        "abi_value" to when (abiModeSel) {
+            1 -> "arm64-v8a"
+            2 -> "mixed"
+            else -> "x86_64"
+        },
         "cpu_enabled" to cpuSw.checked,
         "cpu_value" to DeviceCatalog.CPUS.getOrElse(cpuSel) { DeviceCatalog.CPUS[0] }.display,
         "gpu_enabled" to gpuSw.checked,
@@ -1377,7 +1349,7 @@ class MainActivity : Activity() {
         gpuValue.setTextColor(if (gpuSw.checked) cAmber else cText3)
         wvValue.setTextColor(if (wvSw.checked) cAmber else cText3)
         gsfValue.setTextColor(if (gsfSw.checked) cAmber else cText3)
-        updateAbiSeg()
+        abiValue.setTextColor(if (abiSw.checked) cAmber else cText3)
     }
 
     private fun attachListeners() {

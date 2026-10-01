@@ -30,7 +30,7 @@ object SpoofCore {
         sdkOn: Boolean,
         sdkVal: Int,
         abiOn: Boolean,
-        abiArm64: Boolean,
+        abiMode: Int,
         compatMode: Boolean,
         nativeEnabled: Boolean
     )
@@ -78,7 +78,7 @@ object SpoofCore {
             }
             if (prefs == null) {
                 // Release the native hook gate with safe defaults (addon off).
-                runCatching { nativeSetConfig(false, 0, false, false, true, false) }
+                runCatching { nativeSetConfig(false, 0, false, 0, true, false) }
             } else {
                 apply(prefs)
                 try {
@@ -96,7 +96,11 @@ object SpoofCore {
         val sdkOn = prefs.getBoolean("sdk_enabled", false)
         var sdkVal = prefs.getInt("sdk_value", 0)
         val abiOn = prefs.getBoolean("abi_enabled", false)
-        val abiArm64 = prefs.getString("abi_value", "x86_64") == "arm64-v8a"
+        val abiMode = when (prefs.getString("abi_value", "x86_64")) {
+            "arm64-v8a" -> 1
+            "mixed" -> 2
+            else -> 0
+        }
         val compat = prefs.getBoolean("safe_mode", true)
         if (sdkVal !in 21..45) sdkVal = 0
         val useSdk = sdkOn && sdkVal != 0
@@ -126,7 +130,7 @@ object SpoofCore {
             "balanced" -> 1
             "rkn" -> 2
             "relaxed" -> 0
-            else -> if (prefs.getBoolean("webrtc_localip", true)) 0 else 2
+            else -> if (prefs.getBoolean("webrtc_localip", true)) 1 else 2
         }
         runCatching { nativeSetWebrtcMode(SpoofState.webrtcMode) }
         val procName = try {
@@ -188,7 +192,7 @@ object SpoofCore {
         // Always deliver the config first: it releases the native hook gate
         // (native addon on/off + compatibility mode).
         runCatching {
-            nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiArm64, compat, nativeOn)
+            nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiMode, compat, nativeOn)
         }
 
         if (!nativeOn) {
@@ -220,21 +224,29 @@ object SpoofCore {
             patch(Build::class.java, "BOARD", cpuEntry.hardware, "BOARD")
         }
         if (abiOn) {
-            val abi = if (abiArm64) "arm64-v8a" else "x86_64"
-            val abi2 = if (abiArm64) "armeabi-v7a" else "x86"
-            val all = if (abiArm64) arrayOf("arm64-v8a", "armeabi-v7a", "armeabi") else arrayOf("x86_64", "x86")
-            val a64 = if (abiArm64) arrayOf("arm64-v8a") else arrayOf("x86_64")
-            val a32 = if (abiArm64) arrayOf("armeabi-v7a", "armeabi") else arrayOf("x86")
+            val abi = if (abiMode == 0) "x86_64" else "arm64-v8a"
+            val abi2 = if (abiMode == 1) "armeabi-v7a" else "x86"
+            val all = when (abiMode) {
+                1 -> arrayOf("arm64-v8a", "armeabi-v7a", "armeabi")
+                2 -> arrayOf("arm64-v8a", "x86_64", "x86")
+                else -> arrayOf("x86_64", "x86")
+            }
+            val a64 = when (abiMode) {
+                1 -> arrayOf("arm64-v8a")
+                2 -> arrayOf("arm64-v8a", "x86_64")
+                else -> arrayOf("x86_64")
+            }
+            val a32 = if (abiMode == 1) arrayOf("armeabi-v7a", "armeabi") else arrayOf("x86")
             patch(Build::class.java, "CPU_ABI", abi, "CPU_ABI")
             patch(Build::class.java, "CPU_ABI2", abi2, "CPU_ABI2")
             patch(Build::class.java, "SUPPORTED_ABIS", all, "SUPPORTED_ABIS")
             patch(Build::class.java, "SUPPORTED_64_BIT_ABIS", a64, "SUPPORTED_64_BIT_ABIS")
             patch(Build::class.java, "SUPPORTED_32_BIT_ABIS", a32, "SUPPORTED_32_BIT_ABIS")
-            runCatching { System.setProperty("os.arch", if (abiArm64) "aarch64" else "x86_64") }
+            runCatching { System.setProperty("os.arch", if (abiMode == 0) "x86_64" else "aarch64") }
         }
         Log.i(
             TAG,
-            "[PAS] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn arm64=$abiArm64 cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
+            "[PAS] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
         )
     }
 
