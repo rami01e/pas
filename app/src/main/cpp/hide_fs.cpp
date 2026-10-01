@@ -155,6 +155,7 @@ static const char* const kReconTokens[] = {
     "self/smaps", "self/status", "self/task", "self/cmdline", "self/environ", "self/fd",
     "mountinfo", "/proc/mounts", "proc/net", "tracerpid", "cpuinfo", "cpufreq", "soc0",
     "midr", "identification", "/su", " su", "debuggable", "ro.secure", "ptrace",
+    ".so", "/data/app",
     "zygisk-module", "ro.boot", "ro.hardware", "topology", "related_cpus",
     "affected_cpus", "core_id", "cluster", "devicetree", "compatible", "serial",
     "board", "platform", "vendor_id", "bogomips", "physical_package",
@@ -1390,38 +1391,6 @@ void InstallReconHooks() {
 // entry in the capture. Pure logging - no behavior changes.
 // ---------------------------------------------------------------------------
 
-static volatile int g_dlopen_diag = 0;
-
-// Library-load tracing bypasses the recon token filter on purpose: every
-// load matters when hunting a loading stall. Own cap so it cannot starve
-// the rest of the recon budget.
-static void ReconDlopen(const char* op, const char* detail, long res) {
-    if (!g_recon || detail == nullptr) return;
-    int n = __sync_fetch_and_add(&g_dlopen_diag, 1);
-    if (n == 150) {
-        Log("native: recon: dlopen trace cap reached");
-        return;
-    }
-    if (n > 150) return;
-    Log("native: recon: %s %s -> %ld", op, detail, res);
-}
-
-static void* MyDlopen(const char* filename, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    ReconDlopen("dlopen", filename ? filename : "(null)", (long)flags);
-    void* h = BYTEHOOK_CALL_PREV(MyDlopen, filename, flags);
-    ReconDlopen("dlopen-done", filename ? filename : "(null)", (long)(intptr_t)h);
-    return h;
-}
-
-static void* MyAndroidDlopenExt(const char* filename, int flags, const void* extinfo) {
-    BYTEHOOK_STACK_SCOPE();
-    ReconDlopen("android-dlopen-ext", filename ? filename : "(null)", (long)flags);
-    void* h = BYTEHOOK_CALL_PREV(MyAndroidDlopenExt, filename, flags, extinfo);
-    ReconDlopen("android-dlopen-ext-done", filename ? filename : "(null)", (long)(intptr_t)h);
-    return h;
-}
-
 void InstallFsHooks() {
     HookLibcSym("open", (void*)HideOpen);
     HookLibcSym("open64", (void*)HideOpen64);
@@ -1438,13 +1407,11 @@ void InstallFsHooks() {
     HookLibcSym("lstat", (void*)HideLstat);
     HookLibcSym("fstatat", (void*)HideFStatAt);
 
-    // Library-load tracing (diagnostics; passthrough when recon is off).
-    void* s1 = HookChainStub("libc.so", "dlopen", (void*)MyDlopen);
-    void* s2 = HookChainStub("libdl.so", "dlopen", (void*)MyDlopen);
-    void* s3 = HookChainStub("libc.so", "android_dlopen_ext", (void*)MyAndroidDlopenExt);
-    void* s4 = HookChainStub("libdl.so", "android_dlopen_ext", (void*)MyAndroidDlopenExt);
-    Log("native: trace dlopen stubs=%d/%d ext=%d/%d", s1 != nullptr, s2 != nullptr,
-        s3 != nullptr, s4 != nullptr);
+    // NOTE: dlopen / android_dlopen_ext are deliberately NOT hooked. The
+    // v2.0.1-v2.0.3 loader tracer correlated with EGL driver-load failures
+    // (EGL_NOT_INITIALIZED) and RenderThread crashes in games. Library
+    // loads stay visible through the open/openat recon hooks via the
+    // ".so" token instead.
 }
 
 void InstallCpuDeepHooks() {

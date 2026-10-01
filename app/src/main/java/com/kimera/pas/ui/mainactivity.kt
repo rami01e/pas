@@ -1804,7 +1804,7 @@ class MainActivity : Activity() {
                 val crash = runSu("logcat -d -b crash -t 200 2>/dev/null")
                 sb.append("\n\n=== crash buffer ===\n").append(crash?.take(6000) ?: "(empty)")
                 val game = runSu(
-                    "logcat -d -t 500 2>/dev/null | grep -aiE 'bigfarm|newmoon|ANR |FATAL|tombstone|chatty.*bigfarm' | tail -n 140"
+                    "logcat -d -t 600 2>/dev/null | grep -a -e bigfarm -e newmoon -e chromium -e FATAL -e ANR -e tombstone -e sandboxed | tail -n 160"
                 )
                 sb.append("\n\n=== game + fatal tail ===\n").append(game?.take(9000) ?: "(none)")
                 val events = runSu("logcat -d -b events -t 120 2>/dev/null")
