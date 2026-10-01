@@ -74,7 +74,7 @@ class XposedInit : XposedModule() {
     private fun initNativeAddon() {
         Thread({
             val nativeOn = try {
-                getRemotePreferences("pas_spoof").getBoolean("native_enabled", false)
+                getRemotePreferences("pas_spoof").getBoolean("native_enabled", true)
             } catch (t: Throwable) {
                 log(Log.INFO, TAG, "[PAS] native: config unavailable ($t) - addon stays off")
                 false

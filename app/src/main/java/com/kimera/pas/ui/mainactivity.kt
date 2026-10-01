@@ -288,16 +288,9 @@ class MainActivity : Activity() {
         val (spoofPanel, spoofBody) = panel("Native", null, null)
         addPanel(spoofPanel)
 
-        nativeSw = SwitchView(this)
-        nativeChip = chipView("Off", cText2)
-        toggleRow(
-            spoofBody, true, nativeSw, "Native addon",
-            "Native hook engine \u2014 VPN-trace + device surfaces", nativeChip
-        )
-
         sdkSw = SwitchView(this)
         sdkValue = valueTextView()
-        valueRow(spoofBody, false, sdkSw, "SDK", sdkValue,
+        valueRow(spoofBody, true, sdkSw, "SDK", sdkValue,
             { pickSdk() }, { randomSdk() }, { clearSdk() })
 
         abiSw = SwitchView(this)
@@ -314,29 +307,6 @@ class MainActivity : Activity() {
         gpuValue = valueTextView()
         valueRow(spoofBody, false, gpuSw, "GPU", gpuValue,
             { pickGpu() }, { randomGpu() }, { clearGpu() })
-
-        vulkanSw = SwitchView(this)
-        vulkanChip = chipView("On", cCyan)
-        toggleRow(
-            spoofBody, false, vulkanSw, "Vulkan identity",
-            "Vulkan driver identity (physical device properties)", vulkanChip
-        )
-
-        chainSw = SwitchView(this)
-        chainChip = chipView("On", cCyan)
-        toggleRow(
-            spoofBody, false, chainSw, "GL dlsym chain",
-            "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
-        )
-
-        // WebRTC local IP: on = Balanced (default), off = RKN (strict).
-        webrtcSw = SwitchView(this)
-        webrtcChip = chipView("Balanced", cCyan)
-        toggleRow(
-            spoofBody, false, webrtcSw, "WebRTC local IP",
-            "On (default): browsers see your REAL local IP - RKN-clean \u00b7 Off: strict hiding (RKN)",
-            webrtcChip
-        )
 
         // ---------------- JAVA panel ----------------
         val (javaPanel, javaBody) = panel("Java", null, null)
@@ -360,34 +330,10 @@ class MainActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             setTextColor(cText3)
         }
-        compatSw = SwitchView(this)
-        reconSw = SwitchView(this)
         val logsTrailing = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        logsTrailing.addView(
-            TextView(this).apply {
-                text = "SAFE MODE"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-                typeface = Typeface.DEFAULT_BOLD
-                letterSpacing = 0.08f
-                setTextColor(cText3)
-                setPadding(0, 0, dp(4), 0)
-            }
-        )
-        logsTrailing.addView(compatSw)
-        logsTrailing.addView(
-            TextView(this).apply {
-                text = "RECON"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-                typeface = Typeface.DEFAULT_BOLD
-                letterSpacing = 0.08f
-                setTextColor(cText3)
-                setPadding(dp(10), 0, dp(4), 0)
-            }
-        )
-        logsTrailing.addView(reconSw)
         logsTrailing.addView(microIcon("\uD83D\uDD04\uFE0F") { loadLogs() })
         logsTrailing.addView(microIcon("\u29C9") { copyLogs() })
         logsTrailing.addView(
@@ -397,8 +343,54 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { leftMargin = dp(6) }
         )
-        val (logsPanel, logsBody) = panel("Logs", logsTrailing) { toggleLogs() }
+        val (logsPanel, logsBody) = panel("Debug", logsTrailing) { toggleLogs() }
         addPanel(logsPanel)
+
+        // Debug toggles: the four former NATIVE switches plus safe mode and
+        // recon. All of them fold away with the section; the log console
+        // stays below them.
+        nativeSw = SwitchView(this)
+        nativeChip = chipView("Off", cText2)
+        toggleRow(
+            logsBody, true, nativeSw, "Native addon",
+            "Native hook engine \u2014 VPN-trace + device surfaces", nativeChip
+        )
+
+        vulkanSw = SwitchView(this)
+        vulkanChip = chipView("On", cCyan)
+        toggleRow(
+            logsBody, false, vulkanSw, "Vulkan identity",
+            "Vulkan driver identity (physical device properties)", vulkanChip
+        )
+
+        chainSw = SwitchView(this)
+        chainChip = chipView("On", cCyan)
+        toggleRow(
+            logsBody, false, chainSw, "GL dlsym chain",
+            "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
+        )
+
+        // WebRTC local IP: on = Balanced (default), off = RKN (strict).
+        webrtcSw = SwitchView(this)
+        webrtcChip = chipView("REAL", cCyan)
+        toggleRow(
+            logsBody, false, webrtcSw, "WebRTC local IP",
+            "On (default): browsers see your REAL local IP - RKN-clean \u00b7 Off: strict hiding (RKN)",
+            webrtcChip
+        )
+
+        compatSw = SwitchView(this)
+        toggleRow(
+            logsBody, false, compatSw, "safe mode",
+            "Skip extended hook groups (netlink / ioctl / props)", null
+        )
+
+        reconSw = SwitchView(this)
+        toggleRow(
+            logsBody, false, reconSw, "Recon",
+            "Verbose probe capture for detection mapping", null
+        )
+
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
             text = "Reload to read the Vector log (root)."
@@ -1181,8 +1173,8 @@ class MainActivity : Activity() {
     private fun loadSaved() {
         val sp = SpoofSettings.load(this)
         suppressDirty = true
-        nativeSw.checked = sp.getBoolean("native_enabled", false)
-        compatSw.checked = sp.getBoolean("safe_mode", true)
+        nativeSw.checked = sp.getBoolean("native_enabled", true)
+        compatSw.checked = sp.getBoolean("safe_mode", false)
         sdkSw.checked = sp.getBoolean("sdk_enabled", false)
         sdkSel = sdkIndexFor(sp.getInt("sdk_value", currentSdk))
         updateSdkValue()

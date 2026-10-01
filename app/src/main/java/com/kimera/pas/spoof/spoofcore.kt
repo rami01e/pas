@@ -92,7 +92,7 @@ object SpoofCore {
     }
 
     private fun apply(prefs: SharedPreferences) {
-        val nativeOn = prefs.getBoolean("native_enabled", false)
+        val nativeOn = prefs.getBoolean("native_enabled", true)
         val sdkOn = prefs.getBoolean("sdk_enabled", false)
         var sdkVal = prefs.getInt("sdk_value", 0)
         val abiOn = prefs.getBoolean("abi_enabled", false)
@@ -101,7 +101,7 @@ object SpoofCore {
             "arm64-v8a", "mixed" -> 2
             else -> 0
         }
-        val compat = prefs.getBoolean("safe_mode", true)
+        val compat = prefs.getBoolean("safe_mode", false)
         if (sdkVal !in 21..45) sdkVal = 0
         val useSdk = sdkOn && sdkVal != 0
 
