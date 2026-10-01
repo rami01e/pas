@@ -334,6 +334,7 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        logsTrailing.addView(microIcon("\uD83D\uDD0D\uFE0F") { runDiagnose() })
         logsTrailing.addView(microIcon("\uD83D\uDD04\uFE0F") { loadLogs() })
         logsTrailing.addView(microIcon("\u29C9") { copyLogs() })
         logsTrailing.addView(
@@ -1757,6 +1758,60 @@ class MainActivity : Activity() {
                     rootWorks -> "Root OK, but no [PerAppSpoofer] entries found yet. Use Reload after opening a scoped app."
                     else -> "Root unavailable or denied. Grant root to this app in KernelSU, then Reload.\n" + text
                 }
+                renderLogs(text)
+            }
+        }.start()
+    }
+
+    /** One-tap diagnosis of a stalling app: thread wait-states, ANR dir,
+     *  crash buffer and the game's own logcat tail, captured in one go. */
+    private fun runDiagnose() {
+        if (busy) return
+        busy = true
+        logsStatus.text = "Diagnosing\u2026"
+        logsContainer.visibility = View.VISIBLE
+        logsChev.text = "\u25BE"
+        Thread {
+            val sb = StringBuilder()
+            try {
+                val pkg = "com.newmoonproduction.bigfarmhomestead"
+                val psLine = runSu("ps -A -o PID,NAME 2>/dev/null | grep -a $pkg; ps -A 2>/dev/null | grep -a $pkg")
+                sb.append("=== process ===\n").append(psLine ?: "(not found)")
+                var pid = ""
+                if (!psLine.isNullOrBlank()) {
+                    for (tok in psLine.trim().split(Regex("\\s+"))) {
+                        if (tok.length >= 3 && tok.all { it.isDigit() }) {
+                            pid = tok
+                            break
+                        }
+                    }
+                }
+                if (pid.isNotEmpty()) {
+                    val wait = runSu(
+                        "for t in /proc/$pid/task/*; do " +
+                            "n=\$(cat \$t/comm 2>/dev/null); w=\$(cat \$t/wchan 2>/dev/null); " +
+                            "s=\$(cat \$t/stat 2>/dev/null | awk '{print \$3}'); " +
+                            "echo \"\${n:-?} state=\${s:-?} wait=\${w:-?}\"; done | sort | head -n 90"
+                    )
+                    sb.append("\n\n=== threads (state/wait) ===\n").append(wait ?: "(failed)")
+                    val anr = runSu("ls -lt /data/anr/ 2>/dev/null | head -6")
+                    sb.append("\n\n=== /data/anr ===\n").append(anr ?: "(none)")
+                } else {
+                    sb.append("\n(process not running - start the game, wait for the stall, then tap again)")
+                }
+                val crash = runSu("logcat -d -b crash -t 200 2>/dev/null")
+                sb.append("\n\n=== crash buffer ===\n").append(crash?.take(6000) ?: "(empty)")
+                val game = runSu(
+                    "logcat -d -t 500 2>/dev/null | grep -aiE 'bigfarm|newmoon|ANR |FATAL|tombstone|chatty.*bigfarm' | tail -n 140"
+                )
+                sb.append("\n\n=== game + fatal tail ===\n").append(game?.take(9000) ?: "(none)")
+            } catch (t: Throwable) {
+                sb.append("\nerror: ").append(t.toString())
+            }
+            val text = sb.toString()
+            runOnUiThread {
+                busy = false
+                logsStatus.text = "Diagnose snapshot ready."
                 renderLogs(text)
             }
         }.start()

@@ -1380,6 +1380,32 @@ void InstallReconHooks() {
     Log("native: recon hooks installed");
 }
 
+// ---------------------------------------------------------------------------
+// dlopen tracing (diagnostics)
+//
+// A game that stalls during loading usually waits inside its last native
+// library load (anti-tamper init, encrypted asset loader, license check).
+// While recon is on, every dlopen / android_dlopen_ext attempt is logged
+// with its flags and the returned handle, so a stall shows up as the final
+// entry in the capture. Pure logging - no behavior changes.
+// ---------------------------------------------------------------------------
+
+static void* MyDlopen(const char* filename, int flags) {
+    BYTEHOOK_STACK_SCOPE();
+    ReconNote("dlopen", filename ? filename : "(null)", (long)flags);
+    void* h = BYTEHOOK_CALL_PREV(MyDlopen, filename, flags);
+    ReconNote("dlopen-done", filename ? filename : "(null)", (long)(intptr_t)h);
+    return h;
+}
+
+static void* MyAndroidDlopenExt(const char* filename, int flags, const void* extinfo) {
+    BYTEHOOK_STACK_SCOPE();
+    ReconNote("android-dlopen-ext", filename ? filename : "(null)", (long)flags);
+    void* h = BYTEHOOK_CALL_PREV(MyAndroidDlopenExt, filename, flags, extinfo);
+    ReconNote("android-dlopen-ext-done", filename ? filename : "(null)", (long)(intptr_t)h);
+    return h;
+}
+
 void InstallFsHooks() {
     HookLibcSym("open", (void*)HideOpen);
     HookLibcSym("open64", (void*)HideOpen64);
@@ -1395,6 +1421,14 @@ void InstallFsHooks() {
     HookLibcSym("stat", (void*)HideStat);
     HookLibcSym("lstat", (void*)HideLstat);
     HookLibcSym("fstatat", (void*)HideFStatAt);
+
+    // Library-load tracing (diagnostics; passthrough when recon is off).
+    void* s1 = HookChainStub("libc.so", "dlopen", (void*)MyDlopen);
+    void* s2 = HookChainStub("libdl.so", "dlopen", (void*)MyDlopen);
+    void* s3 = HookChainStub("libc.so", "android_dlopen_ext", (void*)MyAndroidDlopenExt);
+    void* s4 = HookChainStub("libdl.so", "android_dlopen_ext", (void*)MyAndroidDlopenExt);
+    Log("native: trace dlopen stubs=%d/%d ext=%d/%d", s1 != nullptr, s2 != nullptr,
+        s3 != nullptr, s4 != nullptr);
 }
 
 void InstallCpuDeepHooks() {
