@@ -97,6 +97,7 @@ bool ReconEnabled();
 int WebRtcMode();
 void SetWebRtcMode(int mode);
 bool BrowserCallerHere(void* ra);
+bool ProcessLooksBrowser();
 bool CallerAllowGfx(const char* caller_path_name, void* arg);
 void* HookChainStubGfx(const char* owner_regex, const char* sym, void* proxy);
 void InstallGpuDlsymChain();

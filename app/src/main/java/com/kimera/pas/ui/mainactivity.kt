@@ -119,6 +119,9 @@ class MainActivity : Activity() {
     private lateinit var logsContainer: LinearLayout
     private lateinit var logsStatus: TextView
     private lateinit var logView: TextView
+    private lateinit var logGutter: TextView
+    private lateinit var logGutterScroll: ScrollView
+    private lateinit var logContentScroll: ScrollView
     private var lastLogText: String = ""
     private lateinit var bottomBar: LinearLayout
 
@@ -235,6 +238,13 @@ class MainActivity : Activity() {
         // ---------------- utility actions ----------------
         content.addView(
             actionButton("Force-close scoped apps", "Root", false) { forceCloseScoped() },
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { bottomMargin = dp(8) }
+        )
+        content.addView(
+            actionButton("Open WebGL test page", null, false) { openWebglTest() },
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -365,7 +375,7 @@ class MainActivity : Activity() {
             )
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Relaxed = local IP visible - Balanced = browser-only relaxation - RKN = full hiding"
+                    text = "Relaxed = local IP visible - Balanced = whole-browser relaxation - RKN = strict"
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
                     typeface = Typeface.MONOSPACE
                     setTextColor(cText3)
@@ -440,25 +450,64 @@ class MainActivity : Activity() {
         }
         logButtons.addView(micro("Reload") { loadLogs() })
         logButtons.addView(micro("Copy") { copyLogs() })
-        logButtons.addView(micro("Clear") { lastLogText = ""; logView.text = "" })
+        logButtons.addView(micro("Clear") { lastLogText = ""; logView.text = ""; logGutter.text = "" })
         logsContainer.addView(logButtons)
-        val logScroll = ScrollView(this).apply {
+        val logArea = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            background = GradientDrawable().apply { setColor(cConsoleBg) }
+        }
+        logGutterScroll = ScrollView(this).apply {
+            isVerticalScrollBarEnabled = false
+            isFillViewport = true
+        }
+        logGutter = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            typeface = Typeface.MONOSPACE
+            setTextColor(cText3)
+            gravity = Gravity.END
+            setIncludeFontPadding(false)
+            setLineSpacing(0f, 1.0f)
+            setPadding(dp(4), dp(8), dp(8), dp(8))
+        }
+        logGutterScroll.addView(logGutter)
+        logArea.addView(
+            logGutterScroll,
+            LinearLayout.LayoutParams(dp(42), dp(240))
+        )
+        logArea.addView(
+            View(this).apply { setBackgroundColor(cDiv) },
+            LinearLayout.LayoutParams(dp(1), dp(240))
+        )
+        logContentScroll = ScrollView(this).apply {
             isVerticalScrollBarEnabled = true
             isFillViewport = true
+        }
+        logContentScroll.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+            if (::logGutterScroll.isInitialized) logGutterScroll.scrollTo(0, scrollY)
+        }
+        val logHScroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = true
         }
         logView = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             typeface = Typeface.MONOSPACE
             setTextColor(cConsoleTx)
-            setBackgroundColor(cConsoleBg)
+            setIncludeFontPadding(false)
+            setLineSpacing(0f, 1.0f)
+            setHorizontallyScrolling(true)
             setPadding(dp(10), dp(8), dp(10), dp(8))
         }
-        logScroll.addView(logView)
+        logHScroll.addView(logView)
+        logContentScroll.addView(logHScroll)
+        logArea.addView(
+            logContentScroll,
+            LinearLayout.LayoutParams(0, dp(240), 1f)
+        )
         logsContainer.addView(
-            logScroll,
+            logArea,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(240)
+                LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(4) }
         )
 
@@ -1603,6 +1652,15 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun openWebglTest() {
+        try {
+            val view = Intent(Intent.ACTION_VIEW, Uri.parse("https://browserleaks.com/webgl"))
+            startActivity(Intent.createChooser(view, "Open WebGL test"))
+        } catch (t: Throwable) {
+            toast("No app available to open the link")
+        }
+    }
+
     // ------------------------------------------------------------------
     // force-close scoped apps
     // ------------------------------------------------------------------
@@ -1705,13 +1763,13 @@ class MainActivity : Activity() {
 
     private fun renderLogs(raw: String) {
         lastLogText = raw
-        val sb = StringBuilder()
-        var n = 0
-        for (line in raw.split("\n")) {
-            n++
-            sb.append(String.format("%4d \u2502 ", n)).append(line).append('\n')
+        val lines = raw.split("\n")
+        val nums = StringBuilder()
+        for (i in lines.indices) {
+            nums.append(i + 1).append('\n')
         }
-        logView.text = sb.toString()
+        logGutter.text = nums.toString()
+        logView.text = raw
     }
 
     private fun runSu(cmd: String): String? = try {

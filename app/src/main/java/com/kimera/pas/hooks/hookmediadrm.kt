@@ -267,9 +267,39 @@ class HookMediaDrm : XHook {
             module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge: class not present")
             return
         }
-        val m1 = runCatching {
-            cls.getDeclaredMethod("isCryptoSchemeSupported", ByteArray::class.java)
-        }.getOrNull()
+        val methods = cls.declaredMethods
+        var scan1: java.lang.reflect.Method? = null
+        var scan2: java.lang.reflect.Method? = null
+        for (m in methods) {
+            if (!java.lang.reflect.Modifier.isStatic(m.modifiers)) continue
+            val pt = m.parameterTypes
+            if (pt.size == 1 && pt[0] == ByteArray::class.java &&
+                (m.returnType == java.lang.Boolean.TYPE || m.returnType == java.lang.Boolean::class.java)
+            ) {
+                if (scan1 == null) scan1 = m
+            } else if (pt.size == 2 && pt[0] == ByteArray::class.java && pt[1] == Integer.TYPE &&
+                m.returnType == Array<String>::class.java
+            ) {
+                if (scan2 == null) scan2 = m
+            }
+        }
+        module.log(
+            Log.INFO, TAG,
+            "[PAS] MediaDrmBridge scan: crypto=${scan1?.name ?: "?"} containers=${scan2?.name ?: "?"}"
+        )
+        if (scan1 == null && scan2 == null && SpoofState.reconOn) {
+            val inv = StringBuilder()
+            var n = 0
+            for (m in methods) {
+                if (n >= 30) break
+                inv.append(m.name).append('(')
+                    .append(m.parameterTypes.joinToString(",") { it.simpleName })
+                    .append(") ")
+                n++
+            }
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge methods: $inv")
+        }
+        val m1 = scan1
         if (m1 != null) {
             m1.isAccessible = true
             module.hook(m1).intercept { chain ->
@@ -289,9 +319,7 @@ class HookMediaDrm : XHook {
         } else {
             module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.isCryptoSchemeSupported: absent")
         }
-        val m2 = runCatching {
-            cls.getDeclaredMethod("getSupportedContainers", ByteArray::class.java, Integer.TYPE)
-        }.getOrNull()
+        val m2 = scan2
         if (m2 != null) {
             m2.isAccessible = true
             module.hook(m2).intercept { chain ->

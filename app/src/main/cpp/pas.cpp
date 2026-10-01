@@ -59,6 +59,7 @@ bool IsHiddenIfaceName(const char* name) {
     // "WebRTC local IP" relaxed mode keeps every interface visible so
     // browsers can gather local (host) candidates like a clean device.
     if (WebRtcMode() == 0) return false;
+    if (WebRtcMode() == 1 && ProcessLooksBrowser()) return false;
     if (!name || !*name) return false;
     struct Rule {
         const char* prefix;
@@ -267,20 +268,36 @@ static void RefreshBrowserRangesLocked() {
     free(buf);
 }
 
-bool BrowserCallerHere(void* ra) {
-    if (WebRtcMode() != 1) return false;
-    if (ra == nullptr) return false;
-    unsigned long long a = (unsigned long long)ra;
-    std::lock_guard<std::mutex> lk(g_bmap_mtx);
+static void MaybeRefreshRangesLocked() {
     long long now = NowMs();
-    if (g_browser_ranges.empty() || (now - g_bmap_last) > 5000) {
+    long long span = g_browser_ranges.empty() ? 2000 : 5000;
+    if (g_bmap_last == 0 || (now - g_bmap_last) > span) {
         g_bmap_last = now;
         RefreshBrowserRangesLocked();
     }
+}
+
+// RKN mode: relax only when the caller is browser-family code (detectors,
+// which call from their own libraries, still get the hidden view).
+bool BrowserCallerHere(void* ra) {
+    if (WebRtcMode() != 2) return false;
+    if (ra == nullptr) return false;
+    unsigned long long a = (unsigned long long)ra;
+    std::lock_guard<std::mutex> lk(g_bmap_mtx);
+    MaybeRefreshRangesLocked();
     for (size_t i = 0; i < g_browser_ranges.size(); i++) {
         if (a >= g_browser_ranges[i].lo && a < g_browser_ranges[i].hi) return true;
     }
     return false;
+}
+
+// Balanced mode: relax the whole process when it hosts browser libraries
+// (Chrome / a WebView provider embedded in the app).
+bool ProcessLooksBrowser() {
+    if (WebRtcMode() != 1) return false;
+    std::lock_guard<std::mutex> lk(g_bmap_mtx);
+    MaybeRefreshRangesLocked();
+    return !g_browser_ranges.empty();
 }
 
 bool LineContainsHiddenName(const char* line) {
