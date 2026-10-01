@@ -1777,6 +1777,8 @@ class MainActivity : Activity() {
                 val pkg = "com.newmoonproduction.bigfarmhomestead"
                 val psLine = runSu("ps -A -o PID,NAME 2>/dev/null | grep -a $pkg; ps -A 2>/dev/null | grep -a $pkg")
                 sb.append("=== process ===\n").append(psLine ?: "(not found)")
+                val zy = runSu("ps -A -o PID,NAME 2>/dev/null | grep -a zygote")
+                sb.append("\n\n=== zygotes (should be clean of libpas) ===\n").append(zy ?: "(none)")
                 var pid = ""
                 if (!psLine.isNullOrBlank()) {
                     for (tok in psLine.trim().split(Regex("\\s+"))) {
@@ -1805,6 +1807,24 @@ class MainActivity : Activity() {
                     "logcat -d -t 500 2>/dev/null | grep -aiE 'bigfarm|newmoon|ANR |FATAL|tombstone|chatty.*bigfarm' | tail -n 140"
                 )
                 sb.append("\n\n=== game + fatal tail ===\n").append(game?.take(9000) ?: "(none)")
+                val events = runSu("logcat -d -b events -t 120 2>/dev/null")
+                sb.append("\n\n=== events buffer (am_proc / wm) ===\n").append(events?.take(5000) ?: "(empty)")
+                val anrNew = runSu("ls -t /data/anr/ 2>/dev/null | head -2")
+                if (!anrNew.isNullOrBlank()) {
+                    val f = anrNew.trim().lineSequence().firstOrNull { it.isNotBlank() }
+                    if (f != null) {
+                        val head = runSu("head -n 80 '/data/anr/$f' 2>/dev/null")
+                        sb.append("\n\n=== newest ANR ($f) head ===\n").append(head ?: "(unreadable)")
+                    }
+                }
+                val tbNew = runSu("ls -t /data/tombstones/ 2>/dev/null | head -2")
+                if (!tbNew.isNullOrBlank()) {
+                    val f = tbNew.trim().lineSequence().firstOrNull { it.isNotBlank() }
+                    if (f != null) {
+                        val head = runSu("head -n 60 '/data/tombstones/$f' 2>/dev/null")
+                        sb.append("\n\n=== newest tombstone ($f) head ===\n").append(head ?: "(unreadable)")
+                    }
+                }
                 val dls = runSu(
                     "logcat -d -t 3000 2>/dev/null | grep -a 'native: recon: dlopen' | tail -n 80"
                 )
