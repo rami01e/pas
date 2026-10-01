@@ -129,6 +129,15 @@ object SpoofCore {
             else -> if (prefs.getBoolean("webrtc_localip", true)) 0 else 2
         }
         runCatching { nativeSetWebrtcMode(SpoofState.webrtcMode) }
+        val procName = try {
+            java.io.File("/proc/self/cmdline").readText().replace('\u0000', ' ')
+        } catch (t: Throwable) {
+            ""
+        }
+        val browserProc = procName.contains("chrome", true) || procName.contains("webview", true)
+        SpoofState.relaxNet = SpoofState.webrtcMode == 0 ||
+            (SpoofState.webrtcMode == 1 && browserProc)
+        Log.i(TAG, "[PAS] net: relax=${SpoofState.relaxNet} proc=$procName")
         runCatching {
             nativeSetGpuOptions(
                 prefs.getBoolean("gpu_chain", true),

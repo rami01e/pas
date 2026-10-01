@@ -37,7 +37,7 @@ class HookLinkProperties : XHook {
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
                 module.log(Log.INFO, TAG, "$targetKlass.getInterfaceName () -> $result")
-                if (result is String && vpnInterfacePattern.matches(result)) {
+                if (!SpoofState.relaxNet && result is String && vpnInterfacePattern.matches(result)) {
                     var replacement: String? = null
                     val interfaces = NetworkInterface.getNetworkInterfaces()
                     if (interfaces != null) {
@@ -84,7 +84,7 @@ class HookLinkProperties : XHook {
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
                 val routes = result as? List<*>
-                if (routes == null) {
+                if (routes == null || SpoofState.relaxNet) {
                     result
                 } else {
                     routes.filter { route ->
@@ -104,7 +104,7 @@ class HookLinkProperties : XHook {
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
                 val servers = result as? List<*>
-                if (servers == null) {
+                if (servers == null || SpoofState.relaxNet) {
                     result
                 } else {
                     servers.map { address ->

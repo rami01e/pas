@@ -291,10 +291,30 @@ bool BrowserCallerHere(void* ra) {
     return false;
 }
 
-// Balanced mode: relax the whole process when it hosts browser libraries
-// (Chrome / a WebView provider embedded in the app).
+static volatile int g_proc_browser_named = -1;  // -1 unknown, 0 no, 1 yes
+
+static bool CmdlineIsBrowserNamed() {
+    char buf[256];
+    ssize_t n = SysReadFile("/proc/self/cmdline", buf, sizeof(buf) - 1);
+    if (n <= 0) return false;
+    for (ssize_t i = 0; i < n; i++) {
+        if (buf[i] == '\0') buf[i] = ' ';
+    }
+    buf[n] = '\0';
+    return strstr(buf, "chrome") != nullptr || strstr(buf, "webview") != nullptr;
+}
+
+// Balanced mode: relax the whole process only when it is a browser-owned
+// process (Chrome / the WebView provider). Apps that merely embed a WebView
+// keep the hidden view so detectors running in them stay consistent.
 bool ProcessLooksBrowser() {
     if (WebRtcMode() != 1) return false;
+    int named = g_proc_browser_named;
+    if (named < 0) {
+        named = CmdlineIsBrowserNamed() ? 1 : 0;
+        g_proc_browser_named = named;
+    }
+    if (named != 1) return false;
     std::lock_guard<std::mutex> lk(g_bmap_mtx);
     MaybeRefreshRangesLocked();
     return !g_browser_ranges.empty();

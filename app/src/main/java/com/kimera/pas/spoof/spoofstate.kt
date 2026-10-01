@@ -60,4 +60,8 @@ object SpoofState {
      */
     @Volatile
     var webrtcMode: Int = 0
+
+    /** True when ALL network views (Java + native) should stay realistic. */
+    @Volatile
+    var relaxNet: Boolean = false
 }

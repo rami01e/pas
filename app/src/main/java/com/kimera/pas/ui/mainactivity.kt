@@ -427,7 +427,20 @@ class MainActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             setTextColor(cText3)
         }
-        val (logsPanel, logsBody) = panel("Logs", logsChev) { toggleLogs() }
+        val logsTrailing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        logsTrailing.addView(micro("Reload") { loadLogs() })
+        logsTrailing.addView(micro("Copy") { copyLogs() })
+        logsTrailing.addView(
+            logsChev,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { leftMargin = dp(6) }
+        )
+        val (logsPanel, logsBody) = panel("Logs", logsTrailing) { toggleLogs() }
         addPanel(logsPanel)
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
@@ -443,15 +456,6 @@ class MainActivity : Activity() {
                 LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { topMargin = dp(6) }
         )
-        val logButtons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            setPadding(dp(6), dp(2), dp(12), dp(4))
-        }
-        logButtons.addView(micro("Reload") { loadLogs() })
-        logButtons.addView(micro("Copy") { copyLogs() })
-        logButtons.addView(micro("Clear") { lastLogText = ""; logView.text = ""; logGutter.text = "" })
-        logsContainer.addView(logButtons)
         val logArea = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             background = GradientDrawable().apply { setColor(cConsoleBg) }
@@ -1653,12 +1657,80 @@ class MainActivity : Activity() {
     }
 
     private fun openWebglTest() {
+        val url = "https://browserleaks.com/webgl"
+        AlertDialog.Builder(this)
+            .setTitle("WebGL test page")
+            .setItems(
+                arrayOf(
+                    "Open in WebView test app",
+                    "Preview with system WebView (here)",
+                    "Open with\u2026 (chooser)"
+                )
+            ) { _, which ->
+                when (which) {
+                    0 -> openInWebViewApp(url)
+                    1 -> previewInWebView(url)
+                    else -> chooserOpen(url)
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun chooserOpen(url: String) {
         try {
-            val view = Intent(Intent.ACTION_VIEW, Uri.parse("https://browserleaks.com/webgl"))
-            startActivity(Intent.createChooser(view, "Open WebGL test"))
+            startActivity(
+                Intent.createChooser(Intent(Intent.ACTION_VIEW, Uri.parse(url)), "Open WebGL test")
+            )
         } catch (t: Throwable) {
             toast("No app available to open the link")
         }
+    }
+
+    private fun openInWebViewApp(url: String) {
+        val test = "com.snc.test.webview2"
+        val direct = Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage(test)
+        if (packageManager.queryIntentActivities(direct, 0).isNotEmpty()) {
+            try {
+                startActivity(direct)
+                return
+            } catch (t: Throwable) {
+                // fall through
+            }
+        }
+        val launch = packageManager.getLaunchIntentForPackage(test)
+        if (launch != null) {
+            launch.action = Intent.ACTION_VIEW
+            launch.data = Uri.parse(url)
+            launch.putExtra("url", url)
+            launch.putExtra("URL", url)
+            try {
+                startActivity(launch)
+                toast("If it didn't load, paste: $url")
+                return
+            } catch (t: Throwable) {
+                // fall through
+            }
+        }
+        toast("WebView test app not found")
+    }
+
+    private fun previewInWebView(url: String) {
+        val web = android.webkit.WebView(this)
+        web.settings.javaScriptEnabled = true
+        web.loadUrl(url)
+        val box = FrameLayout(this).apply { setPadding(dp(8), dp(8), dp(8), 0) }
+        box.addView(
+            web,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                dp(420)
+            )
+        )
+        AlertDialog.Builder(this)
+            .setView(box)
+            .setPositiveButton("Close", null)
+            .show()
     }
 
     // ------------------------------------------------------------------

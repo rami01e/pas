@@ -267,6 +267,70 @@ class HookMediaDrm : XHook {
             module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge: class not present")
             return
         }
+        // The exact methods present in release Chrome builds (confirmed via
+        // the method inventory): isCryptoSchemeSupported(byte[], String) and
+        // getSupportedContainers(byte[]).
+        runCatching {
+            cls.getDeclaredMethod("isCryptoSchemeSupported", ByteArray::class.java, String::class.java)
+        }.getOrNull()?.let { m ->
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val arg = chain.getArg(0) as? ByteArray
+                val orig = chain.proceed()
+                if (SpoofState.widevineOn && isWidevineBytes(arg)) {
+                    module.log(
+                        Log.INFO, TAG,
+                        "[PAS] MediaDrmBridge.isCryptoSchemeSupported(bytes, mime) -> true (orig=$orig)"
+                    )
+                    true
+                } else {
+                    orig
+                }
+            }
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.isCryptoSchemeSupported(bytes,String): hooked")
+        }
+        runCatching {
+            cls.getDeclaredMethod("getSupportedContainers", ByteArray::class.java)
+        }.getOrNull()?.let { m ->
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val arg = chain.getArg(0) as? ByteArray
+                val orig = chain.proceed()
+                if (SpoofState.widevineOn && isWidevineBytes(arg)) {
+                    val list = (orig as? Array<*>)?.map { it?.toString() ?: "" } ?: emptyList()
+                    val missing = mutableListOf<String>()
+                    if (!list.contains("video/mp4")) missing.add("video/mp4")
+                    if (!list.contains("video/webm")) missing.add("video/webm")
+                    if (missing.isNotEmpty()) {
+                        module.log(
+                            Log.INFO, TAG,
+                            "[PAS] MediaDrmBridge.getSupportedContainers(bytes) +$missing (orig=$list)"
+                        )
+                        (list + missing).toTypedArray()
+                    } else {
+                        orig
+                    }
+                } else {
+                    orig
+                }
+            }
+            module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.getSupportedContainers(bytes): hooked")
+        }
+        // Diagnostic: log CDM creation attempts with their requested level.
+        runCatching {
+            cls.getDeclaredMethod(
+                "create", ByteArray::class.java, String::class.java, Integer.TYPE,
+                String::class.java, java.lang.Boolean.TYPE, java.lang.Long.TYPE, java.lang.Long.TYPE
+            )
+        }.getOrNull()?.let { m ->
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val lvl = (chain.getArg(2) as? Int) ?: -1
+                val mime = chain.getArg(3) as? String
+                module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge.create(level=$lvl mime=$mime)")
+                chain.proceed()
+            }
+        }
         val methods = cls.declaredMethods
         var scan1: java.lang.reflect.Method? = null
         var scan2: java.lang.reflect.Method? = null
@@ -292,9 +356,10 @@ class HookMediaDrm : XHook {
             var n = 0
             for (m in methods) {
                 if (n >= 30) break
+                val kind = if (java.lang.reflect.Modifier.isStatic(m.modifiers)) "S" else "I"
                 inv.append(m.name).append('(')
                     .append(m.parameterTypes.joinToString(",") { it.simpleName })
-                    .append(") ")
+                    .append("):").append(m.returnType.simpleName).append(':').append(kind).append(' ')
                 n++
             }
             module.log(Log.INFO, TAG, "[PAS] MediaDrmBridge methods: $inv")

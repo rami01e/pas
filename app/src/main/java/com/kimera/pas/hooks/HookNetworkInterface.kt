@@ -28,8 +28,12 @@ class HookNetworkInterface : XHook {
             val method = NetworkInterface::class.java.getMethod("isVirtual")
             module.hook(method).intercept { chain ->
                 if (SpoofState.reconOn) module.log(Log.INFO, TAG, "NetworkInterface.isVirtual")
-                // VPNs are always virtual
-                false
+                if (SpoofState.relaxNet) {
+                    chain.proceed()
+                } else {
+                    // VPNs are always virtual
+                    false
+                }
             }
         }
     }
@@ -41,7 +45,9 @@ class HookNetworkInterface : XHook {
                 val result = chain.proceed()
                 if (SpoofState.reconOn) module.log(Log.INFO, TAG, "NetworkInterface.getName ($result)")
                 // breaks VPN name detection
-                if (result is String) {
+                if (SpoofState.relaxNet) {
+                    result
+                } else if (result is String) {
                     if (result.startsWith("tun") || result.startsWith("ppp") || result.startsWith("pptp")) {
                         if (!renamedInterfaces.contains(result))
                             renamedInterfaces[result] = getRandomString(result.length)
@@ -71,6 +77,8 @@ class HookNetworkInterface : XHook {
                     return@intercept chain.proceed()
                 }
                 when {
+                    // Relaxed view: everything resolves truthfully.
+                    SpoofState.relaxNet -> chain.proceed()
                     // VPN-style interfaces never resolve.
                     name.startsWith("tun") || name.startsWith("ppp") ||
                         name.startsWith("pptp") || name.startsWith("wg") -> null
@@ -93,7 +101,9 @@ class HookNetworkInterface : XHook {
             module.hook(method).intercept { chain ->
                 val name = (chain.getThisObject() as NetworkInterface).name
                 if (SpoofState.reconOn) module.log(Log.INFO, TAG, "NetworkInterface.isUp() on interface $name")
-                if (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp")) false else chain.proceed()
+                if (!SpoofState.relaxNet &&
+                    (name.startsWith("tun") || name.startsWith("ppp") || name.startsWith("pptp"))
+                ) false else chain.proceed()
             }
         }
     }
