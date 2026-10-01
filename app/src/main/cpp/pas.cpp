@@ -441,6 +441,13 @@ bool CallerAllowHooks(const char* caller_path_name, void* arg) {
 bool CallerAllowGfx(const char* caller_path_name, void* arg) {
     if (!CallerAllow(caller_path_name, arg)) return false;
     if (!caller_path_name) return false;
+    // The EGL / Vulkan API loaders must keep their own dlsym results raw:
+    // their initialization walks the function tables built from them, and a
+    // substituted pointer there corrupts display init (observed as SIGSEGV
+    // inside egl_display_t::initialize with a non-canonical string pointer).
+    // Consumers (engines, hwui, angle, skia) keep the full chain.
+    if (strstr(caller_path_name, "/libEGL.so") != nullptr) return false;
+    if (strstr(caller_path_name, "/libvulkan.so") != nullptr) return false;
     static const char* const kGfx[] = {
         "GLES", "EGL", "libvulkan", "chrome", "webview", "monochrome", "hwui", "angle", "skia",
     };

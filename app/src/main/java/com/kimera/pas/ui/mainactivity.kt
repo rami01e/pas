@@ -1805,6 +1805,10 @@ class MainActivity : Activity() {
                     "logcat -d -t 500 2>/dev/null | grep -aiE 'bigfarm|newmoon|ANR |FATAL|tombstone|chatty.*bigfarm' | tail -n 140"
                 )
                 sb.append("\n\n=== game + fatal tail ===\n").append(game?.take(9000) ?: "(none)")
+                val dls = runSu(
+                    "logcat -d -t 3000 2>/dev/null | grep -a 'native: recon: dlopen' | tail -n 80"
+                )
+                sb.append("\n\n=== dlopen trace (last loads) ===\n").append(dls ?: "(recon off or no entries)")
             } catch (t: Throwable) {
                 sb.append("\nerror: ").append(t.toString())
             }
