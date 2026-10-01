@@ -18,6 +18,7 @@
 #include "pas.h"
 
 #include <jni.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -196,9 +197,25 @@ typedef void* (*PasEglGpaFn)(const char*);
 typedef const unsigned char* (*PasGlGetStringFn)(unsigned int);
 typedef const unsigned char* (*PasGlGetStringiFn)(unsigned int, unsigned int);
 
-static void* volatile g_real_gl_get_string = nullptr;
-static void* volatile g_real_gl_get_stringi = nullptr;
-static void* volatile g_real_egl_gpa = nullptr;
+// Per-driver chain slots: a process can host several GL stacks at once
+// (native driver via hwui, ANGLE/SwiftShader inside WebView renderers).
+// The chain used to keep ONE real pointer per symbol, so a second dlsym
+// resolution overwrote the first driver's entry point - the next GL call
+// then ran foreign code and the sandboxed renderer died. Every resolution
+// now gets its own slot and dispatches back to exactly the driver it came
+// from. When the table is full the caller receives the untouched real
+// pointer (unspoofed but safe).
+#define PAS_GL_SLOTS 8
+
+struct GlChainSlot {
+    void* key;  // real symbol address this slot was created from
+    PasGlGetStringFn get_string;
+    PasGlGetStringiFn get_stringi;
+    PasEglGpaFn get_proc_addr;
+};
+
+static GlChainSlot g_gl_slots[PAS_GL_SLOTS];
+static pthread_mutex_t g_gl_slot_mtx = PTHREAD_MUTEX_INITIALIZER;
 static volatile unsigned g_gl_chain_logged = 0;
 static volatile int g_gl_diag = 0;
 
@@ -258,25 +275,102 @@ static const unsigned char* MyGlGetString(unsigned int name) {
     return BYTEHOOK_CALL_PREV(MyGlGetString, name);
 }
 
-static const unsigned char* RepGlGetString(unsigned int name) {
+static const unsigned char* RepGlGetStringN(int slot, unsigned int name) {
     const unsigned char* spoofed = nullptr;
     bool spoof = SpoofGlName(name, &spoofed);
     DiagGlStr("glgs", name, spoof ? 1 : 0);
     if (spoof) return spoofed;
-    auto real = (PasGlGetStringFn)g_real_gl_get_string;
+    PasGlGetStringFn real = nullptr;
+    pthread_mutex_lock(&g_gl_slot_mtx);
+    if (slot >= 0 && slot < PAS_GL_SLOTS) real = g_gl_slots[slot].get_string;
+    pthread_mutex_unlock(&g_gl_slot_mtx);
     return real ? real(name) : nullptr;
 }
 
-static const unsigned char* RepGlGetStringi(unsigned int name, unsigned int index) {
+static const unsigned char* RepGlGetStringiN(int slot, unsigned int name, unsigned int index) {
     const unsigned char* spoofed = nullptr;
     bool spoof = index == 0 && SpoofGlName(name, &spoofed);
     DiagGlStr("glgsi", name, spoof ? 1 : 0);
     if (spoof) return spoofed;
-    auto real = (PasGlGetStringiFn)g_real_gl_get_stringi;
+    PasGlGetStringiFn real = nullptr;
+    pthread_mutex_lock(&g_gl_slot_mtx);
+    if (slot >= 0 && slot < PAS_GL_SLOTS) real = g_gl_slots[slot].get_stringi;
+    pthread_mutex_unlock(&g_gl_slot_mtx);
     return real ? real(name, index) : nullptr;
 }
 
-static void* RepEglGetProcAddress(const char* name);
+static void* RepEglGetProcAddressN(int slot, const char* name);
+
+// Returns the slot index for this real pointer, creating one when needed.
+// -1 = table full (caller falls back to the untouched real pointer).
+static int GlChainSlotFor(void* key, PasGlGetStringFn gs, PasGlGetStringiFn gsi,
+                          PasEglGpaFn gpa) {
+    if (key == nullptr) return -1;
+    pthread_mutex_lock(&g_gl_slot_mtx);
+    for (int i = 0; i < PAS_GL_SLOTS; i++) {
+        if (g_gl_slots[i].key == key) {
+            // Refresh the per-symbol fields in case only part was set before.
+            if (gs != nullptr) g_gl_slots[i].get_string = gs;
+            if (gsi != nullptr) g_gl_slots[i].get_stringi = gsi;
+            if (gpa != nullptr) g_gl_slots[i].get_proc_addr = gpa;
+            pthread_mutex_unlock(&g_gl_slot_mtx);
+            return i;
+        }
+    }
+    for (int i = 0; i < PAS_GL_SLOTS; i++) {
+        if (g_gl_slots[i].key == nullptr) {
+            g_gl_slots[i].key = key;
+            g_gl_slots[i].get_string = gs;
+            g_gl_slots[i].get_stringi = gsi;
+            g_gl_slots[i].get_proc_addr = gpa;
+            pthread_mutex_unlock(&g_gl_slot_mtx);
+            return i;
+        }
+    }
+    pthread_mutex_unlock(&g_gl_slot_mtx);
+    return -1;
+}
+
+// One distinct function per slot: a handed-out pointer must stay stable and
+// dispatch to its own driver, so the wrappers cannot share a single body
+// that reads a mutable "current" global.
+#define PAS_GL_SLOT_FN(IDX)                                                          \
+    static const unsigned char* RepGlGetString_##IDX(unsigned int name) {            \
+        return RepGlGetStringN(IDX, name);                                           \
+    }                                                                                \
+    static const unsigned char* RepGlGetStringi_##IDX(unsigned int name,             \
+                                                       unsigned int index) {         \
+        return RepGlGetStringiN(IDX, name, index);                                   \
+    }                                                                                \
+    static void* RepEglGetProcAddress_##IDX(const char* name) {                      \
+        return RepEglGetProcAddressN(IDX, name);                                     \
+    }
+
+PAS_GL_SLOT_FN(0)
+PAS_GL_SLOT_FN(1)
+PAS_GL_SLOT_FN(2)
+PAS_GL_SLOT_FN(3)
+PAS_GL_SLOT_FN(4)
+PAS_GL_SLOT_FN(5)
+PAS_GL_SLOT_FN(6)
+PAS_GL_SLOT_FN(7)
+
+static void* const g_slot_gs[PAS_GL_SLOTS] = {
+    (void*)RepGlGetString_0, (void*)RepGlGetString_1, (void*)RepGlGetString_2,
+    (void*)RepGlGetString_3, (void*)RepGlGetString_4, (void*)RepGlGetString_5,
+    (void*)RepGlGetString_6, (void*)RepGlGetString_7,
+};
+static void* const g_slot_gsi[PAS_GL_SLOTS] = {
+    (void*)RepGlGetStringi_0, (void*)RepGlGetStringi_1, (void*)RepGlGetStringi_2,
+    (void*)RepGlGetStringi_3, (void*)RepGlGetStringi_4, (void*)RepGlGetStringi_5,
+    (void*)RepGlGetStringi_6, (void*)RepGlGetStringi_7,
+};
+static void* const g_slot_gpa[PAS_GL_SLOTS] = {
+    (void*)RepEglGetProcAddress_0, (void*)RepEglGetProcAddress_1,
+    (void*)RepEglGetProcAddress_2, (void*)RepEglGetProcAddress_3,
+    (void*)RepEglGetProcAddress_4, (void*)RepEglGetProcAddress_5,
+    (void*)RepEglGetProcAddress_6, (void*)RepEglGetProcAddress_7,
+};
 
 void* GpuChainResolveDlsym(const char* symbol, void* real) {
     if (symbol == nullptr) return nullptr;
@@ -286,45 +380,51 @@ void* GpuChainResolveDlsym(const char* symbol, void* real) {
     }
     if (!g_gpu_on || !g_gpu_chain_on || real == nullptr) return nullptr;
     if (strcmp(symbol, "glGetString") == 0) {
-        g_real_gl_get_string = real;
+        int slot = GlChainSlotFor(real, (PasGlGetStringFn)real, nullptr, nullptr);
+        if (slot < 0) return nullptr;
         GlChainLog("glGetString", "dlsym");
-        return (void*)RepGlGetString;
+        return g_slot_gs[slot];
     }
     if (strcmp(symbol, "glGetStringi") == 0) {
-        g_real_gl_get_stringi = real;
+        int slot = GlChainSlotFor(real, nullptr, (PasGlGetStringiFn)real, nullptr);
+        if (slot < 0) return nullptr;
         GlChainLog("glGetStringi", "dlsym");
-        return (void*)RepGlGetStringi;
+        return g_slot_gsi[slot];
     }
     if (strcmp(symbol, "eglGetProcAddress") == 0) {
-        g_real_egl_gpa = real;
-        return (void*)RepEglGetProcAddress;
+        int slot = GlChainSlotFor(real, nullptr, nullptr, (PasEglGpaFn)real);
+        if (slot < 0) return nullptr;
+        return g_slot_gpa[slot];
     }
     return nullptr;
 }
 
-static void* RepEglGetProcAddress(const char* name) {
+static void* RepEglGetProcAddressN(int slot, const char* name) {
     if (name != nullptr) GpuDiag("eglgpa", name);
-    if (g_gpu_on && g_gpu_chain_on && name != nullptr) {
-        if (strcmp(name, "glGetString") == 0) {
-            auto real = (PasEglGpaFn)g_real_egl_gpa;
-            void* r = real ? real(name) : nullptr;
-            if (r != nullptr) g_real_gl_get_string = r;
-            GlChainLog("glGetString", "eglGetProcAddress");
-            return (void*)RepGlGetString;
-        }
-        if (strcmp(name, "glGetStringi") == 0) {
-            auto real = (PasEglGpaFn)g_real_egl_gpa;
-            void* r = real ? real(name) : nullptr;
-            if (r != nullptr) g_real_gl_get_stringi = r;
-            GlChainLog("glGetStringi", "eglGetProcAddress");
-            return (void*)RepGlGetStringi;
-        }
-        if (strcmp(name, "eglGetProcAddress") == 0) {
-            return (void*)RepEglGetProcAddress;
-        }
+    PasEglGpaFn real = nullptr;
+    pthread_mutex_lock(&g_gl_slot_mtx);
+    if (slot >= 0 && slot < PAS_GL_SLOTS) real = g_gl_slots[slot].get_proc_addr;
+    pthread_mutex_unlock(&g_gl_slot_mtx);
+    void* r = real ? real(name) : nullptr;
+    if (!(g_gpu_on && g_gpu_chain_on && name != nullptr)) return r;
+    if (strcmp(name, "glGetString") == 0 && r != nullptr) {
+        pthread_mutex_lock(&g_gl_slot_mtx);
+        if (slot >= 0 && slot < PAS_GL_SLOTS) g_gl_slots[slot].get_string = (PasGlGetStringFn)r;
+        pthread_mutex_unlock(&g_gl_slot_mtx);
+        GlChainLog("glGetString", "eglGetProcAddress");
+        return (slot >= 0 && slot < PAS_GL_SLOTS) ? g_slot_gs[slot] : r;
     }
-    auto real = (PasEglGpaFn)g_real_egl_gpa;
-    return real ? real(name) : nullptr;
+    if (strcmp(name, "glGetStringi") == 0 && r != nullptr) {
+        pthread_mutex_lock(&g_gl_slot_mtx);
+        if (slot >= 0 && slot < PAS_GL_SLOTS) g_gl_slots[slot].get_stringi = (PasGlGetStringiFn)r;
+        pthread_mutex_unlock(&g_gl_slot_mtx);
+        GlChainLog("glGetStringi", "eglGetProcAddress");
+        return (slot >= 0 && slot < PAS_GL_SLOTS) ? g_slot_gsi[slot] : r;
+    }
+    if (strcmp(name, "eglGetProcAddress") == 0 && slot >= 0 && slot < PAS_GL_SLOTS) {
+        return g_slot_gpa[slot];
+    }
+    return r;
 }
 
 static const unsigned char* MyGlGetStringi(unsigned int name, unsigned int index) {
@@ -342,18 +442,31 @@ static void* MyEglGetProcAddress(const char* name) {
     if (name != nullptr) GpuDiag("eglgpa", name);
     if (!g_gpu_on || !g_gpu_chain_on || name == nullptr) return real;
     if (strcmp(name, "glGetString") == 0) {
-        if (real != nullptr) g_real_gl_get_string = real;
-        GlChainLog("glGetString", "eglGetProcAddress");
-        return (void*)RepGlGetString;
+        if (real != nullptr) {
+            int slot = GlChainSlotFor(real, (PasGlGetStringFn)real, nullptr, nullptr);
+            if (slot >= 0) {
+                GlChainLog("glGetString", "eglGetProcAddress");
+                return g_slot_gs[slot];
+            }
+        }
+        return real;
     }
     if (strcmp(name, "glGetStringi") == 0) {
-        if (real != nullptr) g_real_gl_get_stringi = real;
-        GlChainLog("glGetStringi", "eglGetProcAddress");
-        return (void*)RepGlGetStringi;
+        if (real != nullptr) {
+            int slot = GlChainSlotFor(real, nullptr, (PasGlGetStringiFn)real, nullptr);
+            if (slot >= 0) {
+                GlChainLog("glGetStringi", "eglGetProcAddress");
+                return g_slot_gsi[slot];
+            }
+        }
+        return real;
     }
     if (strcmp(name, "eglGetProcAddress") == 0) {
-        if (real != nullptr) g_real_egl_gpa = real;
-        return (void*)RepEglGetProcAddress;
+        if (real != nullptr) {
+            int slot = GlChainSlotFor(real, nullptr, nullptr, (PasEglGpaFn)real);
+            if (slot >= 0) return g_slot_gpa[slot];
+        }
+        return real;
     }
     return real;
 }
@@ -481,10 +594,3 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuOptions(JNIEnv* env, jobject thi
     pas::SetGpuOptions(chain == JNI_TRUE, vulkan == JNI_TRUE);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_kimera_pas_spoof_SpoofCore_nativeSetVulkanNemuExt(JNIEnv* env, jobject thiz,
-                                                           jboolean hide) {
-    (void)env;
-    (void)thiz;
-    pas::SetVulkanNemuExtHide(hide == JNI_TRUE);
-}

@@ -67,8 +67,6 @@ object SpoofCore {
 
     external fun nativeSetGpuOptions(chain: Boolean, vulkan: Boolean)
 
-    external fun nativeSetVulkanNemuExt(hide: Boolean)
-
     /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
         Thread({
@@ -141,25 +139,15 @@ object SpoofCore {
             ""
         }
         val browserProc = procName.contains("chrome", true) || procName.contains("webview", true)
-        val webviewProc = procName.contains("webview", true)
         SpoofState.relaxNet = SpoofState.webrtcMode == 0 ||
             (SpoofState.webrtcMode == 1 && browserProc)
         Log.i(TAG, "[PAS] net: relax=${SpoofState.relaxNet} proc=$procName")
-        // WebView-owned processes crash with the GL dlsym chain / ABI spoof
-        // active (the sandboxed renderer dies during graphics bring-up and the
-        // page never renders). Chrome keeps the full spoof; webview processes
-        // skip those two groups automatically.
-        val chainEff = prefs.getBoolean("gpu_chain", true) && !webviewProc
-        if (!chainEff && prefs.getBoolean("gpu_chain", true)) {
-            Log.i(TAG, "[PAS] webview process - gl chain disabled (renderer stability)")
-        }
         runCatching {
             nativeSetGpuOptions(
-                chainEff,
+                prefs.getBoolean("gpu_chain", true),
                 prefs.getBoolean("gpu_vulkan", true)
             )
         }
-        runCatching { nativeSetVulkanNemuExt(prefs.getBoolean("gpu_nemu_ext", true)) }
         Log.i(TAG, "[PAS] net: webrtc mode = ${SpoofState.webrtcMode}")
 
         // CPU / GPU spoof values (resolved from the shared catalog; active only
@@ -201,16 +189,10 @@ object SpoofCore {
             )
         }
 
-        // ABI spoof stays off in webview processes (renderer stability).
-        val abiOnEff = abiOn && !webviewProc
-        if (abiOn && webviewProc) {
-            Log.i(TAG, "[PAS] webview process - abi spoof skipped (renderer stability)")
-        }
-
         // Always deliver the config first: it releases the native hook gate
         // (native addon on/off + compatibility mode).
         runCatching {
-            nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOnEff, abiMode, compat, nativeOn)
+            nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiMode, compat, nativeOn)
         }
 
         if (!nativeOn) {
@@ -241,7 +223,7 @@ object SpoofCore {
             patch(Build::class.java, "HARDWARE", cpuEntry.hardware, "HARDWARE")
             patch(Build::class.java, "BOARD", cpuEntry.hardware, "BOARD")
         }
-        if (abiOnEff) {
+        if (abiOn) {
             val abi = if (abiMode == 0) "x86_64" else "arm64-v8a"
             val abi2 = if (abiMode == 1) "armeabi-v7a" else "arm64-v8a"
             val all = when (abiMode) {
@@ -268,7 +250,7 @@ object SpoofCore {
         }
         Log.i(
             TAG,
-            "[PAS] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOnEff mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
+            "[PAS] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
         )
     }
 

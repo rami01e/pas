@@ -103,7 +103,6 @@ void* HookChainStubGfx(const char* owner_regex, const char* sym, void* proxy);
 void InstallGpuDlsymChain();
 bool VulkanSpoofActive();
 void SetGpuOptions(bool chain, bool vulkan);
-void SetVulkanNemuExtHide(bool hide);
 void ReconNote(const char* op, const char* detail, long res);
 void InstallReconHooks();
 

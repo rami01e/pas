@@ -36,16 +36,9 @@ namespace pas {
 
 // Extensions that never exist on the emulated GPU profile and would unmask
 // the emulator on inspection (NetEase MuMu advertises VK_NEMU_api_batch).
-static volatile bool g_hide_nemu_ext = true;
-
-void SetVulkanNemuExtHide(bool hide) {
-    g_hide_nemu_ext = hide;
-    Log("native: vulkan nemu-ext hide=%d", (int)hide);
-}
-
 static bool IsHiddenExtName(const char* name) {
     if (!name) return false;
-    if (g_hide_nemu_ext && strstr(name, "NEMU") != nullptr) return true;
+    if (strstr(name, "NEMU") != nullptr) return true;
     if (strcmp(name, "VK_KHR_push_descriptor") == 0) return true;
     return false;
 }
@@ -437,8 +430,17 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
     if (!GpuSpoofActive() || !VulkanSpoofActive() || !name || !real) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
-        g_vk_real[id] = real;
-        ChainLog(id, "dlsym hit");
+        if (g_vk_real[id] == nullptr) {
+            g_vk_real[id] = real;
+            ChainLog(id, "dlsym hit");
+            return kVkProxies[id];
+        }
+        if (g_vk_real[id] != real) {
+            // A second, different driver resolved the same symbol: the proxy
+            // would dispatch into the first driver's entry point. Hand the
+            // caller its own real pointer instead (unspoofed but correct).
+            return real;
+        }
         return kVkProxies[id];
     }
     return real;
@@ -462,15 +464,24 @@ static void* MyDlsym(void* handle, const char* symbol) {
         if (!symbol || symbol[0] != 'v' || symbol[1] != 'k') break;
         if (!GpuSpoofActive() || !VulkanSpoofActive()) break;
         if (strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
-            g_real_gipa = real;
-            out = (void*)MyVkGetInstanceProcAddrPtr;
+            if (g_real_gipa == nullptr || g_real_gipa == real) {
+                g_real_gipa = real;
+                out = (void*)MyVkGetInstanceProcAddrPtr;
+            }
+            // A different driver's vkGetInstanceProcAddr keeps its real
+            // pointer: the proxy would dispatch into the first driver.
             break;
         }
         int id = TargetIndex(symbol);
         if (id >= 0) {
-            g_vk_real[id] = real;
-            ChainLog(id, "dlsym direct");
-            out = kVkProxies[id];
+            if (g_vk_real[id] == nullptr) {
+                g_vk_real[id] = real;
+                ChainLog(id, "dlsym direct");
+                out = kVkProxies[id];
+            } else if (g_vk_real[id] == real) {
+                out = kVkProxies[id];
+            }
+            // Different driver: keep the untouched real pointer.
         }
     } while (0);
     g_dlsym_depth = 0;

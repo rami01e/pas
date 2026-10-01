@@ -320,22 +320,6 @@ bool ProcessLooksBrowser() {
     return !g_browser_ranges.empty();
 }
 
-// WebView-owned processes (the com.google.android.webview provider, its
-// sandboxed renderers, and apps with "webview" in their package name) crash
-// when the GL dlsym chain is installed: the sandboxed renderer dies during
-// graphics bring-up and the page never renders. The chain is skipped there;
-// Chrome keeps the full spoof.
-static bool CmdlineIsWebViewProc() {
-    char buf[256];
-    ssize_t n = SysReadFile("/proc/self/cmdline", buf, sizeof(buf) - 1);
-    if (n <= 0) return false;
-    for (ssize_t i = 0; i < n; i++) {
-        if (buf[i] == '\0') buf[i] = ' ';
-    }
-    buf[n] = '\0';
-    return strstr(buf, "webview") != nullptr;
-}
-
 bool LineContainsHiddenName(const char* line) {
     if (!line) return false;
     std::lock_guard<std::mutex> lk(g_names_mtx);
@@ -570,13 +554,9 @@ static void* InitWorker(void* arg) {
     } else {
         Log("native: cpu spoof off - exec/syscall hooks skipped");
     }
-    const bool wvProc = CmdlineIsWebViewProc();
-    if (wvProc) {
-        Log("native: webview process - gl dlsym chain skipped (renderer stability)");
-    }
     if (GpuSpoofActive()) {
         InstallGpuHooks();
-        if (!wvProc) InstallGpuDlsymChain();
+        InstallGpuDlsymChain();
         if (VulkanSpoofActive()) {
             InstallVulkanHooks();
         } else {

@@ -110,8 +110,6 @@ class MainActivity : Activity() {
     private lateinit var webrtcChip: TextView
     private var webrtcOn = true
     private lateinit var reconSw: SwitchView
-    private lateinit var nemuSw: SwitchView
-    private lateinit var nemuChip: TextView
 
     private lateinit var scopeChip: TextView
 
@@ -328,14 +326,7 @@ class MainActivity : Activity() {
         chainChip = chipView("On", cCyan)
         toggleRow(
             spoofBody, false, chainSw, "GL dlsym chain",
-            "GL symbol substitution via dlsym / eglGetProcAddress (auto-skipped in WebView processes)", chainChip
-        )
-
-        nemuSw = SwitchView(this)
-        nemuChip = chipView("On", cCyan)
-        toggleRow(
-            spoofBody, false, nemuSw, "Hide NEMU ext",
-            "Drop VK_NEMU_api_batch from Vulkan extension lists (Off = keep it visible, for testing)", nemuChip
+            "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
         )
 
         // WebRTC local IP: on = Balanced (default), off = RKN (strict).
@@ -397,8 +388,8 @@ class MainActivity : Activity() {
             }
         )
         logsTrailing.addView(reconSw)
-        logsTrailing.addView(micro("\uD83D\uDD04\uFE0F") { loadLogs() })
-        logsTrailing.addView(micro("\u26C1") { copyLogs() })
+        logsTrailing.addView(microIcon("\uD83D\uDD04\uFE0F") { loadLogs() })
+        logsTrailing.addView(microIcon("\u29C9") { copyLogs() })
         logsTrailing.addView(
             logsChev,
             LinearLayout.LayoutParams(
@@ -638,6 +629,23 @@ class MainActivity : Activity() {
         setOnTouchListener { v, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> v.alpha = 0.7f
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.alpha = 1f
+            }
+            false
+        }
+    }
+
+    private fun microIcon(label: String, onClick: () -> Unit): TextView = TextView(this).apply {
+        text = label
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        setTextColor(cText3)
+        setPadding(dp(7), dp(2), dp(7), dp(2))
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+        setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> v.alpha = 0.6f
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.alpha = 1f
             }
             false
@@ -1207,7 +1215,6 @@ class MainActivity : Activity() {
         updateWebrtcChip()
         vulkanSw.checked = sp.getBoolean("gpu_vulkan", true)
         chainSw.checked = sp.getBoolean("gpu_chain", true)
-        nemuSw.checked = sp.getBoolean("gpu_nemu_ext", true)
         reconSw.checked = sp.getBoolean("recon_enabled", false)
         suppressDirty = false
         refreshRowVisuals()
@@ -1236,7 +1243,6 @@ class MainActivity : Activity() {
         "webrtc_localip" to webrtcOn,
         "recon_enabled" to reconSw.checked,
         "gpu_chain" to chainSw.checked,
-        "gpu_nemu_ext" to nemuSw.checked,
         "gpu_vulkan" to vulkanSw.checked
     )
 
@@ -1268,7 +1274,6 @@ class MainActivity : Activity() {
             "webrtc_localip" to sp.getBoolean("webrtc_localip", true),
             "recon_enabled" to sp.getBoolean("recon_enabled", false),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
-            "gpu_nemu_ext" to sp.getBoolean("gpu_nemu_ext", true),
             "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
         )
     }
@@ -1288,7 +1293,6 @@ class MainActivity : Activity() {
         chip(nativeChip, if (nativeSw.checked) "On" else "Off", if (nativeSw.checked) cCyan else cText2)
         chip(vulkanChip, if (vulkanSw.checked) "On" else "Off", if (vulkanSw.checked) cCyan else cText2)
         chip(chainChip, if (chainSw.checked) "On" else "Off", if (chainSw.checked) cCyan else cText2)
-        chip(nemuChip, if (nemuSw.checked) "On" else "Off", if (nemuSw.checked) cCyan else cText2)
         updateWebrtcChip()
         sdkValue.setTextColor(if (sdkSw.checked) cAmber else cText3)
         cpuValue.setTextColor(if (cpuSw.checked) cAmber else cText3)
@@ -1323,7 +1327,6 @@ class MainActivity : Activity() {
         gsfSw.onToggle = toggle
         vulkanSw.onToggle = toggle
         chainSw.onToggle = toggle
-        nemuSw.onToggle = toggle
         webrtcSw.onToggle = { checked ->
             webrtcOn = checked
             refreshRowVisuals()
