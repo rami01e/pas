@@ -78,7 +78,4 @@ object SpoofState {
     @Volatile
     var bootloader: String = ""
 
-    /** Per-app network source: false = WIFI (default), true = CELLULAR (LTE). */
-    @Volatile
-    var netCellular: Boolean = false
 }
