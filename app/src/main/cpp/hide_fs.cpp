@@ -957,16 +957,16 @@ int HideLstat(const char* path, struct stat* buf) {
     return BYTEHOOK_CALL_PREV(HideLstat, eff, buf);
 }
 
-int HideLstat(const char* path, struct stat* buf) {
+int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     BYTEHOOK_STACK_SCOPE();
-    ReconNote("lstat", path, 0);
-    char apb[1024];
-    const char* eff = DriverPathAlias(path, apb, sizeof(apb)) ? apb : path;
+    ReconNote("fstatat", path, 0);
+    char apc[1024];
+    const char* eff = DriverPathAlias(path, apc, sizeof(apc)) ? apc : path;
     if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
-    return BYTEHOOK_CALL_PREV(HideLstat, eff, buf);
+    return BYTEHOOK_CALL_PREV(HideFStatAt, dirfd, eff, buf, flags);
 }
 
 // ---------------------------------------------------------------------------
