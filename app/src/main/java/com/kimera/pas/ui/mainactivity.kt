@@ -1828,7 +1828,7 @@ class MainActivity : Activity() {
                     .map { it.trim().split(Regex("\\s+")) }
                     .filter { it.size >= 3 && it[1].startsWith("u0_a") && !it[2].startsWith("com.google") && !it[2].startsWith("com.android") }
                     .maxByOrNull { it[0].toIntOrNull() ?: 0 }
-                    ?.[2] ?: ""
+                    ?.getOrNull(2) ?: ""
                 val psLine = if (pkg.isNotEmpty()) runSu("ps -A 2>/dev/null | grep -a $pkg") else ""
                 sb.append("=== process ===\n").append(psLine ?: "(not found)")
                 val zy = runSu("ps -A -o PID,NAME 2>/dev/null | grep -a zygote")

@@ -148,7 +148,7 @@ object SpoofCore {
                 val inc = sp.getMethod("get", String::class.java)
                     .invoke(null, "ro.build.version.incremental") as? String
                 if (!inc.isNullOrBlank()) {
-                    patch(Build::class.java, "BOOTLOADER", inc.trim(), "BOOTLOADER")
+                    SpoofState.bootloader = inc.trim()
                 }
             }
         }
