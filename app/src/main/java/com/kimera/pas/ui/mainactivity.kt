@@ -417,6 +417,13 @@ class MainActivity : Activity() {
         valueRow(logsBody, false, netSw, "Net type", netValue,
             { pickNet() }, { cycleNet() }, { clearNet() })
 
+        // Bootloader version (matches real-device Build.BOOTLOADER naming).
+        blSw = SwitchView(this)
+        blValue = valueTextView()
+        valueRow(logsBody, false, blSw, "Bootloader", blValue,
+            { editBl() }, { blEditVal = randomBl(); updateBlValue(); updateDirty() },
+            { clearBl() })
+
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
             text = "Reload to read the Vector log (root)."
@@ -1268,7 +1275,6 @@ class MainActivity : Activity() {
         "net_cellular" to netCellularSel,
         "bootloader" to blEditVal.trim(),
         "recon_enabled" to lightSw.checked,
-        "net_cellular" to netCellularSel,
         "gpu_chain" to chainSw.checked,
         "gpu_vulkan" to vulkanSw.checked
     )
@@ -1302,7 +1308,6 @@ class MainActivity : Activity() {
             "net_cellular" to sp.getBoolean("net_cellular", false),
             "bootloader" to (sp.getString("bootloader", "") ?: ""),
             "recon_enabled" to sp.getBoolean("recon_enabled", true),
-            "net_cellular" to sp.getBoolean("net_cellular", false),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
             "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
         )
