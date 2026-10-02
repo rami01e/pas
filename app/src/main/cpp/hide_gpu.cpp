@@ -36,6 +36,7 @@ static char g_cpu_part[16] = {0};
 static char g_cpu_info_model[96] = {0};
 static char g_cpu_features[256] = {0};
 static char g_cpu_hwline[256] = {0};
+static char g_cpu_hardware[64] = {0};
 static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
 
@@ -58,7 +59,7 @@ static void CopyStr(char* dst, size_t cap, const char* src) {
 
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
-                  int maxKHz, const char* hwLine) {
+                  int maxKHz, const char* hwLine, const char* hardware) {
     g_cpu_on = false;
     CopyStr(g_cpu_display, sizeof(g_cpu_display), display);
     CopyStr(g_cpu_mfr, sizeof(g_cpu_mfr), mfr);
@@ -67,11 +68,16 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
     CopyStr(g_cpu_info_model, sizeof(g_cpu_info_model), cpuInfoModel);
     CopyStr(g_cpu_features, sizeof(g_cpu_features), features);
     CopyStr(g_cpu_hwline, sizeof(g_cpu_hwline), hwLine);
+    CopyStr(g_cpu_hardware, sizeof(g_cpu_hardware), hardware);
     g_cpu_min_khz = minKHz;
     g_cpu_max_khz = maxKHz;
     g_cpu_on = cpuOn && g_cpu_display[0] != '\0';
-    Log("native: cpu config on=%d display=%s part=%s khz=%d-%d", (int)g_cpu_on, g_cpu_display,
-        g_cpu_part, (int)g_cpu_min_khz, (int)g_cpu_max_khz);
+    Log("native: cpu config on=%d display=%s part=%s hw=%s khz=%d-%d", (int)g_cpu_on,
+        g_cpu_display, g_cpu_part, g_cpu_hardware, (int)g_cpu_min_khz, (int)g_cpu_max_khz);
+}
+
+std::string CpuSpoofHardware() {
+    return std::string(g_cpu_hardware);
 }
 
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
@@ -539,7 +545,8 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
                                                          jstring cpuMfr, jstring cpuModel,
                                                          jstring cpuPart, jstring cpuInfoModel,
                                                          jstring cpuFeatures, jint minKhz,
-                                                         jint maxKhz, jstring cpuHwLine) {
+                                                         jint maxKhz, jstring cpuHwLine,
+                                                         jstring cpuHardware) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -555,9 +562,10 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
     std::string infoModel = toStr(cpuInfoModel);
     std::string features = toStr(cpuFeatures);
     std::string hwLine = toStr(cpuHwLine);
+    std::string hardware = toStr(cpuHardware);
     pas::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
                       infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz,
-                      hwLine.c_str());
+                      hwLine.c_str(), hardware.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL

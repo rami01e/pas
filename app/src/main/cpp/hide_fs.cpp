@@ -629,9 +629,37 @@ static int CreateFilteredFd(const char* path, int flags) {
 // open / openat / fopen
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Driver-path alias: while the CPU spoof is active, the app is told the
+// platform name is the profile's (e.g. "exynos850"), so HAL/EGL loaders look
+// for driver files like libEGL_exynos850.so / gralloc.exynos850.so - which do
+// not exist on the emulator. Rewrites such lookups to the emulator's real
+// platform files (*.kona.so) so the graphics stack keeps loading while the
+// property layer stays consistent with the claimed device.
+// ---------------------------------------------------------------------------
+
+static bool DriverPathAlias(const char* path, char* buf, size_t cap) {
+    if (path == nullptr || !CpuSpoofActive()) return false;
+    std::string hw = CpuSpoofHardware();
+    if (hw.empty() || hw == "kona") return false;
+    std::string needle = "." + hw + ".so";
+    const char* p = strstr(path, needle.c_str());
+    if (p == nullptr) return false;
+    size_t idx = (size_t)(p - path);
+    if (idx + needle.size() > cap - 16) return false;
+    memcpy(buf, path, idx);
+    memcpy(buf + idx, ".kona.so", 8);
+    size_t tail = strlen(path + idx + needle.size());
+    if (idx + 8 + tail >= cap) return false;
+    memcpy(buf + idx + 8, path + idx + needle.size(), tail + 1);
+    return true;
+}
+
 int HideOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("open", path, (long)flags);
+    char ap0[1024];
+    const char* eff = DriverPathAlias(path, ap0, sizeof(ap0)) ? ap0 : path;
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -643,22 +671,24 @@ int HideOpen(const char* path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    if (IsHiddenPath(path)) {
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
     {
         int sfd = -2;
-        if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+        if (HandleSpecialOpen(eff, flags, &sfd)) return sfd;
     }
-    int mfd = CreateFilteredFd(path, flags);
+    int mfd = CreateFilteredFd(eff, flags);
     if (mfd >= 0) return mfd;
-    return BYTEHOOK_CALL_PREV(HideOpen, path, flags, mode);
+    return BYTEHOOK_CALL_PREV(HideOpen, eff, flags, mode);
 }
 
 int HideOpen64(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("open", path, (long)flags);
+    char ap1[1024];
+    const char* eff = DriverPathAlias(path, ap1, sizeof(ap1)) ? ap1 : path;
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -670,38 +700,42 @@ int HideOpen64(const char* path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    if (IsHiddenPath(path)) {
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
     {
         int sfd = -2;
-        if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+        if (HandleSpecialOpen(eff, flags, &sfd)) return sfd;
     }
-    int mfd = CreateFilteredFd(path, flags);
+    int mfd = CreateFilteredFd(eff, flags);
     if (mfd >= 0) return mfd;
-    return BYTEHOOK_CALL_PREV(HideOpen64, path, flags, mode);
+    return BYTEHOOK_CALL_PREV(HideOpen64, eff, flags, mode);
 }
 
 int HideOpen2(const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("open", path, (long)flags);
-    if (IsHiddenPath(path)) {
+    char ap2[1024];
+    const char* eff = DriverPathAlias(path, ap2, sizeof(ap2)) ? ap2 : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
     {
         int sfd = -2;
-        if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+        if (HandleSpecialOpen(eff, flags, &sfd)) return sfd;
     }
-    int mfd = CreateFilteredFd(path, flags);
+    int mfd = CreateFilteredFd(eff, flags);
     if (mfd >= 0) return mfd;
-    return BYTEHOOK_CALL_PREV(HideOpen2, path, flags);
+    return BYTEHOOK_CALL_PREV(HideOpen2, eff, flags);
 }
 
 int HideOpenAt(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("openat", path, (long)flags);
+    char ap3[1024];
+    const char* eff = DriverPathAlias(path, ap3, sizeof(ap3)) ? ap3 : path;
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -713,24 +747,26 @@ int HideOpenAt(int dirfd, const char* path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    if (path && path[0] == '/') {
-        if (IsHiddenPath(path)) {
+    if (eff && eff[0] == '/') {
+        if (IsHiddenPath(eff)) {
             errno = ENOENT;
             return -1;
         }
         {
             int sfd = -2;
-            if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+            if (HandleSpecialOpen(eff, flags, &sfd)) return sfd;
         }
-        int mfd = CreateFilteredFd(path, flags);
+        int mfd = CreateFilteredFd(eff, flags);
         if (mfd >= 0) return mfd;
     }
-    return BYTEHOOK_CALL_PREV(HideOpenAt, dirfd, path, flags, mode);
+    return BYTEHOOK_CALL_PREV(HideOpenAt, dirfd, eff, flags, mode);
 }
 
 int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("openat", path, (long)flags);
+    char ap4[1024];
+    const char* eff = DriverPathAlias(path, ap4, sizeof(ap4)) ? ap4 : path;
     mode_t mode = 0;
 #ifdef O_TMPFILE
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -742,91 +778,97 @@ int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    if (path && path[0] == '/') {
-        if (IsHiddenPath(path)) {
+    if (eff && eff[0] == '/') {
+        if (IsHiddenPath(eff)) {
             errno = ENOENT;
             return -1;
         }
         {
             int sfd = -2;
-            if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+            if (HandleSpecialOpen(eff, flags, &sfd)) return sfd;
         }
-        int mfd = CreateFilteredFd(path, flags);
+        int mfd = CreateFilteredFd(eff, flags);
         if (mfd >= 0) return mfd;
     }
-    return BYTEHOOK_CALL_PREV(HideOpenAt64, dirfd, path, flags, mode);
+    return BYTEHOOK_CALL_PREV(HideOpenAt64, dirfd, eff, flags, mode);
 }
 
 int HideOpenAt2(int dirfd, const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("openat", path, (long)flags);
-    if (path && path[0] == '/') {
-        if (IsHiddenPath(path)) {
+    char ap5[1024];
+    const char* eff = DriverPathAlias(path, ap5, sizeof(ap5)) ? ap5 : path;
+    if (eff && eff[0] == '/') {
+        if (IsHiddenPath(eff)) {
             errno = ENOENT;
             return -1;
         }
         {
             int sfd = -2;
-            if (HandleSpecialOpen(path, flags, &sfd)) return sfd;
+            if (HandleSpecialOpen(eff, flags, &sfd)) return sfd;
         }
-        int mfd = CreateFilteredFd(path, flags);
+        int mfd = CreateFilteredFd(eff, flags);
         if (mfd >= 0) return mfd;
     }
-    return BYTEHOOK_CALL_PREV(HideOpenAt2, dirfd, path, flags);
+    return BYTEHOOK_CALL_PREV(HideOpenAt2, dirfd, eff, flags);
 }
 
 FILE* HideFopen(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("fopen", path, 0);
-    if (IsHiddenPath(path)) {
+    char ap6[1024];
+    const char* eff = DriverPathAlias(path, ap6, sizeof(ap6)) ? ap6 : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return nullptr;
     }
     if (mode && mode[0] == 'r' && strchr(mode, '+') == nullptr) {
         {
             int sfd = -2;
-            if (HandleSpecialOpen(path, O_RDONLY, &sfd)) {
+            if (HandleSpecialOpen(eff, O_RDONLY, &sfd)) {
                 if (sfd < 0) return nullptr;
                 FILE* f = fdopen(sfd, "r");
                 if (f) return f;
                 syscall(SYS_close, sfd);
             }
         }
-        int mfd = CreateFilteredFd(path, O_RDONLY);
+        int mfd = CreateFilteredFd(eff, O_RDONLY);
         if (mfd >= 0) {
             FILE* f = fdopen(mfd, "r");
             if (f) return f;
             syscall(SYS_close, mfd);
         }
     }
-    return BYTEHOOK_CALL_PREV(HideFopen, path, mode);
+    return BYTEHOOK_CALL_PREV(HideFopen, eff, mode);
 }
 
 FILE* HideFopen64(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("fopen", path, 0);
-    if (IsHiddenPath(path)) {
+    char ap7[1024];
+    const char* eff = DriverPathAlias(path, ap7, sizeof(ap7)) ? ap7 : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return nullptr;
     }
     if (mode && mode[0] == 'r' && strchr(mode, '+') == nullptr) {
         {
             int sfd = -2;
-            if (HandleSpecialOpen(path, O_RDONLY, &sfd)) {
+            if (HandleSpecialOpen(eff, O_RDONLY, &sfd)) {
                 if (sfd < 0) return nullptr;
                 FILE* f = fdopen(sfd, "r");
                 if (f) return f;
                 syscall(SYS_close, sfd);
             }
         }
-        int mfd = CreateFilteredFd(path, O_RDONLY);
+        int mfd = CreateFilteredFd(eff, O_RDONLY);
         if (mfd >= 0) {
             FILE* f = fdopen(mfd, "r");
             if (f) return f;
             syscall(SYS_close, mfd);
         }
     }
-    return BYTEHOOK_CALL_PREV(HideFopen64, path, mode);
+    return BYTEHOOK_CALL_PREV(HideFopen64, eff, mode);
 }
 
 // ---------------------------------------------------------------------------
@@ -870,51 +912,61 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
 int HideAccess(const char* path, int mode) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("access", path, (long)mode);
-    if (IsHiddenPath(path)) {
+    char ap8[1024];
+    const char* eff = DriverPathAlias(path, ap8, sizeof(ap8)) ? ap8 : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
-    return BYTEHOOK_CALL_PREV(HideAccess, path, mode);
+    return BYTEHOOK_CALL_PREV(HideAccess, eff, mode);
 }
 
 int HideFAccessAt(int dirfd, const char* path, int mode, int flags) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("faccessat", path, (long)mode);
-    if (IsHiddenPath(path)) {
+    char ap9[1024];
+    const char* eff = DriverPathAlias(path, ap9, sizeof(ap9)) ? ap9 : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
-    return BYTEHOOK_CALL_PREV(HideFAccessAt, dirfd, path, mode, flags);
+    return BYTEHOOK_CALL_PREV(HideFAccessAt, dirfd, eff, mode, flags);
 }
 
 int HideStat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("stat", path, 0);
-    if (IsHiddenPath(path)) {
+    char apa[1024];
+    const char* eff = DriverPathAlias(path, apa, sizeof(apa)) ? apa : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
-    return BYTEHOOK_CALL_PREV(HideStat, path, buf);
+    return BYTEHOOK_CALL_PREV(HideStat, eff, buf);
 }
 
 int HideLstat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("lstat", path, 0);
-    if (IsHiddenPath(path)) {
+    char apb[1024];
+    const char* eff = DriverPathAlias(path, apb, sizeof(apb)) ? apb : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
-    return BYTEHOOK_CALL_PREV(HideLstat, path, buf);
+    return BYTEHOOK_CALL_PREV(HideLstat, eff, buf);
 }
 
-int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
+int HideLstat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
-    ReconNote("fstatat", path, 0);
-    if (IsHiddenPath(path)) {
+    ReconNote("lstat", path, 0);
+    char apb[1024];
+    const char* eff = DriverPathAlias(path, apb, sizeof(apb)) ? apb : path;
+    if (IsHiddenPath(eff)) {
         errno = ENOENT;
         return -1;
     }
-    return BYTEHOOK_CALL_PREV(HideFStatAt, dirfd, path, buf, flags);
+    return BYTEHOOK_CALL_PREV(HideLstat, eff, buf);
 }
 
 // ---------------------------------------------------------------------------

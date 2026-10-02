@@ -105,6 +105,12 @@ static bool IsSpoofTarget(const char* name) {
     static const char* const kSoc[] = {
         "ro.soc.model",
         "ro.soc.manufacturer",
+        "ro.arch",
+        "ro.board.platform",
+        "ro.product.board",
+        "ro.hardware",
+        "ro.boot.hardware",
+        "ro.hardware.egl",
     };
     if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0]))) return true;
     if (g_abi_on && NameIn(name, kAbi, sizeof(kAbi) / sizeof(kAbi[0]))) return true;
@@ -289,6 +295,18 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         }
         if (strcmp(name, "ro.soc.manufacturer") == 0) {
             return SetStr(out, cap, outLen, CpuSpoofManufacturer().c_str());
+        }
+        // Hardware-platform identity: the emulator leaks its virtual platform
+        // name ("kona") through these props while the device profile claims a
+        // Samsung SoC - a fingerprint mismatch. Serve the CPU profile's
+        // platform name instead; the fs layer aliases driver files back to the
+        // emulator's real ones so graphics/HAL loading keeps working.
+        std::string hw = CpuSpoofHardware();
+        if (!hw.empty() &&
+            (strcmp(name, "ro.arch") == 0 || strcmp(name, "ro.board.platform") == 0 ||
+             strcmp(name, "ro.product.board") == 0 || strcmp(name, "ro.hardware") == 0 ||
+             strcmp(name, "ro.boot.hardware") == 0 || strcmp(name, "ro.hardware.egl") == 0)) {
+            return SetStr(out, cap, outLen, hw.c_str());
         }
     }
     return false;
