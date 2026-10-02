@@ -60,6 +60,10 @@ class XposedInit : XposedModule() {
 
         initNativeAddon()
 
+        // JAVA profile ("webrtc_mode" = "java"): the native layer runs in
+        // passthrough and ONLY the Java network hooks spoof - use it to
+        // bisect network stalls (if the game loads under JAVA but stalls
+        // under REAL/RKN, the native net-hiding is the culprit).
         val hooks =
             arrayOf(
                 HookConnectivityManager(),

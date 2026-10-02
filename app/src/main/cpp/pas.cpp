@@ -58,7 +58,10 @@ static bool AllDigits(const char* s) {
 bool IsHiddenIfaceName(const char* name) {
     // "WebRTC local IP" relaxed mode keeps every interface visible so
     // browsers can gather local (host) candidates like a clean device.
+    // Mode 3 (JAVA) lets the Java layer handle spoofing: the native layer
+    // stays fully passthrough so network debugging is unobstructed.
     if (WebRtcMode() == 0) return false;
+    if (WebRtcMode() == 3) return false;
     if (WebRtcMode() == 1 && ProcessLooksBrowser()) return false;
     if (!name || !*name) return false;
     struct Rule {
@@ -217,7 +220,7 @@ int WebRtcMode() {
 }
 
 void SetWebRtcMode(int mode) {
-    if (mode < 0 || mode > 2) mode = 0;
+    if (mode < 0 || mode > 3) mode = 0;
     g_webrtc_mode.store(mode);
     Log("native: webrtc mode=%d", mode);
     RefreshHiddenNames(true);

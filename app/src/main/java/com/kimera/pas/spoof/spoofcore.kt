@@ -135,10 +135,14 @@ object SpoofCore {
         SpoofState.webrtcMode = when (modeStr) {
             "balanced" -> 1
             "rkn" -> 2
+            "java" -> 3
             "relaxed" -> 0
             else -> if (prefs.getBoolean("webrtc_localip", true)) 1 else 2
         }
         runCatching { nativeSetWebrtcMode(SpoofState.webrtcMode) }
+        // Bootloader auto-mirrors the device's own ro.build.version.incremental
+        // when the stock value is MuMu's "unknown" (handled natively); the
+        // pref can still force an explicit value.
         SpoofState.bootloader = (prefs.getString("bootloader", "") ?: "").trim()
         runCatching { nativeSetBootloader(SpoofState.bootloader) }
         SpoofState.netCellularNative = SpoofState.netCellular

@@ -248,6 +248,30 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         if (strcmp(name, "ro.build.version.sdk") == 0) {
             return SetStr(out, cap, outLen, g_sdk_str);
         }
+        // MuMu reports ro.bootloader="unknown"; a real Samsung mirrors
+        // ro.build.version.incremental here (e.g. A047FXXSDEYL1). Fetch the
+        // real incremental once and serve it (values not matching "unknown"
+        // pass through untouched).
+        if (strcmp(name, "ro.bootloader") == 0 && orig && orig[0] &&
+            strcmp(orig, "unknown") == 0) {
+            static char g_bootloader_cache[64] = {0};
+            static bool g_bootloader_init = false;
+            if (!g_bootloader_init) {
+                g_bootloader_init = true;
+                const prop_info* pi = __system_property_find("ro.build.version.incremental");
+                if (pi != nullptr) {
+                    char val[PROP_VALUE_MAX] = {0};
+                    __system_property_read_callback(
+                        pi, [](void* cookie, const char*, const char* value, uint32_t) {
+                            strlcpy((char*)cookie, value, 64);
+                        },
+                        g_bootloader_cache);
+                }
+            }
+            if (g_bootloader_cache[0]) {
+                return SetStr(out, cap, outLen, g_bootloader_cache);
+            }
+        }
         if ((strcmp(name, "ro.build.version.release") == 0 ||
              strcmp(name, "ro.build.version.release_or_codename") == 0) &&
             g_sdk_release[0]) {

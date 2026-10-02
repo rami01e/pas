@@ -108,7 +108,8 @@ class MainActivity : Activity() {
     private lateinit var chainChip: TextView
     private lateinit var webrtcSw: SwitchView
     private lateinit var webrtcChip: TextView
-    private var webrtcOn = true
+    // 0 = REAL (default), 1 = JAVA (native passthrough), 2 = RKN (strict)
+    private var webrtcModeSel = 0
     private lateinit var lightSw: SwitchView
     private lateinit var netSw: SwitchView
     private lateinit var netValue: TextView
@@ -950,8 +951,16 @@ class MainActivity : Activity() {
     }
 
     private fun updateWebrtcChip() {
-        webrtcChip.text = if (webrtcOn) "REAL" else "RKN"
-        styleChip(webrtcChip, if (webrtcOn) cCyan else cGreen)
+        webrtcChip.text = when (webrtcModeSel) {
+            0 -> "REAL"
+            1 -> "JAVA"
+            else -> "RKN"
+        }
+        styleChip(webrtcChip, when (webrtcModeSel) {
+            0 -> cCyan
+            1 -> cAmber
+            else -> cGreen
+        })
     }
 
     private fun pickSdk() {
@@ -1232,12 +1241,13 @@ class MainActivity : Activity() {
         gsfEditVal = sp.getString("gsf_id", "") ?: ""
         updateGsfValue()
         val modeStr = sp.getString("webrtc_mode", null)
-        webrtcOn = when (modeStr) {
-            "rkn" -> false
-            "balanced", "relaxed" -> true
-            else -> sp.getBoolean("webrtc_localip", true)
+        webrtcModeSel = when (modeStr) {
+            "rkn" -> 2
+            "java" -> 1
+            "balanced", "real", "relaxed" -> 0
+            else -> if (sp.getBoolean("webrtc_localip", true)) 0 else 2
         }
-        webrtcSw.checked = webrtcOn
+        webrtcSw.checked = true
         updateWebrtcChip()
         vulkanSw.checked = sp.getBoolean("gpu_vulkan", true)
         chainSw.checked = sp.getBoolean("gpu_chain", true)
@@ -1270,8 +1280,12 @@ class MainActivity : Activity() {
         "widevine_id" to wvEditVal.trim().lowercase(),
         "gsf_enabled" to gsfSw.checked,
         "gsf_id" to gsfEditVal.trim(),
-        "webrtc_mode" to if (webrtcOn) "balanced" else "rkn",
-        "webrtc_localip" to webrtcOn,
+        "webrtc_mode" to when (webrtcModeSel) {
+            0 -> "balanced"
+            1 -> "java"
+            else -> "rkn"
+        },
+        "webrtc_localip" to (webrtcModeSel == 0),
         "net_cellular" to netCellularSel,
         "bootloader" to blEditVal.trim(),
         "recon_enabled" to lightSw.checked,
@@ -1365,8 +1379,9 @@ class MainActivity : Activity() {
         vulkanSw.onToggle = toggle
         lightSw.onToggle = toggle
         chainSw.onToggle = toggle
-        webrtcSw.onToggle = { checked ->
-            webrtcOn = checked
+        webrtcSw.onToggle = { _ ->
+            webrtcModeSel = (webrtcModeSel + 1) % 3
+            webrtcSw.checked = true
             refreshRowVisuals()
             updateDirty()
         }
