@@ -114,7 +114,7 @@ class MainActivity : Activity() {
     private lateinit var netSw: SwitchView
     private lateinit var netValue: TextView
     private var netCellularSel = false
-    private lateinit var reconSw: SwitchView
+
 
     private lateinit var scopeChip: TextView
 
@@ -403,11 +403,6 @@ class MainActivity : Activity() {
             "Skip extended hook groups (netlink / ioctl / props)", null
         )
 
-        reconSw = SwitchView(this)
-        toggleRow(
-            logsBody, false, reconSw, "Recon",
-            "Verbose probe capture for detection mapping", null
-        )
 
         // Net type: per-app WIFI / CELLULAR source selection.
         netSw = SwitchView(this)
@@ -1283,8 +1278,8 @@ class MainActivity : Activity() {
     private fun savedMap(): HashMap<String, Any?> {
         val sp = SpoofSettings.load(this)
         return hashMapOf(
-            "native_enabled" to sp.getBoolean("native_enabled", false),
-            "safe_mode" to sp.getBoolean("safe_mode", true),
+            "native_enabled" to sp.getBoolean("native_enabled", true),
+            "safe_mode" to sp.getBoolean("safe_mode", false),
             "sdk_enabled" to sp.getBoolean("sdk_enabled", false),
             "sdk_value" to sp.getInt("sdk_value", currentSdk),
             "abi_enabled" to sp.getBoolean("abi_enabled", false),
@@ -1307,7 +1302,7 @@ class MainActivity : Activity() {
             },
             "webrtc_localip" to sp.getBoolean("webrtc_localip", true),
             "net_cellular" to sp.getBoolean("net_cellular", false),
-            "bootloader" to (sp.getString("bootloader", "") ?: ""),
+
             "recon_enabled" to sp.getBoolean("recon_enabled", true),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
             "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
@@ -1371,7 +1366,6 @@ class MainActivity : Activity() {
             refreshRowVisuals()
             updateDirty()
         }
-        reconSw.onToggle = toggle
         netSw.onToggle = toggle
     }
 
