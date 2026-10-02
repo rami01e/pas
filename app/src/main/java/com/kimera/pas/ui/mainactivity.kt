@@ -115,9 +115,6 @@ class MainActivity : Activity() {
     private lateinit var netValue: TextView
     private var netCellularSel = false
     private lateinit var reconSw: SwitchView
-    private lateinit var blSw: SwitchView
-    private lateinit var blValue: TextView
-    private var blEditVal = ""
 
     private lateinit var scopeChip: TextView
 
@@ -418,12 +415,6 @@ class MainActivity : Activity() {
         valueRow(logsBody, false, netSw, "Net type", netValue,
             { pickNet() }, { cycleNet() }, { clearNet() })
 
-        // Bootloader version (matches real-device Build.BOOTLOADER naming).
-        blSw = SwitchView(this)
-        blValue = valueTextView()
-        valueRow(logsBody, false, blSw, "Bootloader", blValue,
-            { editBl() }, { blEditVal = randomBl(); updateBlValue(); updateDirty() },
-            { clearBl() })
 
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
@@ -1254,9 +1245,6 @@ class MainActivity : Activity() {
         netCellularSel = sp.getBoolean("net_cellular", false)
         netSw.checked = netCellularSel
         updateNetValue()
-        blEditVal = sp.getString("bootloader", "") ?: ""
-        blSw.checked = blEditVal.isNotEmpty()
-        updateBlValue()
         suppressDirty = false
         refreshRowVisuals()
     }
@@ -1287,7 +1275,6 @@ class MainActivity : Activity() {
         },
         "webrtc_localip" to (webrtcModeSel == 0),
         "net_cellular" to netCellularSel,
-        "bootloader" to blEditVal.trim(),
         "recon_enabled" to lightSw.checked,
         "gpu_chain" to chainSw.checked,
         "gpu_vulkan" to vulkanSw.checked
@@ -1349,7 +1336,6 @@ class MainActivity : Activity() {
         wvValue.setTextColor(if (wvSw.checked) cAmber else cText3)
         gsfValue.setTextColor(if (gsfSw.checked) cAmber else cText3)
         netValue.setTextColor(if (netSw.checked) cAmber else cText3)
-        blValue.setTextColor(if (blSw.checked) cAmber else cText3)
         abiValue.setTextColor(if (abiSw.checked) cAmber else cText3)
     }
 
@@ -1387,7 +1373,6 @@ class MainActivity : Activity() {
         }
         reconSw.onToggle = toggle
         netSw.onToggle = toggle
-        blSw.onToggle = toggle
     }
 
     private fun saveSpoof() {
@@ -1836,8 +1821,15 @@ class MainActivity : Activity() {
         Thread {
             val sb = StringBuilder()
             try {
-                val pkg = "com.newmoonproduction.bigfarmhomestead"
-                val psLine = runSu("ps -A -o PID,NAME 2>/dev/null | grep -a $pkg; ps -A 2>/dev/null | grep -a $pkg")
+                // Target = the most recently started user app in the scope
+                // (u0_a*, excludes system/media/google processes).
+                val psAll = runSu("ps -A -o PID,USER,NAME,TIME 2>/dev/null") ?: ""
+                val pkg = psAll.lineSequence()
+                    .map { it.trim().split(Regex("\\s+")) }
+                    .filter { it.size >= 3 && it[1].startsWith("u0_a") && !it[2].startsWith("com.google") && !it[2].startsWith("com.android") }
+                    .maxByOrNull { it[0].toIntOrNull() ?: 0 }
+                    ?.[2] ?: ""
+                val psLine = if (pkg.isNotEmpty()) runSu("ps -A 2>/dev/null | grep -a $pkg") else ""
                 sb.append("=== process ===\n").append(psLine ?: "(not found)")
                 val zy = runSu("ps -A -o PID,NAME 2>/dev/null | grep -a zygote")
                 sb.append("\n\n=== zygotes (should be clean of libpas) ===\n").append(zy ?: "(none)")
@@ -1887,10 +1879,17 @@ class MainActivity : Activity() {
                         sb.append("\n\n=== newest tombstone ($f) head ===\n").append(head ?: "(unreadable)")
                     }
                 }
-                val dls = runSu(
-                    "logcat -d -t 3000 2>/dev/null | grep -a 'native: recon: dlopen' | tail -n 80"
-                )
-                sb.append("\n\n=== dlopen trace (last loads) ===\n").append(dls ?: "(recon off or no entries)")
+                // Frida: server presence + trace script status.
+                val fridaBin = runSu("ls -l /data/local/tmp/frida-server* 2>/dev/null; ls -l /data/local/tmp/fs16* 2>/dev/null")
+                val fridaProc = runSu("ps -A 2>/dev/null | grep -a frida")
+                sb.append("\n\n=== frida (x86_64) ===\n")
+                    .append("server: ").append(fridaBin ?: "NOT INSTALLED (Debug pushes it)").append("\n")
+                    .append("process: ").append(fridaProc ?: "not running (Debug starts it when needed)")
+                // Socket table of the target: loopback + remote endpoints (connection stalls show here)
+                if (pid.isNotEmpty()) {
+                    val sock = runSu("cat /proc/$pid/net/tcp 2>/dev/null | head -30; cat /proc/$pid/net/tcp6 2>/dev/null | head -30")
+                    sb.append("\n\n=== sockets (tcp/tcp6) ===\n").append(sock?.take(4000) ?: "(none)")
+                }
             } catch (t: Throwable) {
                 sb.append("\nerror: ").append(t.toString())
             }
@@ -1932,31 +1931,6 @@ class MainActivity : Activity() {
         netCellularSel = false
         netSw.checked = false
         updateNetValue()
-        refreshRowVisuals()
-        updateDirty()
-    }
-
-    private fun updateBlValue() {
-        blValue.text = if (blEditVal.isEmpty()) "not set" else blEditVal
-    }
-
-    private fun editBl() {
-        editTextDialog("Bootloader version (e.g. A135FXXSEEZB2)", blEditVal, false) { v ->
-            blEditVal = v.trim()
-            updateBlValue()
-            updateDirty()
-        }
-    }
-
-    private fun randomBl(): String {
-        val suffixes = arrayOf("A", "B", "C", "D")
-        return "A135FXXS" + suffixes[rng.nextInt(suffixes.size)] + "EZB" + (2 + rng.nextInt(8))
-    }
-
-    private fun clearBl() {
-        blEditVal = ""
-        updateBlValue()
-        blSw.checked = false
         refreshRowVisuals()
         updateDirty()
     }

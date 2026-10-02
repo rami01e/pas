@@ -124,7 +124,7 @@ object SpoofCore {
         // Recon diagnostics toggle: independent of the native addon gate, but
         // delivered before nativeSetConfig so the native worker can install
         // the recon hook group when it starts.
-        val reconOn = prefs.getBoolean("recon_enabled", false)
+        val reconOn = prefs.getBoolean("recon_enabled", true)
         SpoofState.reconOn = reconOn
         runCatching { nativeSetRecon(reconOn) }
         Log.i(TAG, "[PAS] recon logging: $reconOn")
@@ -140,11 +140,18 @@ object SpoofCore {
             else -> if (prefs.getBoolean("webrtc_localip", true)) 1 else 2
         }
         runCatching { nativeSetWebrtcMode(SpoofState.webrtcMode) }
-        // Bootloader auto-mirrors the device's own ro.build.version.incremental
-        // when the stock value is MuMu's "unknown" (handled natively); the
-        // pref can still force an explicit value.
-        SpoofState.bootloader = (prefs.getString("bootloader", "") ?: "").trim()
-        runCatching { nativeSetBootloader(SpoofState.bootloader) }
+        // Bootloader: MuMu reports "unknown"; a real Samsung mirrors
+        // ro.build.version.incremental. Mirror it automatically per-app.
+        runCatching {
+            if (Build.BOOTLOADER == "unknown") {
+                val sp = Class.forName("android.os.SystemProperties")
+                val inc = sp.getMethod("get", String::class.java)
+                    .invoke(null, "ro.build.version.incremental") as? String
+                if (!inc.isNullOrBlank()) {
+                    patch(Build::class.java, "BOOTLOADER", inc.trim(), "BOOTLOADER")
+                }
+            }
+        }
         SpoofState.netCellularNative = SpoofState.netCellular
         runCatching { nativeSetNetCellular(SpoofState.netCellular) }
         val procName = try {
