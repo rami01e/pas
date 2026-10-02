@@ -7,6 +7,7 @@ import io.github.libxposed.api.XposedModule
 import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
+import com.kimera.pas.spoof.SpoofState
 
 class HookNetworkInfo : XHook {
 
@@ -24,6 +25,14 @@ class HookNetworkInfo : XHook {
             val method = NetworkInfo::class.java.getMethod("getType")
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
+                if (SpoofState.netCellular &&
+                    (result == ConnectivityManager.TYPE_WIFI || result == ConnectivityManager.TYPE_VPN)
+                ) {
+                    if (SpoofState.reconOn) {
+                        module.log(Log.INFO, TAG, "NetworkInfo.getType() $result -> TYPE_MOBILE (cellular spoof)")
+                    }
+                    return@intercept ConnectivityManager.TYPE_MOBILE
+                }
                 module.log(Log.INFO, TAG, "NetworkInfo.getType() -> $result")
                 if (result == ConnectivityManager.TYPE_VPN) ConnectivityManager.TYPE_WIFI else result
             }
@@ -33,6 +42,14 @@ class HookNetworkInfo : XHook {
             val method = NetworkInfo::class.java.getMethod("getSubtype")
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
+                if (SpoofState.netCellular &&
+                    (result == ConnectivityManager.TYPE_WIFI || result == ConnectivityManager.TYPE_VPN || result <= 0)
+                ) {
+                    if (SpoofState.reconOn) {
+                        module.log(Log.INFO, TAG, "NetworkInfo.getSubtype() $result -> LTE (cellular spoof)")
+                    }
+                    return@intercept android.telephony.TelephonyManager.NETWORK_TYPE_LTE
+                }
                 module.log(Log.INFO, TAG, "NetworkInfo.getSubtype() -> $result")
                 if (result == ConnectivityManager.TYPE_VPN) ConnectivityManager.TYPE_WIFI else result
             }
@@ -44,6 +61,14 @@ class HookNetworkInfo : XHook {
             val method = NetworkInfo::class.java.getMethod("getTypeName")
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
+                if (SpoofState.netCellular && result is String &&
+                    (result.contains("WIFI", true) || result.contains("VPN", true))
+                ) {
+                    if (SpoofState.reconOn) {
+                        module.log(Log.INFO, TAG, "NetworkInfo.getTypeName() $result -> LTE (cellular spoof)")
+                    }
+                    return@intercept "LTE"
+                }
                 module.log(Log.INFO, TAG, "NetworkInfo.getTypeName() -> $result")
                 if (result is String && result.contains("VPN", ignoreCase = true)) "WIFI" else result
             }
@@ -53,6 +78,14 @@ class HookNetworkInfo : XHook {
             val method = NetworkInfo::class.java.getMethod("getSubtypeName")
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
+                if (SpoofState.netCellular && result is String &&
+                    (result.isBlank() || result.contains("WIFI", true) || result.contains("VPN", true))
+                ) {
+                    if (SpoofState.reconOn) {
+                        module.log(Log.INFO, TAG, "NetworkInfo.getSubtypeName() '$result' -> LTE (cellular spoof)")
+                    }
+                    return@intercept "LTE"
+                }
                 module.log(Log.INFO, TAG, "NetworkInfo.getSubtypeName() -> $result")
                 if (result is String && result.contains("VPN", ignoreCase = true)) "WIFI" else result
             }

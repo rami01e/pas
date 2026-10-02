@@ -50,7 +50,8 @@ object SpoofState {
     @Volatile
     var gpuGlVersion: String = ""
 
-    /** Recon diagnostics logging ("recon_enabled"); read by HookRecon per call. */
+    /** Recon diagnostics logging ("recon_enabled" = Debug toggle); read by
+     *  HookRecon per call. */
     @Volatile
     var reconOn: Boolean = false
 
@@ -64,4 +65,20 @@ object SpoofState {
     /** True when ALL network views (Java + native) should stay realistic. */
     @Volatile
     var relaxNet: Boolean = false
+
+    /** Per-app network source spoof: false = default (WIFI), true = report MOBILE (LTE). */
+    @Volatile
+    var netCellular: Boolean = false
+
+    /** Same value delivered to the native layer so interface views stay consistent. */
+    @Volatile
+    var netCellularNative: Boolean = false
+
+    /** Per-app bootloader version (Build.BOOTLOADER). Empty = leave untouched. */
+    @Volatile
+    var bootloader: String = ""
+
+    /** Per-app network source: false = WIFI (default), true = CELLULAR (LTE). */
+    @Volatile
+    var netCellular: Boolean = false
 }

@@ -223,6 +223,25 @@ void SetWebRtcMode(int mode) {
     RefreshHiddenNames(true);
 }
 
+// Net-type spoof (per-app): when cellular is requested, the interface hiding
+// layer also renames wlan entries so Java and native views agree that the
+// device is on MOBILE/LTE rather than WIFI.
+static volatile bool g_net_cellular = false;
+
+void SetNetCellular(bool cellular) {
+    g_net_cellular = cellular;
+    Log("native: net cellular %s", cellular ? "on (MOBILE/LTE)" : "off (WIFI)");
+    RefreshHiddenNames(true);
+}
+
+bool NetCellularSpoof() {
+    return g_net_cellular;
+}
+
+void SetBootloaderValue(const char* value) {
+    Log("native: bootloader spoof %s", (value && value[0]) ? value : "(off)");
+}
+
 // ---------------------------------------------------------------------------
 // balanced mode: browser-caller detection via /proc/self/maps ranges
 // ---------------------------------------------------------------------------
@@ -326,6 +345,9 @@ bool LineContainsHiddenName(const char* line) {
     for (const std::string& n : g_names) {
         if (strstr(line, n.c_str())) return true;
     }
+    // Net-type spoof: while cellular mode is on, hide WIFI entries from
+    // proc/net views so MOBILE is the only reported source.
+    if (NetCellularSpoof() && strstr(line, "wlan") != nullptr) return true;
     return false;
 }
 
@@ -482,6 +504,13 @@ static void OnModuleLoadedCb(const char* name, void* handle) {
 // hook-installation gate (see pas.h)
 // ---------------------------------------------------------------------------
 
+static volatile bool g_light_mode = false;
+
+void SetLightMode(bool light) {
+    g_light_mode = light;
+    Log("native: light mode %s", light ? "on" : "off");
+}
+
 static pthread_mutex_t g_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_cfg_cv = PTHREAD_COND_INITIALIZER;
 static bool g_cfg_ready = false;
@@ -564,22 +593,31 @@ static void* InitWorker(void* arg) {
         return nullptr;
     }
 
+    // Light mode: identity-only spoof (delivered from Kotlin). Skips the
+    // heavyweight groups (recon, net, cpu-deep, gpu/vulkan, GL chain) - the
+    // fast path for bisecting stubborn apps.
+    bool light = g_light_mode;
     int rc = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
+    if (light) {
+        Log("native: light mode - heavy groups skipped");
+    }
     Log("native: stage1 bytehook rc=%d version=%s mode=%d", rc, bytehook_get_version(),
         bytehook_get_mode());
     RefreshHiddenNames(true);
     Log("native: stage2 names cached");
-    InstallIfaceHooks();
-    Log("native: stage3 iface hooks");
+    if (!light) {
+        InstallIfaceHooks();
+        Log("native: stage3 iface hooks");
+    }
     InstallFsHooks();
     Log("native: stage4 fs hooks");
-    if (CpuSpoofActive()) {
+    if (!light && CpuSpoofActive()) {
         InstallCpuDeepHooks();
         Log("native: stage4a cpu deep hooks");
     } else {
-        Log("native: cpu spoof off - exec/syscall hooks skipped");
+        Log("native: cpu deep hooks skipped (light=%d)", (int)light);
     }
-    if (GpuSpoofActive()) {
+    if (GpuSpoofActive() && !light) {
         InstallGpuHooks();
         InstallGpuDlsymChain();
         if (VulkanSpoofActive()) {
@@ -589,9 +627,9 @@ static void* InitWorker(void* arg) {
         }
         Log("native: stage4b gpu gl+vulkan hooks");
     } else {
-        Log("native: gpu spoof off - gl/vulkan hooks skipped");
+        Log("native: gpu hooks skipped (light=%d or off=%d)", (int)light, (int)!GpuSpoofActive());
     }
-    if (ReconEnabled()) {
+    if (!light && ReconEnabled()) {
         InstallReconHooks();
         Log("native: stage4c recon hooks");
     }

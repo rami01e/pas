@@ -61,7 +61,7 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compat
 // CPU model / GPU (OpenGL + Vulkan) spoof (hide_gpu.cpp, hide_vulkan.cpp)
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
-                  int maxKHz, const char* hwLine);
+                  int maxKHz, const char* hwLine, const char* hardware);
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
@@ -74,6 +74,7 @@ std::string CpuSpoofPart();
 std::string CpuSpoofCpuinfoModel();
 std::string CpuSpoofFeatures();
 std::string CpuSpoofHwLine();
+std::string CpuSpoofHardware();
 int CpuSpoofMinKHz();
 int CpuSpoofMaxKHz();
 bool GpuSpoofActive();
@@ -96,6 +97,9 @@ void SetRecon(bool on);
 bool ReconEnabled();
 int WebRtcMode();
 void SetWebRtcMode(int mode);
+bool NetCellularSpoof();
+void SetNetCellular(bool cellular);
+void SetBootloaderValue(const char* value);
 bool BrowserCallerHere(void* ra);
 bool ProcessLooksBrowser();
 bool CallerAllowGfx(const char* caller_path_name, void* arg);

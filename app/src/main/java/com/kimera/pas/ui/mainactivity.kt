@@ -109,7 +109,16 @@ class MainActivity : Activity() {
     private lateinit var webrtcSw: SwitchView
     private lateinit var webrtcChip: TextView
     private var webrtcOn = true
-    private lateinit var reconSw: SwitchView
+    private lateinit var lightSw: SwitchView
+    private lateinit var netSw: SwitchView
+    private lateinit var netValue: TextView
+    private var netCellularSel = false
+    private lateinit var blSw: SwitchView
+    private lateinit var blValue: TextView
+    private var blEditVal = ""
+    private lateinit var netSw: SwitchView
+    private lateinit var netValue: TextView
+    private var netCellularSel = false
 
     private lateinit var scopeChip: TextView
 
@@ -334,6 +343,18 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        logsTrailing.addView(
+            TextView(this).apply {
+                text = "DEBUG"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.08f
+                setTextColor(cText3)
+                setPadding(0, 0, dp(4), 0)
+            }
+        )
+        lightSw = SwitchView(this)
+        logsTrailing.addView(lightSw)
         logsTrailing.addView(microIcon("\uD83D\uDD0D\uFE0F") { runDiagnose() })
         logsTrailing.addView(microIcon("\uD83D\uDD04\uFE0F") { loadLogs() })
         logsTrailing.addView(microIcon("\u29C9") { copyLogs() })
@@ -391,6 +412,12 @@ class MainActivity : Activity() {
             logsBody, false, reconSw, "Recon",
             "Verbose probe capture for detection mapping", null
         )
+
+        // Net type: per-app WIFI / CELLULAR source selection.
+        netSw = SwitchView(this)
+        netValue = valueTextView()
+        valueRow(logsBody, false, netSw, "Net type", netValue,
+            { pickNet() }, { cycleNet() }, { clearNet() })
 
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
@@ -1175,6 +1202,7 @@ class MainActivity : Activity() {
         val sp = SpoofSettings.load(this)
         suppressDirty = true
         nativeSw.checked = sp.getBoolean("native_enabled", true)
+        lightSw.checked = sp.getBoolean("recon_enabled", true)
         compatSw.checked = sp.getBoolean("safe_mode", false)
         sdkSw.checked = sp.getBoolean("sdk_enabled", false)
         sdkSel = sdkIndexFor(sp.getInt("sdk_value", currentSdk))
@@ -1208,7 +1236,12 @@ class MainActivity : Activity() {
         updateWebrtcChip()
         vulkanSw.checked = sp.getBoolean("gpu_vulkan", true)
         chainSw.checked = sp.getBoolean("gpu_chain", true)
-        reconSw.checked = sp.getBoolean("recon_enabled", false)
+        netCellularSel = sp.getBoolean("net_cellular", false)
+        netSw.checked = netCellularSel
+        updateNetValue()
+        blEditVal = sp.getString("bootloader", "") ?: ""
+        blSw.checked = blEditVal.isNotEmpty()
+        updateBlValue()
         suppressDirty = false
         refreshRowVisuals()
     }
@@ -1234,7 +1267,10 @@ class MainActivity : Activity() {
         "gsf_id" to gsfEditVal.trim(),
         "webrtc_mode" to if (webrtcOn) "balanced" else "rkn",
         "webrtc_localip" to webrtcOn,
-        "recon_enabled" to reconSw.checked,
+        "net_cellular" to netCellularSel,
+        "bootloader" to blEditVal.trim(),
+        "recon_enabled" to lightSw.checked,
+        "net_cellular" to netCellularSel,
         "gpu_chain" to chainSw.checked,
         "gpu_vulkan" to vulkanSw.checked
     )
@@ -1265,7 +1301,10 @@ class MainActivity : Activity() {
                 }
             },
             "webrtc_localip" to sp.getBoolean("webrtc_localip", true),
-            "recon_enabled" to sp.getBoolean("recon_enabled", false),
+            "net_cellular" to sp.getBoolean("net_cellular", false),
+            "bootloader" to (sp.getString("bootloader", "") ?: ""),
+            "recon_enabled" to sp.getBoolean("recon_enabled", true),
+            "net_cellular" to sp.getBoolean("net_cellular", false),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
             "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
         )
@@ -1292,6 +1331,8 @@ class MainActivity : Activity() {
         gpuValue.setTextColor(if (gpuSw.checked) cAmber else cText3)
         wvValue.setTextColor(if (wvSw.checked) cAmber else cText3)
         gsfValue.setTextColor(if (gsfSw.checked) cAmber else cText3)
+        netValue.setTextColor(if (netSw.checked) cAmber else cText3)
+        blValue.setTextColor(if (blSw.checked) cAmber else cText3)
         abiValue.setTextColor(if (abiSw.checked) cAmber else cText3)
     }
 
@@ -1319,6 +1360,7 @@ class MainActivity : Activity() {
         wvSw.onToggle = toggle
         gsfSw.onToggle = toggle
         vulkanSw.onToggle = toggle
+        lightSw.onToggle = toggle
         chainSw.onToggle = toggle
         webrtcSw.onToggle = { checked ->
             webrtcOn = checked
@@ -1326,6 +1368,8 @@ class MainActivity : Activity() {
             updateDirty()
         }
         reconSw.onToggle = toggle
+        netSw.onToggle = toggle
+        blSw.onToggle = toggle
     }
 
     private fun saveSpoof() {
@@ -1839,6 +1883,64 @@ class MainActivity : Activity() {
                 renderLogs(text)
             }
         }.start()
+    }
+
+    private fun netLabel(): String = if (netCellularSel) "MOBILE (LTE)" else "WIFI"
+
+    private fun updateNetValue() {
+        netValue.text = netLabel()
+    }
+
+    private fun pickNet() {
+        val items = arrayOf("WIFI (default)", "MOBILE (LTE)")
+        pick("Net type", items, if (netCellularSel) 1 else 0) { idx ->
+            netCellularSel = idx == 1
+            netSw.checked = netCellularSel
+            updateNetValue()
+            refreshRowVisuals()
+            updateDirty()
+        }
+    }
+
+    private fun cycleNet() {
+        netCellularSel = !netCellularSel
+        netSw.checked = netCellularSel
+        updateNetValue()
+        refreshRowVisuals()
+        updateDirty()
+    }
+
+    private fun clearNet() {
+        netCellularSel = false
+        netSw.checked = false
+        updateNetValue()
+        refreshRowVisuals()
+        updateDirty()
+    }
+
+    private fun updateBlValue() {
+        blValue.text = if (blEditVal.isEmpty()) "not set" else blEditVal
+    }
+
+    private fun editBl() {
+        editTextDialog("Bootloader version (e.g. A135FXXSEEZB2)", blEditVal, false) { v ->
+            blEditVal = v.trim()
+            updateBlValue()
+            updateDirty()
+        }
+    }
+
+    private fun randomBl(): String {
+        val suffixes = arrayOf("A", "B", "C", "D")
+        return "A135FXXS" + suffixes[rng.nextInt(suffixes.size)] + "EZB" + (2 + rng.nextInt(8))
+    }
+
+    private fun clearBl() {
+        blEditVal = ""
+        updateBlValue()
+        blSw.checked = false
+        refreshRowVisuals()
+        updateDirty()
     }
 
     private fun renderLogs(raw: String) {

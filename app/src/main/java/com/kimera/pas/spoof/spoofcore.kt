@@ -45,7 +45,8 @@ object SpoofCore {
         cpuFeatures: String,
         cpuMinKHz: Int,
         cpuMaxKHz: Int,
-        cpuHwLine: String
+        cpuHwLine: String,
+        cpuHardware: String
     )
 
     external fun nativeSetGpu(
@@ -64,6 +65,10 @@ object SpoofCore {
     external fun nativeSetRecon(reconOn: Boolean)
 
     external fun nativeSetWebrtcMode(mode: Int)
+
+    external fun nativeSetNetCellular(cellular: Boolean)
+
+    external fun nativeSetBootloader(value: String)
 
     external fun nativeSetGpuOptions(chain: Boolean, vulkan: Boolean)
 
@@ -114,6 +119,7 @@ object SpoofCore {
             TAG,
             "[PAS] id spoof: widevine=${SpoofState.widevineOn} gsf=${SpoofState.gsfOn}"
         )
+        SpoofState.netCellular = prefs.getBoolean("net_cellular", false)
 
         // Recon diagnostics toggle: independent of the native addon gate, but
         // delivered before nativeSetConfig so the native worker can install
@@ -133,6 +139,10 @@ object SpoofCore {
             else -> if (prefs.getBoolean("webrtc_localip", true)) 1 else 2
         }
         runCatching { nativeSetWebrtcMode(SpoofState.webrtcMode) }
+        SpoofState.bootloader = (prefs.getString("bootloader", "") ?: "").trim()
+        runCatching { nativeSetBootloader(SpoofState.bootloader) }
+        SpoofState.netCellularNative = SpoofState.netCellular
+        runCatching { nativeSetNetCellular(SpoofState.netCellular) }
         val procName = try {
             java.io.File("/proc/self/cmdline").readText().replace('\u0000', ' ')
         } catch (t: Throwable) {
@@ -178,7 +188,8 @@ object SpoofCore {
                 cpuEntry.minKHz, cpuEntry.maxKHz,
                 cpuEntry.hardwareLine.ifEmpty {
                     "${cpuEntry.hardware} (Samsung board based on ${cpuEntry.socModel})"
-                }
+                },
+                cpuEntry.hardware
             )
         }
         runCatching {
@@ -216,6 +227,9 @@ object SpoofCore {
         if (useSdk) {
             patch(Build.VERSION::class.java, "SDK_INT", sdkVal, "SDK_INT")
             releaseFor(sdkVal)?.let { patch(Build.VERSION::class.java, "RELEASE", it, "RELEASE") }
+        }
+        if (SpoofState.bootloader.isNotEmpty()) {
+            patch(Build::class.java, "BOOTLOADER", SpoofState.bootloader, "BOOTLOADER")
         }
         if (cpuOnEff) {
             patch(Build::class.java, "SOC_MANUFACTURER", cpuEntry.manufacturer, "SOC_MANUFACTURER")
