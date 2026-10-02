@@ -41,7 +41,7 @@ class HookNetworkInfo : XHook {
         hookSafe(module, "NetworkInfo.getSubtype") {
             val method = NetworkInfo::class.java.getMethod("getSubtype")
             module.hook(method).intercept { chain ->
-                val result = chain.proceed()
+                val result = chain.proceed() as? Int
                 if (SpoofState.netCellular &&
                     (result == ConnectivityManager.TYPE_WIFI || result == ConnectivityManager.TYPE_VPN ||
                         (result != null && result <= 0))
