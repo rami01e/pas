@@ -113,6 +113,7 @@ class MainActivity : Activity() {
     private lateinit var netSw: SwitchView
     private lateinit var netValue: TextView
     private var netCellularSel = false
+    private lateinit var reconSw: SwitchView
     private lateinit var blSw: SwitchView
     private lateinit var blValue: TextView
     private var blEditVal = ""

@@ -43,7 +43,8 @@ class HookNetworkInfo : XHook {
             module.hook(method).intercept { chain ->
                 val result = chain.proceed()
                 if (SpoofState.netCellular &&
-                    (result == ConnectivityManager.TYPE_WIFI || result == ConnectivityManager.TYPE_VPN || result <= 0)
+                    (result == ConnectivityManager.TYPE_WIFI || result == ConnectivityManager.TYPE_VPN ||
+                        (result != null && result <= 0))
                 ) {
                     if (SpoofState.reconOn) {
                         module.log(Log.INFO, TAG, "NetworkInfo.getSubtype() $result -> LTE (cellular spoof)")
