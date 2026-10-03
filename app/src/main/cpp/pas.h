@@ -37,6 +37,7 @@ void HookLibcSym(const char* sym, void* proxy);
 void* HookChainStub(const char* owner_regex, const char* sym, void* proxy);
 
 bool IsHiddenIfaceName(const char* name);
+bool IsHiddenPathFast(const char* path);
 bool IsHiddenPath(const char* path);
 
 // Hidden interface name cache (rebuilt from the real interface list).

@@ -1155,7 +1155,7 @@ static long MySyscall(long number, ...) {
     // does not exist). Reject with ENOENT before the kernel ever sees it.
     if (number == __NR_openat) {
         const char* hpath = (const char*)a1;
-        if (hpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY && IsHiddenPath(hpath)) {
+        if (hpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY && IsHiddenPathFast(hpath)) {
             errno = ENOENT;
             return -1;
         }
@@ -1182,7 +1182,7 @@ static long MySyscall(long number, ...) {
 #ifdef __NR_open
     if (number == __NR_open) {
         const char* hpath = (const char*)a0;
-        if (hpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY && IsHiddenPath(hpath)) {
+        if (hpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY && IsHiddenPathFast(hpath)) {
             errno = ENOENT;
             return -1;
         }

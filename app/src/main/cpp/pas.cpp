@@ -84,6 +84,47 @@ bool IsHiddenIfaceName(const char* name) {
     return false;
 }
 
+// Syscall-safe variant: no mutexes, no lazy refresh, no recursion into
+// hooked APIs. RenderThread calls syscall() while holding graphics locks;
+// anything blocking here deadlocks the whole render pipeline (observed as
+// RenderProxy::setStopped ANR). Static prefixes only.
+static bool IsHiddenPathFast(const char* path) {
+    if (!path || path[0] != '/') return false;
+    if (WebRtcMode() == 0 || WebRtcMode() == 3) return false;
+    static const char* kDirs[] = {
+        "/sys/class/net/",
+        "/sys/devices/virtual/net/",
+        "/proc/sys/net/ipv4/conf/",
+        "/proc/sys/net/ipv6/conf/",
+        "/proc/sys/net/ipv4/neigh/",
+        "/proc/sys/net/ipv6/neigh/",
+    };
+    for (const char* dir : kDirs) {
+        if (strncmp(path, dir, strlen(dir)) != 0) continue;
+        const char* rest = path + strlen(dir);
+        static const char* kIfacePrefixes[] = {
+            "tun", "tap", "wg", "gre", "l2tp", "ppp", "pptp", "zt",
+            "utun", "tailscale", "svpn", "he-ipv6", "ipsec", "xfrm",
+        };
+        for (const char* pre : kIfacePrefixes) {
+            size_t n = strlen(pre);
+            if (strncmp(rest, pre, n) == 0) return true;
+        }
+        return false;
+    }
+    if (strncmp(path, "/proc/net/", 10) == 0) {
+        static const char* kNetFiles[] = {
+            "dev", "if_inet6", "route", "tcp", "tcp6", "udp", "udp6",
+            "unix", "arp", "igmp", "igmp6", "packet", "ptype",
+        };
+        const char* base = path + 10;
+        for (const char* f : kNetFiles) {
+            if (strcmp(base, f) == 0) return true;
+        }
+    }
+    return false;
+}
+
 bool IsHiddenPath(const char* path) {
     if (!path || path[0] != '/') return false;
     static const char* kDirs[] = {
