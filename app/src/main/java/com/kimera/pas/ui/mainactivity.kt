@@ -1901,7 +1901,7 @@ class MainActivity : Activity() {
                     val fp = runSu("pidof frida-server 2>/dev/null")
                     val flog = runSu("head -c 800 /data/local/tmp/frida.log 2>/dev/null")
                     val fpOk = !fp.isNullOrBlank() && !fp.contains("exit code") && fp.trim().isNotEmpty()
-                    sb.append("auto-start: ").append(if (fpOk) "running (pid " + fp.trim() + ")" else "FAILED").append("\n")
+                    sb.append("auto-start: ").append(if (fpOk) "running (pid " + (fp ?: "").trim() + ")" else "FAILED").append("\n")
                     if (!fpOk && !flog.isNullOrBlank()) sb.append("frida.log: ").append(flog)
                 }
                 // Socket table of the target: loopback + remote endpoints (connection stalls show here)
