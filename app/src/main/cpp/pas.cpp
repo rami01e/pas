@@ -677,6 +677,15 @@ static void* InitWorker(void* arg) {
         InstallReconHooks();
         Log("native: stage4c recon hooks");
     }
+    // Native TLS verification bypass (SSL_set_verify / X509_verify_cert).
+    // Independent of the GPU group and of compatibility mode: it is a
+    // feature, not a diagnostic, so it stays on whenever the addon runs.
+    if (SslUnpinActive()) {
+        InstallSslHooks();
+        Log("native: stage4d ssl unpin hooks");
+    } else {
+        Log("native: ssl unpin off - ssl hooks skipped");
+    }
     // setsockopt (SO_BINDTODEVICE hiding) is a core hiding primitive and stays
     // on in every mode, including compatibility mode.
     InstallNetHooks();
