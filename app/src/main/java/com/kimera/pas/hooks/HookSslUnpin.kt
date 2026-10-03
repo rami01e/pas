@@ -7,6 +7,7 @@ import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 import com.kimera.pas.spoof.SpoofState
 import java.security.cert.X509Certificate
+import javax.net.ssl.HttpsURLConnection
 
 /**
  * SSL unpinning + TLS verdict trace (per-app), replacing the earlier
