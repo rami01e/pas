@@ -1892,11 +1892,17 @@ class MainActivity : Activity() {
                     .append("process: ").append(fridaProc ?: "not running")
                 val fridaRunning = !fridaProc.isNullOrBlank() && !fridaProc.contains("exit code")
                 if (!fridaBin.isNullOrBlank() && !fridaRunning) {
-                    runSu("chmod 755 /data/local/tmp/frida-server; /data/local/tmp/frida-server -D >/dev/null 2>&1 &")
-                    Thread.sleep(1500)
-                    val fp = runSu("ps -A 2>/dev/null | grep -a frida")
-                    val fpOk = !fp.isNullOrBlank() && !fp.contains("exit code")
-                    sb.append("auto-start: ").append(if (fpOk) "running" else "FAILED")
+                    // nohup + output file so a crash reason is visible in the
+                    // snapshot instead of a silent daemon death.
+                    runSu("chmod 755 /data/local/tmp/frida-server; nohup /data/local/tmp/frida-server -D > /data/local/tmp/frida.log 2>&1 &")
+                    Thread.sleep(2000)
+                }
+                if (!fridaRunning) {
+                    val fp = runSu("pidof frida-server 2>/dev/null")
+                    val flog = runSu("head -c 800 /data/local/tmp/frida.log 2>/dev/null")
+                    val fpOk = !fp.isNullOrBlank() && !fp.contains("exit code") && fp.trim().isNotEmpty()
+                    sb.append("auto-start: ").append(if (fpOk) "running (pid " + fp.trim() + ")" else "FAILED").append("\n")
+                    if (!fpOk && !flog.isNullOrBlank()) sb.append("frida.log: ").append(flog)
                 }
                 // Socket table of the target: loopback + remote endpoints (connection stalls show here)
                 if (pid.isNotEmpty()) {
