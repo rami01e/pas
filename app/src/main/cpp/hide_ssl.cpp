@@ -43,6 +43,7 @@
 
 #include "pas.h"
 
+#include <dlfcn.h>
 #include <jni.h>
 #include <stdbool.h>
 #include <stdint.h>
