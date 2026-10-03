@@ -1890,16 +1890,21 @@ class MainActivity : Activity() {
                 sb.append("\n\n=== frida (x86_64) ===\n")
                     .append("server: ").append(fridaBin ?: "NOT INSTALLED").append("\n")
                     .append("process: ").append(fridaProc ?: "not running")
-                if (!fridaBin.isNullOrBlank() && fridaProc.isNullOrBlank()) {
+                val fridaRunning = !fridaProc.isNullOrBlank() && !fridaProc.contains("exit code")
+                if (!fridaBin.isNullOrBlank() && !fridaRunning) {
                     runSu("chmod 755 /data/local/tmp/frida-server; /data/local/tmp/frida-server -D >/dev/null 2>&1 &")
                     Thread.sleep(1500)
                     val fp = runSu("ps -A 2>/dev/null | grep -a frida")
-                    sb.append("auto-start: ").append(if (fp.isNullOrBlank()) "FAILED" else "running")
+                    val fpOk = !fp.isNullOrBlank() && !fp.contains("exit code")
+                    sb.append("auto-start: ").append(if (fpOk) "running" else "FAILED")
                 }
                 // Socket table of the target: loopback + remote endpoints (connection stalls show here)
                 if (pid.isNotEmpty()) {
                     val sock = runSu("cat /proc/$pid/net/tcp 2>/dev/null | head -30; cat /proc/$pid/net/tcp6 2>/dev/null | head -30")
-                    sb.append("\n\n=== sockets (tcp/tcp6) ===\n").append(sock?.take(4000) ?: "(none)")
+                    val v6Only = sock != null && sock.contains("FFFF0000") && !sock.contains("\n  0: 3")
+                    sb.append("\n\n=== sockets (tcp/tcp6) ===\n")
+                    if (v6Only) sb.append("NOTE: all remote endpoints are IPv6-mapped (FFFF0000) - IPv4-only tunnel rules may block these.\n")
+                    sb.append(sock?.take(4000) ?: "(none)")
                 }
             } catch (t: Throwable) {
                 sb.append("\nerror: ").append(t.toString())
