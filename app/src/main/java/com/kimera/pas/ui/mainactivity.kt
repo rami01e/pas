@@ -150,7 +150,7 @@ class MainActivity : Activity() {
     private val sdkLabels = ArrayList<String>()
 
     private val ui = Handler(Looper.getMainLooper())
-    private val fridaLog = java.io.File(applicationContext.filesDir, "frida.log")
+    private val fridaLog by lazy { java.io.File(applicationContext.filesDir, "frida.log") }
     @Volatile private var caSha256: String? = null
     @Volatile private var caLoaded = false
     private val statusTick = object : Runnable {
@@ -2032,7 +2032,7 @@ class MainActivity : Activity() {
     private fun buildFridaTlsScript(): String {
         val p = packageName
         val fp = loadCaDigest()
-        val capLine = "Java.perform(function() {`n" +
+        val script = "Java.perform(function() {`n" +
             "  try { const X = Java.use('javax.net.ssl.X509TrustManager'); } catch (e) {}`n" +
             "  const LOG = function(tag, msg) { console.log('[PAS][' + tag + '] ' + msg); };`n" +
             "  try {`n" +
@@ -2070,19 +2070,9 @@ class MainActivity : Activity() {
             "  try {`n" +
             "    const CTI = Java.use('com.android.org.conscrypt.ConscryptFileDescriptorSocket');`n" +
             "  } catch (e) {}`n" +
-(fp?.let {
-            "  try {`n" +
-            "    const TMI = Java.use('com.android.org.conscrypt.TrustManagerImpl');`n" +
-            "    TMI.\$init.overload('[Ljava.security.KeyStore;').implementation = function(ks) {`n" +
-            "      const root = Java.use('java.io.File').\$new('/data/misc/user/0/cacerts-added');`n" +
-            "      LOG('truststore', 'system store hook active');`n" +
-            "      this.\$init(ks);`n" +
-            "    };`n" +
-            "  } catch (e) { }`n"
-} ?: "") +
-            "  LOG('script', 'TLS trace live for " + p + " (CA fingerprint: " + (fp ?: "none") + ")');`n" +
+            "  LOG('script', 'TLS trace live for " + p + " (CA fingerprint: " + (fp ?: "none") + ")\n');" + "`n" +
             "});"
-        return capLine
+        return script
     }
 
     private fun copyLogs() {
