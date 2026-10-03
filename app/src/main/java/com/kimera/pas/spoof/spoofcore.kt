@@ -109,6 +109,10 @@ object SpoofCore {
         val compat = prefs.getBoolean("safe_mode", false)
         if (sdkVal !in 21..45) sdkVal = 0
         val useSdk = sdkOn && sdkVal != 0
+        // WebView provider safety: Chromium 6432+ needs AconfigPackage.load()
+        // (SDK 35+). Reporting lower makes the provider crash and every
+        // webview in the app silently die - the Big Farm / Sunshine stall.
+        val sdkEff = if (sdkVal < 35) 35 else sdkVal
 
         // Java-only id spoofs: available regardless of the native addon.
         SpoofState.widevineOn = prefs.getBoolean("widevine_enabled", false)
@@ -241,8 +245,6 @@ object SpoofCore {
         // silently dies - the Big Farm / Sunshine stall. The provider
         // processes see the truth; other processes may still be clamped to
         // the true device SDK as the floor.
-        val sdkFloor = 35
-        val sdkEff = if (sdkVal < sdkFloor) sdkFloor else sdkVal
         if (useSdk) {
             patch(Build.VERSION::class.java, "SDK_INT", sdkEff, "SDK_INT")
             releaseFor(sdkEff)?.let { patch(Build.VERSION::class.java, "RELEASE", it, "RELEASE") }
