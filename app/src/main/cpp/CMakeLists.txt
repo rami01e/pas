@@ -15,7 +15,8 @@ add_library(pas SHARED
     hide_ioctl.cpp
     hide_props.cpp
     hide_gpu.cpp
-    hide_vulkan.cpp)
+    hide_vulkan.cpp
+    hide_ssl.cpp)
 
 target_compile_options(pas PRIVATE -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden)
 

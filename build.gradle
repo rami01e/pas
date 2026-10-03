@@ -1,12 +1,102 @@
-// Top-level build file where you can add configuration options common to all sub-projects/modules.
-
-
 plugins {
-    id 'com.android.application' version '8.3.2' apply false
-    id 'com.android.library' version '8.3.2' apply false
-    id 'org.jetbrains.kotlin.android' version '1.6.20' apply false
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
 }
 
-tasks.register('clean', Delete) {
-    delete rootProject.buildDir
+android {
+    compileSdk 34
+    buildToolsVersion = "34.0.0"
+    ndkVersion "27.0.12077973"
+
+    defaultConfig {
+        applicationId "com.kimera.pas"
+        minSdkVersion 26
+        targetSdkVersion 34
+        versionCode 45
+        versionName "2.3.0"
+
+        ndk {
+            abiFilters 'x86_64', 'x86', 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_static'
+            }
+        }
+    }
+
+    signingConfigs {
+        debug {
+            storeFile file(DEBUG_STORE_FILE)
+            storePassword DEBUG_STORE_PASSWORD
+            keyAlias DEBUG_KEY_ALIAS
+            keyPassword DEBUG_KEY_PASSWORD
+
+            v1SigningEnabled true
+            v2SigningEnabled true
+        }
+
+        release {
+            storeFile file(RELEASE_STORE_FILE)
+            storePassword RELEASE_STORE_PASSWORD
+            keyAlias RELEASE_KEY_ALIAS
+            keyPassword RELEASE_KEY_PASSWORD
+
+            v1SigningEnabled true
+            v2SigningEnabled true
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled true
+            signingConfig signingConfigs.release
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+
+    buildFeatures {
+        prefab true
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/cpp/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    namespace "com.kimera.pas"
 }
+
+dependencies {
+    compileOnly "io.github.libxposed:api:101.0.1"
+    implementation("io.github.libxposed:service:101.0.0") {
+        // Built against SDK 36 and pulls Kotlin stdlib 2.2; the code itself only
+        // uses long-stable APIs, and our toolchain stays on Kotlin 1.6.20.
+        exclude group: 'org.jetbrains.kotlin', module: 'kotlin-stdlib'
+    }
+    implementation "androidx.annotation:annotation:1.8.0"
+    implementation 'com.bytedance:bytehook:1.0.10'
+}
+
+// The service AAR is metadata-marked minCompileSdk=36 while this project
+// compiles against 34 with AGP 8.3.2. The classes only use APIs available well
+// before 26, so the metadata gate is skipped instead of upgrading the whole
+// toolchain for two tiny libraries.
+tasks.matching { it.name.startsWith("check") && it.name.endsWith("AarMetadata") }.configureEach {
+    enabled = false
+}
+
+apply from: rootProject.file('gradle/prefab_bypass.gradle')

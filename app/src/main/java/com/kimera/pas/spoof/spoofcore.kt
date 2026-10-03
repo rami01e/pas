@@ -72,6 +72,9 @@ object SpoofCore {
 
     external fun nativeSetGpuOptions(chain: Boolean, vulkan: Boolean)
 
+    // >>> v2.3.0: native TLS verification bypass (hide_ssl.cpp)
+    external fun nativeSetSslUnpin(on: Boolean)
+
     /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
         Thread({
@@ -173,6 +176,11 @@ object SpoofCore {
                 prefs.getBoolean("gpu_vulkan", true)
             )
         }
+        // >>> v2.3.0: native TLS verification bypass. Default ON; delivered
+        // before nativeSetConfig so the native worker sees it on wake-up.
+        val sslUnpin = prefs.getBoolean("ssl_unpin", true)
+        runCatching { nativeSetSslUnpin(sslUnpin) }
+        Log.i(TAG, "[PAS] ssl unpin: $sslUnpin")
         Log.i(TAG, "[PAS] net: webrtc mode = ${SpoofState.webrtcMode}")
 
         // CPU / GPU spoof values (resolved from the shared catalog; active only

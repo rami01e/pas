@@ -125,6 +125,14 @@ void InstallPropSpoofHooks();
 bool SpoofActive();
 bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, size_t cap);
 
+// Native TLS verification bypass (hide_ssl.cpp): SSL_set_verify /
+// SSL_CTX_set_verify / *_custom_verify forced to SSL_VERIFY_NONE, plus
+// X509_verify_cert / X509_STORE_CTX_get_error / SSL_get_verify_result forced
+// to success. Installed only when the native addon is enabled.
+void InstallSslHooks();
+void SetSslUnpin(bool on);
+bool SslUnpinActive();
+
 // Hook-installation gate: the worker waits briefly for the Kotlin side to
 // deliver the config so it can either skip all hook installation (native
 // addon disabled) or skip just the extended groups (compatibility mode).
