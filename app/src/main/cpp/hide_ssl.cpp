@@ -26,6 +26,11 @@
 //                                 sometimes stamp an error after their own
 //                                 comparison - that set is neutralised too)
 //
+// v2.3.3: every intercepted verification call is logged as
+// "native: ssl-pin: ..." (capped at 200 lines per process), so a Diagnose
+// capture of a stalling app shows whether a bundled native SSL stack is
+// running its verify routine against the mitmproxy chain.
+//
 // Known limits (read before expecting miracles):
 //   * Only dynamically visible symbols are reachable. A library that
 //     statically links BoringSSL with hidden visibility (Chrome's
@@ -55,6 +60,18 @@ static const int kX509Ok = 0;            // X509_V_OK
 
 static volatile bool g_ssl_unpin = true;  // default ON (scoped apps only)
 
+// Pinning-attempt logger. Every intercepted verification call emits one
+// line, capped so a handshake storm cannot flood the log. Feeds Diagnose.
+static volatile int g_ssl_log_count = 0;
+static void SslPinLog(const char* op) {
+    int n = __sync_fetch_and_add(&g_ssl_log_count, 1);
+    if (n > 200) {
+        if (n == 201) Log("native: ssl-pin: emission cap reached");
+        return;
+    }
+    Log("native: ssl-pin: %s intercepted (verify=NONE)", op);
+}
+
 // ---------------------------------------------------------------------------
 // proxies - every one forwards the original call and then overrides only the
 // verdict, so nothing downstream sees a null where it expected a function.
@@ -62,24 +79,28 @@ static volatile bool g_ssl_unpin = true;  // default ON (scoped apps only)
 
 static void MySslSetVerify(void* ssl, int mode, void* cb) {
     BYTEHOOK_STACK_SCOPE();
+    SslPinLog("SSL_set_verify");
     (void)mode;
     BYTEHOOK_CALL_PREV(MySslSetVerify, ssl, kSslVerifyNone, cb);
 }
 
 static void MySslCtxSetVerify(void* ctx, int mode, void* cb) {
     BYTEHOOK_STACK_SCOPE();
+    SslPinLog("SSL_CTX_set_verify");
     (void)mode;
     BYTEHOOK_CALL_PREV(MySslCtxSetVerify, ctx, kSslVerifyNone, cb);
 }
 
 static void MySslSetCustomVerify(void* ssl, int mode, void* cb) {
     BYTEHOOK_STACK_SCOPE();
+    SslPinLog("SSL_set_custom_verify");
     (void)mode;
     BYTEHOOK_CALL_PREV(MySslSetCustomVerify, ssl, kSslVerifyNone, cb);
 }
 
 static void MySslCtxSetCustomVerify(void* ctx, int mode, void* cb) {
     BYTEHOOK_STACK_SCOPE();
+    SslPinLog("SSL_CTX_set_custom_verify");
     (void)mode;
     BYTEHOOK_CALL_PREV(MySslCtxSetCustomVerify, ctx, kSslVerifyNone, cb);
 }
@@ -93,9 +114,7 @@ static long MySslGetVerifyResult(const void* ssl) {
 
 static int MyX509VerifyCert(void* ctx) {
     BYTEHOOK_STACK_SCOPE();
-    // Run the real verification first so the store context is populated
-    // (some callers read the peer chain afterwards), then override the
-    // verdict. Consistent with MyX509StoreCtxGetError returning OK.
+    SslPinLog("X509_verify_cert");
     int r = BYTEHOOK_CALL_PREV(MyX509VerifyCert, ctx);
     (void)r;
     return 1;

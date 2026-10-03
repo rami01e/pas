@@ -27,7 +27,8 @@ object SpoofSettings {
         "gpu_enabled", "gpu_value",
         "widevine_enabled", "widevine_id",
         "gsf_enabled", "gsf_id",
-        "recon_enabled", "webrtc_mode", "gpu_chain", "gpu_vulkan"
+        "recon_enabled", "webrtc_mode", "gpu_chain", "gpu_vulkan",
+        "ssl_unpin_enabled", "ssl_unpin_mode"
     )
 
     @Volatile

@@ -176,12 +176,20 @@ object SpoofCore {
                 prefs.getBoolean("gpu_vulkan", true)
             )
         }
-        // >>> v2.3.0: native TLS verification bypass. Default ON; delivered
-        // before nativeSetConfig so the native worker sees it on wake-up.
-        val sslUnpin = prefs.getBoolean("ssl_unpin", true)
-        runCatching { nativeSetSslUnpin(sslUnpin) }
-        Log.i(TAG, "[PAS] ssl unpin: $sslUnpin")
-        Log.i(TAG, "[PAS] net: webrtc mode = ${SpoofState.webrtcMode}")
+        // SSL unpinning (per-app): master toggle + JAVA/NATIVE/BOTH mode.
+        // Java surfaces are gated in HookSslUnpin (mode 1 or 3); native
+        // surfaces install when mode is 2 or 3.
+        val sslOn = prefs.getBoolean("ssl_unpin_enabled", false)
+        val sslModeStr = prefs.getString("ssl_unpin_mode", "both") ?: "both"
+        val sslMode = if (!sslOn) 0 else when (sslModeStr) {
+            "java" -> 1
+            "native" -> 2
+            "both" -> 3
+            else -> 3
+        }
+        SpoofState.sslUnpinMode = sslMode
+        runCatching { nativeSetSslUnpin(sslMode == 2 || sslMode == 3) }
+        Log.i(TAG, "[PAS] ssl unpin: mode=$sslMode (0=off 1=java 2=native 3=both)")
 
         // CPU / GPU spoof values (resolved from the shared catalog; active only
         // together with the native addon so all surfaces stay consistent).

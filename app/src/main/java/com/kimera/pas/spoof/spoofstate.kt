@@ -74,6 +74,14 @@ object SpoofState {
     @Volatile
     var netCellularNative: Boolean = false
 
+    /**
+     * SSL unpinning mode (per-app): 0 = OFF, 1 = JAVA only, 2 = NATIVE only,
+     * 3 = BOTH. Consumed by HookSslUnpin.kt (Java surfaces) and delivered to
+     * nativeSetSslUnpin (native surfaces).
+     */
+    @Volatile
+    var sslUnpinMode: Int = 0
+
     /** Per-app bootloader version (Build.BOOTLOADER). Empty = leave untouched. */
     @Volatile
     var bootloader: String = ""

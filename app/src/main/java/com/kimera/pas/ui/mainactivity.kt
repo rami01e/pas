@@ -102,6 +102,10 @@ class MainActivity : Activity() {
     private lateinit var wvValue: TextView
     private lateinit var gsfSw: SwitchView
     private lateinit var gsfValue: TextView
+    private lateinit var sslSw: SwitchView
+    private lateinit var sslValue: TextView
+    // 0 = off, 1 = JAVA, 2 = NATIVE, 3 = BOTH
+    private var sslModeSel = 3
 
     private lateinit var vulkanSw: SwitchView
     private lateinit var vulkanChip: TextView
@@ -331,6 +335,15 @@ class MainActivity : Activity() {
         valueRow(javaBody, false, gsfSw, "GSF ID", gsfValue,
             { editGsf() }, { gsfEditVal = randomGsf(); updateGsfValue(); updateDirty() },
             { clearGsf() })
+
+        // ---------------- SSL UNPINNING panel ----------------
+        val (sslPanel, sslBody) = panel("SSL Unpinning", null, null)
+        addPanel(sslPanel)
+
+        sslSw = SwitchView(this)
+        sslValue = valueTextView()
+        valueRow(sslBody, true, sslSw, "Unpin SSL", sslValue,
+            { pickSslMode() }, { cycleSslMode() }, { clearSslMode() })
 
         // ---------------- LOGS panel ----------------
         logsChev = TextView(this).apply {
@@ -1203,6 +1216,50 @@ class MainActivity : Activity() {
         updateDirty()
     }
 
+
+    // ------------------------------------------------------------------
+    // SSL unpinning mode helpers
+    // ------------------------------------------------------------------
+
+    private fun sslModeLabel(idx: Int): String = when (idx) {
+        1 -> "JAVA"
+        2 -> "NATIVE"
+        else -> "BOTH"
+    }
+
+    private fun updateSslValue() {
+        sslValue.text = sslModeLabel(sslModeSel)
+        sslValue.setTextColor(if (sslSw.checked) cAmber else cText3)
+    }
+
+    private fun pickSslMode() {
+        val items = arrayOf("JAVA", "NATIVE", "BOTH")
+        val cur = (sslModeSel - 1).coerceIn(0, 2)
+        pick("SSL unpin mode", items, cur) { idx ->
+            sslModeSel = idx + 1
+            if (!sslSw.checked) sslSw.checked = true
+            updateSslValue()
+            refreshRowVisuals()
+            updateDirty()
+        }
+    }
+
+    private fun cycleSslMode() {
+        sslModeSel = if (sslModeSel >= 3) 1 else sslModeSel + 1
+        if (!sslSw.checked) sslSw.checked = true
+        updateSslValue()
+        refreshRowVisuals()
+        updateDirty()
+    }
+
+    private fun clearSslMode() {
+        sslModeSel = 1
+        sslSw.checked = false
+        updateSslValue()
+        refreshRowVisuals()
+        updateDirty()
+    }
+
     // ------------------------------------------------------------------
     // state: load / save / dirty / visuals
     // ------------------------------------------------------------------
@@ -1236,6 +1293,13 @@ class MainActivity : Activity() {
         gsfSw.checked = sp.getBoolean("gsf_enabled", false)
         gsfEditVal = sp.getString("gsf_id", "") ?: ""
         updateGsfValue()
+        sslSw.checked = sp.getBoolean("ssl_unpin_enabled", false)
+        sslModeSel = when (sp.getString("ssl_unpin_mode", "both")) {
+            "java" -> 1
+            "native" -> 2
+            else -> 3
+        }
+        updateSslValue()
         val modeStr = sp.getString("webrtc_mode", null)
         webrtcModeSel = when (modeStr) {
             "rkn" -> 2
@@ -1273,6 +1337,13 @@ class MainActivity : Activity() {
         "widevine_id" to wvEditVal.trim().lowercase(),
         "gsf_enabled" to gsfSw.checked,
         "gsf_id" to gsfEditVal.trim(),
+        "ssl_unpin_enabled" to sslSw.checked,
+        "ssl_unpin_mode" to when (sslModeSel) {
+            1 -> "java"
+            2 -> "native"
+            else -> "both"
+        },
+
         "webrtc_mode" to when (webrtcModeSel) {
             0 -> "balanced"
             1 -> "java"
@@ -1303,6 +1374,8 @@ class MainActivity : Activity() {
             "widevine_id" to (sp.getString("widevine_id", "") ?: ""),
             "gsf_enabled" to sp.getBoolean("gsf_enabled", false),
             "gsf_id" to (sp.getString("gsf_id", "") ?: ""),
+            "ssl_unpin_enabled" to sp.getBoolean("ssl_unpin_enabled", false),
+            "ssl_unpin_mode" to (sp.getString("ssl_unpin_mode", "both") ?: "both"),
             "webrtc_mode" to run {
                 val m = sp.getString("webrtc_mode", null)
                 when (m) {
@@ -1342,6 +1415,7 @@ class MainActivity : Activity() {
         gpuValue.setTextColor(if (gpuSw.checked) cAmber else cText3)
         wvValue.setTextColor(if (wvSw.checked) cAmber else cText3)
         gsfValue.setTextColor(if (gsfSw.checked) cAmber else cText3)
+        sslValue.setTextColor(if (sslSw.checked) cAmber else cText3)
         netValue.setTextColor(if (netSw.checked) cAmber else cText3)
         abiValue.setTextColor(if (abiSw.checked) cAmber else cText3)
     }
@@ -1369,6 +1443,7 @@ class MainActivity : Activity() {
         gpuSw.onToggle = toggle
         wvSw.onToggle = toggle
         gsfSw.onToggle = toggle
+        sslSw.onToggle = toggle
         vulkanSw.onToggle = toggle
         lightSw.onToggle = toggle
         chainSw.onToggle = toggle
