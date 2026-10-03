@@ -245,13 +245,14 @@ object SpoofCore {
         // silently dies - the Big Farm / Sunshine stall. The provider
         // processes see the truth; other processes may still be clamped to
         // the true device SDK as the floor.
-        // NOTE: Build.VERSION.SDK_INT/RELEASE are deliberately NOT patched.
-        // Chromium (WebView 6432 / Chrome 130+) reads SDK_INT_FULL and
-        // AconfigPackage.load() - APIs tied to the REAL SDK level. Patching
-        // SDK_INT below or even at a different level than the device makes
-        // those lookups throw NoSuchFieldError/NoSuchMethodError and the
-        // WebView provider dies, silently stalling any webview-based game.
-        // The SDK spoof stays available at the native property layer only.
+        // Legacy Java SDK patch: OFF by default. Chromium reads SDK_INT_FULL
+        // and AconfigPackage.load() - APIs tied to the REAL SDK level - so a
+        // patched SDK_INT can crash the WebView provider in modern apps.
+        // Enable only per-app when a target needs the Java-level number.
+        if (useSdk && prefs.getBoolean("sdk_java_enabled", false)) {
+            patch(Build.VERSION::class.java, "SDK_INT", sdkEff, "SDK_INT")
+            releaseFor(sdkEff)?.let { patch(Build.VERSION::class.java, "RELEASE", it, "RELEASE") }
+        }
         if (SpoofState.bootloader.isNotEmpty()) {
             patch(Build::class.java, "BOOTLOADER", SpoofState.bootloader, "BOOTLOADER")
         }

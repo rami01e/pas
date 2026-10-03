@@ -114,6 +114,7 @@ class MainActivity : Activity() {
     private lateinit var netSw: SwitchView
     private lateinit var netValue: TextView
     private var netCellularSel = false
+    private lateinit var sdkJavaSw: SwitchView
 
 
     private lateinit var scopeChip: TextView
@@ -401,6 +402,12 @@ class MainActivity : Activity() {
         toggleRow(
             logsBody, false, compatSw, "safe mode",
             "Skip extended hook groups (netlink / ioctl / props)", null
+        )
+
+        sdkJavaSw = SwitchView(this)
+        toggleRow(
+            logsBody, false, sdkJavaSw, "SDK (Java)",
+            "Patch Build.VERSION.SDK_INT in-app (may break modern WebView apps)", null
         )
 
 
@@ -1204,6 +1211,7 @@ class MainActivity : Activity() {
         nativeSw.checked = sp.getBoolean("native_enabled", true)
         lightSw.checked = sp.getBoolean("recon_enabled", true)
         compatSw.checked = sp.getBoolean("safe_mode", false)
+        sdkJavaSw.checked = sp.getBoolean("sdk_java_enabled", false)
         sdkSw.checked = sp.getBoolean("sdk_enabled", false)
         sdkSel = sdkIndexFor(sp.getInt("sdk_value", currentSdk))
         updateSdkValue()
@@ -1270,6 +1278,7 @@ class MainActivity : Activity() {
         },
         "webrtc_localip" to (webrtcModeSel == 0),
         "net_cellular" to netCellularSel,
+        "sdk_java_enabled" to sdkJavaSw.checked,
         "recon_enabled" to lightSw.checked,
         "gpu_chain" to chainSw.checked,
         "gpu_vulkan" to vulkanSw.checked
@@ -1302,6 +1311,7 @@ class MainActivity : Activity() {
             },
             "webrtc_localip" to sp.getBoolean("webrtc_localip", true),
             "net_cellular" to sp.getBoolean("net_cellular", false),
+            "sdk_java_enabled" to sp.getBoolean("sdk_java_enabled", false),
 
             "recon_enabled" to sp.getBoolean("recon_enabled", true),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
@@ -1367,6 +1377,7 @@ class MainActivity : Activity() {
             updateDirty()
         }
         netSw.onToggle = toggle
+        sdkJavaSw.onToggle = toggle
     }
 
     private fun saveSpoof() {
@@ -1873,12 +1884,18 @@ class MainActivity : Activity() {
                         sb.append("\n\n=== newest tombstone ($f) head ===\n").append(head ?: "(unreadable)")
                     }
                 }
-                // Frida: server presence + trace script status.
-                val fridaBin = runSu("ls -l /data/local/tmp/frida-server* 2>/dev/null; ls -l /data/local/tmp/fs16* 2>/dev/null")
+                // Frida: server presence, auto-start, and attach status.
+                val fridaBin = runSu("ls -l /data/local/tmp/frida-server* 2>/dev/null")
                 val fridaProc = runSu("ps -A 2>/dev/null | grep -a frida")
                 sb.append("\n\n=== frida (x86_64) ===\n")
-                    .append("server: ").append(fridaBin ?: "NOT INSTALLED (Debug pushes it)").append("\n")
-                    .append("process: ").append(fridaProc ?: "not running (Debug starts it when needed)")
+                    .append("server: ").append(fridaBin ?: "NOT INSTALLED").append("\n")
+                    .append("process: ").append(fridaProc ?: "not running")
+                if (!fridaBin.isNullOrBlank() && fridaProc.isNullOrBlank()) {
+                    runSu("chmod 755 /data/local/tmp/frida-server; /data/local/tmp/frida-server -D >/dev/null 2>&1 &")
+                    Thread.sleep(1500)
+                    val fp = runSu("ps -A 2>/dev/null | grep -a frida")
+                    sb.append("auto-start: ").append(if (fp.isNullOrBlank()) "FAILED" else "running")
+                }
                 // Socket table of the target: loopback + remote endpoints (connection stalls show here)
                 if (pid.isNotEmpty()) {
                     val sock = runSu("cat /proc/$pid/net/tcp 2>/dev/null | head -30; cat /proc/$pid/net/tcp6 2>/dev/null | head -30")
