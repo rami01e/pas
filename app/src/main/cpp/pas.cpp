@@ -88,7 +88,7 @@ bool IsHiddenIfaceName(const char* name) {
 // hooked APIs. RenderThread calls syscall() while holding graphics locks;
 // anything blocking here deadlocks the whole render pipeline (observed as
 // RenderProxy::setStopped ANR). Static prefixes only.
-static bool IsHiddenPathFast(const char* path) {
+bool IsHiddenPathFast(const char* path) {
     if (!path || path[0] != '/') return false;
     if (WebRtcMode() == 0 || WebRtcMode() == 3) return false;
     static const char* kDirs[] = {
