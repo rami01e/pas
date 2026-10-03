@@ -2,15 +2,15 @@
 //
 // Complements the Java-side unpinning (HookSslUnpin.kt) by neutralising
 // certificate verification inside the process's *native* TLS stack
-// (BoringSSL/OpenSSL). SDKs, Cronet and some game engines perform their
-// chain checks in native code, where Java hooks cannot reach.
+// (BoringSSL/OpenSSL). SDKs, Cronet, Chromium webviews and some game engines
+// perform their chain checks in native code, where Java hooks cannot reach.
 //
-// Owner matching is deliberately BROAD: the module attaches to any library
-// whose name contains "ssl", "crypto" or "boring", so game-bundled
-// BoringSSL/OpenSSL shipped under a non-standard name (libssl_bundled.so,
-// libcrypto3.so, libboring_ssl.so, etc.) is caught alongside the system
-// libssl.so / libcrypto.so. Bytehook resolves owners by substring regex, so
-// a miss simply reports a failure and the next owner is tried.
+// v2.3.4: owner match expanded. The chromium/webview TLS stack is BoringSSL
+// compiled into libwebviewchromium.so (or libmonochrome.so on newer builds)
+// - neither name contains "ssl"/"crypto"/"boring", so v2.3.1..v2.3.3 never
+// hooked it. Names added: webviewchromium, monochrome, chromium, mbedtls,
+// gnutls. The five original owners are kept for the system libssl/libcrypto
+// and game-bundled libraries.
 //
 // Installed only when the native addon is enabled, in scoped app processes.
 //
@@ -22,26 +22,24 @@
 //   SSL_get_verify_result      -> returns X509_V_OK
 //   X509_verify_cert           -> returns 1 (success)
 //   X509_STORE_CTX_get_error   -> returns X509_V_OK
-//   X509_STORE_CTX_set_error   -> forced to X509_V_OK (pinning frameworks
-//                                 sometimes stamp an error after their own
-//                                 comparison - that set is neutralised too)
+//   X509_STORE_CTX_set_error   -> forced to X509_V_OK
 //
-// v2.3.3: every intercepted verification call is logged as
-// "native: ssl-pin: ..." (capped at 200 lines per process), so a Diagnose
-// capture of a stalling app shows whether a bundled native SSL stack is
-// running its verify routine against the mitmproxy chain.
+// Every intercepted verification call emits one "native: ssl-pin: ..." log
+// line (capped at 200 per process), so a Diagnose capture of a stalling app
+// shows whether a bundled native SSL stack is running its verify routine
+// against the mitmproxy chain.
 //
-// Known limits (read before expecting miracles):
+// Known limits:
 //   * Only dynamically visible symbols are reachable. A library that
-//     statically links BoringSSL with hidden visibility (Chrome's
-//     libmonochrome.so, Unity il2cpp's bundled SSL) does not export these
-//     names and cannot be hooked by name. Address-based scanning is the
-//     only path for that case - out of scope for this build.
+//     statically links BoringSSL with hidden visibility does not export
+//     these names and cannot be hooked by name. Address-based scanning is
+//     the only path for that case.
 //   * Callers living in ARM-translated APK libraries are skipped by the
 //     shared CallerAllow filter (patching translated code corrupts it), so
 //     on an x86_64 emulator an arm64 game's own bundled SSL stack is out
-//     of reach even when the symbols are exported. Java-layer unpinning
-//     still covers those apps' Java TLS.
+//     of reach even when the symbols are exported. Native x86_64 libraries
+//     in the same process (the webview's libwebviewchromium.so, system
+//     libssl.so) are still covered.
 
 #include "pas.h"
 
@@ -143,18 +141,23 @@ static void OnSslHooked(bytehook_stub_t stub, int status_code, const char* calle
     (void)new_func;
     (void)prev_func;
     (void)arg;
-    // A successful chain is routine (and very chatty); only failures carry
-    // signal here. The install log below names the symbols once.
     if (status_code == 0) return;
     Log("native: ssl hook %s <- %s status=%d", sym_name ? sym_name : "?",
         caller_path_name ? caller_path_name : "?", status_code);
 }
 
 static void HookSslSym(const char* sym, void* proxy) {
-    // Broad owner match: catches the system libssl/libcrypto AND any
-    // game-bundled BoringSSL/OpenSSL packaged under a non-standard name.
-    // A miss in one owner simply reports a failure and the next is tried.
-    static const char* const kOwners[] = {"ssl", "crypto", "boring"};
+    // Owner match is deliberately broad: any library whose name contains
+    // one of these substrings is a candidate. A miss in one owner is
+    // harmless - bytehook simply does not find the symbol there. The list
+    // covers system libssl/libcrypto, game-bundled BoringSSL/OpenSSL, and
+    // the chromium/webview TLS stacks where BoringSSL is compiled in.
+    static const char* const kOwners[] = {
+        "ssl", "crypto", "boring",              // system + bundled OpenSSL/BoringSSL
+        "webviewchromium", "monochrome",        // chromium webview TLS (v2.3.4)
+        "chromium",                             // generic chromium libs
+        "mbedtls", "gnutls",                    // alternate TLS stacks
+    };
     for (size_t i = 0; i < sizeof(kOwners) / sizeof(kOwners[0]); i++) {
         bytehook_hook_partial(CallerAllowHooks, nullptr, kOwners[i], sym, proxy, OnSslHooked,
                               nullptr);
@@ -171,7 +174,7 @@ void InstallSslHooks() {
     HookSslSym("X509_verify_cert", (void*)MyX509VerifyCert);
     HookSslSym("X509_STORE_CTX_get_error", (void*)MyX509StoreCtxGetError);
     HookSslSym("X509_STORE_CTX_set_error", (void*)MyX509StoreCtxSetError);
-    Log("native: ssl unpin hooks installed (verify=NONE, owners=ssl/crypto/boring)");
+    Log("native: ssl unpin hooks installed (verify=NONE, owners=ssl/crypto/boring/webviewchromium/monochrome/chromium/mbedtls/gnutls)");
 }
 
 void SetSslUnpin(bool on) {
