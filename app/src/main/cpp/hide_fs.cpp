@@ -159,6 +159,10 @@ static const char* const kReconTokens[] = {
     "zygisk-module", "ro.boot", "ro.hardware", "topology", "related_cpus",
     "affected_cpus", "core_id", "cluster", "devicetree", "compatible", "serial",
     "board", "platform", "vendor_id", "bogomips", "physical_package",
+    // TLS surfaces: makes the next Diagnose capture show whether Big Farm
+    // touches the mitmproxy chain from Java, native, or bundled-SSL paths.
+    "libssl", "libcrypto", "boring", "conscrypt", "cacerts",
+    ".pem", ".crt", ".cer", "pinning", "truststore", "truststore",
 };
 
 static bool ReconHit(const char* s) {

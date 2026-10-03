@@ -1,13 +1,18 @@
 // Native TLS verification bypass (SSL_set_verify / X509_verify_cert).
 //
-// Complements the Java-side unpinning (HookSslUnpin.kt / OkHttp
-// CertificatePinner) by neutralising certificate verification inside the
-// process's *native* TLS stack (BoringSSL/OpenSSL). SDKs, Cronet and some
-// game engines perform their chain / pinning checks in native code, where
-// Java hooks cannot reach.
+// Complements the Java-side unpinning (HookSslUnpin.kt) by neutralising
+// certificate verification inside the process's *native* TLS stack
+// (BoringSSL/OpenSSL). SDKs, Cronet and some game engines perform their
+// chain checks in native code, where Java hooks cannot reach.
 //
-// Scope: installed only in scoped app processes, and only while the native
-// addon is enabled. The module never runs anywhere else.
+// Owner matching is deliberately BROAD: the module attaches to any library
+// whose name contains "ssl", "crypto" or "boring", so game-bundled
+// BoringSSL/OpenSSL shipped under a non-standard name (libssl_bundled.so,
+// libcrypto3.so, libboring_ssl.so, etc.) is caught alongside the system
+// libssl.so / libcrypto.so. Bytehook resolves owners by substring regex, so
+// a miss simply reports a failure and the next owner is tried.
+//
+// Installed only when the native addon is enabled, in scoped app processes.
 //
 // Hooks (bytehook, caller-filtered like every other group):
 //   SSL_set_verify             -> forces SSL_VERIFY_NONE
@@ -17,18 +22,21 @@
 //   SSL_get_verify_result      -> returns X509_V_OK
 //   X509_verify_cert           -> returns 1 (success)
 //   X509_STORE_CTX_get_error   -> returns X509_V_OK
+//   X509_STORE_CTX_set_error   -> forced to X509_V_OK (pinning frameworks
+//                                 sometimes stamp an error after their own
+//                                 comparison - that set is neutralised too)
 //
 // Known limits (read before expecting miracles):
 //   * Only dynamically visible symbols are reachable. A library that
 //     statically links BoringSSL with hidden visibility (Chrome's
-//     libmonochrome.so, Unity's bundled curl/OpenSSL, Flutter) does not
-//     export these names and cannot be hooked by name.
+//     libmonochrome.so, Unity il2cpp's bundled SSL) does not export these
+//     names and cannot be hooked by name. Address-based scanning is the
+//     only path for that case - out of scope for this build.
 //   * Callers living in ARM-translated APK libraries are skipped by the
 //     shared CallerAllow filter (patching translated code corrupts it), so
-//     on an x86_64 emulator an arm64 game's own bundled SSL stack is out of
-//     reach. The Java-layer unpinning still covers those apps' Java TLS.
-//   * Verification is bypassed for every TLS connection in the scoped
-//     process, not only a pinned host. That is inherent to unpinning.
+//     on an x86_64 emulator an arm64 game's own bundled SSL stack is out
+//     of reach even when the symbols are exported. Java-layer unpinning
+//     still covers those apps' Java TLS.
 
 #include "pas.h"
 
@@ -48,8 +56,8 @@ static const int kX509Ok = 0;            // X509_V_OK
 static volatile bool g_ssl_unpin = true;  // default ON (scoped apps only)
 
 // ---------------------------------------------------------------------------
-// proxies - every one keeps the original callback, only the mode / verdict is
-// overridden, so nothing downstream sees a null where it expected a function.
+// proxies - every one forwards the original call and then overrides only the
+// verdict, so nothing downstream sees a null where it expected a function.
 // ---------------------------------------------------------------------------
 
 static void MySslSetVerify(void* ssl, int mode, void* cb) {
@@ -85,10 +93,9 @@ static long MySslGetVerifyResult(const void* ssl) {
 
 static int MyX509VerifyCert(void* ctx) {
     BYTEHOOK_STACK_SCOPE();
-    // Run the real verification first so the store context is fully
-    // populated, then override the verdict. Callers that read the error
-    // afterwards get X509_V_OK from MyX509StoreCtxGetError, so the two
-    // answers agree.
+    // Run the real verification first so the store context is populated
+    // (some callers read the peer chain afterwards), then override the
+    // verdict. Consistent with MyX509StoreCtxGetError returning OK.
     int r = BYTEHOOK_CALL_PREV(MyX509VerifyCert, ctx);
     (void)r;
     return 1;
@@ -99,6 +106,12 @@ static int MyX509StoreCtxGetError(const void* ctx) {
     int r = BYTEHOOK_CALL_PREV(MyX509StoreCtxGetError, ctx);
     (void)r;
     return kX509Ok;
+}
+
+static void MyX509StoreCtxSetError(void* ctx, int err) {
+    BYTEHOOK_STACK_SCOPE();
+    (void)err;
+    BYTEHOOK_CALL_PREV(MyX509StoreCtxSetError, ctx, kX509Ok);
 }
 
 // ---------------------------------------------------------------------------
@@ -112,17 +125,17 @@ static void OnSslHooked(bytehook_stub_t stub, int status_code, const char* calle
     (void)prev_func;
     (void)arg;
     // A successful chain is routine (and very chatty); only failures carry
-    // signal here.
+    // signal here. The install log below names the symbols once.
     if (status_code == 0) return;
     Log("native: ssl hook %s <- %s status=%d", sym_name ? sym_name : "?",
         caller_path_name ? caller_path_name : "?", status_code);
 }
 
 static void HookSslSym(const char* sym, void* proxy) {
-    // The symbols live in libssl (SSL_*) and libcrypto (X509_*); hooking both
-    // owners covers a caller that links either one, and a miss in the other
-    // owner simply reports a failure and is ignored.
-    static const char* const kOwners[] = {"libssl", "libcrypto"};
+    // Broad owner match: catches the system libssl/libcrypto AND any
+    // game-bundled BoringSSL/OpenSSL packaged under a non-standard name.
+    // A miss in one owner simply reports a failure and the next is tried.
+    static const char* const kOwners[] = {"ssl", "crypto", "boring"};
     for (size_t i = 0; i < sizeof(kOwners) / sizeof(kOwners[0]); i++) {
         bytehook_hook_partial(CallerAllowHooks, nullptr, kOwners[i], sym, proxy, OnSslHooked,
                               nullptr);
@@ -138,7 +151,8 @@ void InstallSslHooks() {
     HookSslSym("SSL_get_verify_result", (void*)MySslGetVerifyResult);
     HookSslSym("X509_verify_cert", (void*)MyX509VerifyCert);
     HookSslSym("X509_STORE_CTX_get_error", (void*)MyX509StoreCtxGetError);
-    Log("native: ssl unpin hooks installed (verify=NONE)");
+    HookSslSym("X509_STORE_CTX_set_error", (void*)MyX509StoreCtxSetError);
+    Log("native: ssl unpin hooks installed (verify=NONE, owners=ssl/crypto/boring)");
 }
 
 void SetSslUnpin(bool on) {

@@ -1779,7 +1779,7 @@ class MainActivity : Activity() {
                 }
                 val focus = runSu(
                     "logcat -d -t 20000 | grep -a PerAppSpoofer | " +
-                        "grep -aE 'MediaDrm|LinkProperties|getByName|webrtc|spoof applied|hook failed|avail|gl loader-chain' | tail -n 250"
+                        "grep -aE 'MediaDrm|LinkProperties|getByName|webrtc|spoof applied|hook failed|avail|gl loader-chain|ssl|tls|x509|SslError|stage4d' | tail -n 300"
                 )
                 if (focus != null) rootWorks = true
                 if (!focus.isNullOrBlank()) {
@@ -1870,7 +1870,7 @@ class MainActivity : Activity() {
                 val crash = runSu("logcat -d -b crash -t 200 2>/dev/null")
                 sb.append("\n\n=== crash buffer ===\n").append(crash?.take(6000) ?: "(empty)")
                 val game = runSu(
-                    "logcat -d -t 600 2>/dev/null | grep -a -e bigfarm -e newmoon -e chromium -e FATAL -e ANR -e tombstone -e sandboxed | tail -n 160"
+                    "logcat -d -t 600 2>/dev/null | grep -a -e bigfarm -e newmoon -e chromium -e FATAL -e ANR -e tombstone -e sandboxed -e ssl -e SslError -e CertificatePinner -e X509 | tail -n 200"
                 )
                 sb.append("\n\n=== game + fatal tail ===\n").append(game?.take(9000) ?: "(none)")
                 val events = runSu("logcat -d -b events -t 120 2>/dev/null")

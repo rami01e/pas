@@ -1,29 +1,37 @@
 package com.kimera.pas.hooks
 
+import android.net.http.SslError
 import android.util.Log
+import android.webkit.SslErrorHandler
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import io.github.libxposed.api.XposedModule
 import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 import com.kimera.pas.spoof.SpoofState
-import java.security.cert.X509Certificate
-import javax.net.ssl.HttpsURLConnection
 
 /**
- * SSL unpinning + TLS verdict trace (per-app), replacing the earlier
- * frida-inject plan: the module is already injected into scoped apps from
- * process spawn, so the verdict logging runs in-process with no external
- * daemon. While Recon (DEBUG master) is on, every Java-layer TLS decision is
- * mirrored into the module log:
- *  - TrustManagerImpl (checkTrusted family and verifyChain): hostname + verdict
- *  - platform X509TrustManagerImpl.checkServerTrusted: chain errors
- *  - OkHostnameVerifier.verify: hostname verdict
- *  - okhttp3.CertificatePinner.check / check$okhttp: BYPASSED (unpin)
- *  - HttpsURLConnection SSLSocketFactory/HostnameVerifier: accepted
- *  - WebViewClient.onReceivedSslError: proceed + primaryError
- * All hooks pass calls through unmodified except CertificatePinner (no-op)
- * and onReceivedSslError (proceed). A game that rejects the mitmproxy chain
- * then shows exactly which stage rejected it, with the failing host.
+ * SSL unpinning (per-app): neutralizes the common Java-layer certificate
+ * pinning vectors so mitmproxy-style inspection works on scoped apps.
+ *
+ * Two independent surfaces are covered:
+ *
+ *  1. OkHttp pinning - CertificatePinner.check(...) made a no-op. This is
+ *     the vector used by apps whose HTTP layer is OkHttp (most modern SDKs).
+ *
+ *  2. WebView SSL errors - SslErrorHandler.cancel() is turned into
+ *     SslErrorHandler.proceed(). This is the EULA / in-game-browser path:
+ *     WebView reports a cert failure to the app's WebViewClient, the app
+ *     decides proceed() (accept) or cancel() (reject), and apps that reject
+ *     unknown chains silently kill every page load under mitmproxy. That
+ *     was almost certainly what was stalling Big Farm's EULA webview.
+ *
+ *     Also hooking the framework's WebViewClient.onReceivedSslError default
+ *     so any fallback path (app delegates to super) is auto-proceeded too.
+ *
+ * Compatible with TrustMe-style modules: this only removes enforcement, it
+ * does not alter trust evaluation or replace any trust manager.
  */
 class HookSslUnpin : XHook {
 
@@ -31,22 +39,20 @@ class HookSslUnpin : XHook {
         get() = "okhttp3.CertificatePinner"
 
     override fun injectHook(module: XposedModule) {
-        unpinOkHttp(module)
-        traceHostnameVerifier(module)
-        traceTrustManagerImpl(module)
-        tracePlatformTrustManager(module)
-        traceHttpsUrlConnection(module)
-        traceWebViewSslError(module)
+        var installed = 0
+        if (unpinOkHttp(module)) installed++
+        if (bypassWebViewSslErrors(module)) installed++
+        module.log(
+            Log.INFO, TAG,
+            "[PAS] ssl unpin: java hooks installed ($installed/2 surfaces active)"
+        )
     }
 
-    private fun logTls(module: XposedModule, tag: String, msg: String) {
-        if (SpoofState.reconOn) {
-            module.log(Log.INFO, TAG, "[PAS] tls/$tag: $msg")
-        }
-    }
-
-    /** okhttp pinning: bypass (existing behavior) + per-host trace. */
-    private fun unpinOkHttp(module: XposedModule) {
+    // ------------------------------------------------------------------
+    // Surface 1: OkHttp CertificatePinner
+    // ------------------------------------------------------------------
+    private fun unpinOkHttp(module: XposedModule): Boolean {
+        var any = false
         hookSafe(module, "ssl-unpin okhttp3.CertificatePinner") {
             val clazz = Class.forName("okhttp3.CertificatePinner")
             for (name in arrayOf("check", "check\$okhttp")) {
@@ -55,118 +61,89 @@ class HookSslUnpin : XHook {
                     if (m.parameterTypes.isEmpty()) continue
                     m.isAccessible = true
                     module.hook(m).intercept { chain ->
-                        val host = (chain.getArg(0) as? String) ?: "?"
-                        logTls(module, "okhttp-pins", "host=$host -> BYPASSED")
+                        if (SpoofState.reconOn) {
+                            module.log(
+                                Log.INFO, TAG,
+                                "[PAS] ssl unpin: CertificatePinner.${m.name} bypassed"
+                            )
+                        }
                         null
                     }
+                    any = true
                 }
             }
         }
+        return any
     }
 
-    /** Conscrypt TrustManagerImpl: the real trust verdict for most stacks. */
-    private fun traceTrustManagerImpl(module: XposedModule) {
-        hookSafe(module, "tls trace TrustManagerImpl") {
-            val clazz = Class.forName("com.android.org.conscrypt.TrustManagerImpl")
-            for (m in clazz.declaredMethods) {
-                if (m.name != "checkTrusted" && m.name != "verifyChain") continue
-                m.isAccessible = true
-                val kind = m.name
-                module.hook(m).intercept { chain ->
-                    val host = chain.args.firstOrNull { it is String } as? String ?: "?"
-                    return@intercept try {
-                        val r = chain.proceed()
-                        logTls(module, "tmimpl", "$kind host=$host -> TRUSTED")
-                        r
-                    } catch (t: Throwable) {
-                        logTls(module, "tmimpl", "$kind host=$host -> REJECTED: ${t.javaClass.simpleName}: ${t.message}")
-                        throw t
-                    }
+    // ------------------------------------------------------------------
+    // Surface 2: WebView SslErrorHandler.cancel() -> proceed()
+    // ------------------------------------------------------------------
+    //
+    // SslErrorHandler is a framework class with a stable signature
+    // (android.webkit.SslErrorHandler#proceed / #cancel). Apps must call
+    // one of the two on the handler instance the framework hands them in
+    // onReceivedSslError. Whatever their WebViewClient override does, the
+    // last call lands on this handler - so flipping cancel() into proceed()
+    // accepts every chain the app was going to reject.
+    private fun bypassWebViewSslErrors(module: XposedModule): Boolean {
+        var ok = false
+
+        hookSafe(module, "ssl-unpin SslErrorHandler.cancel->proceed") {
+            val cls = Class.forName("android.webkit.SslErrorHandler")
+            val cancel = cls.getDeclaredMethod("cancel")
+            val proceed = cls.getDeclaredMethod("proceed")
+            cancel.isAccessible = true
+            proceed.isAccessible = true
+            module.hook(cancel).intercept { chain ->
+                val self = chain.getThisObject()
+                if (SpoofState.reconOn) {
+                    module.log(
+                        Log.INFO, TAG,
+                        "[PAS] ssl unpin: SslErrorHandler.cancel() -> proceed()"
+                    )
                 }
+                // Force the accept path. If proceed() throws (already-handled
+                // or detached state), swallow - the load stays alive either
+                // way, and returning normally avoids the app's own cancel.
+                runCatching { proceed.invoke(self) }
+                null
             }
+            ok = true
         }
-    }
 
-    /** Platform default TM: surfaces raw chain validation errors. */
-    private fun tracePlatformTrustManager(module: XposedModule) {
-        hookSafe(module, "tls trace X509TrustManagerImpl") {
-            val clazz = Class.forName("com.android.org.bouncycastle.jsse.provider.X509TrustManagerImpl")
-            for (m in clazz.declaredMethods) {
-                if (m.name != "checkServerTrusted") continue
-                m.isAccessible = true
-                module.hook(m).intercept { chain ->
-                    val certs = (chain.getArg(0) as? Array<X509Certificate>)
-                    val subj = certs?.firstOrNull()?.subjectDN?.toString() ?: "?"
-                    return@intercept try {
-                        val r = chain.proceed()
-                        logTls(module, "platform-tm", "checkServerTrusted leaf=$subj -> TRUSTED")
-                        r
-                    } catch (t: Throwable) {
-                        logTls(module, "platform-tm", "checkServerTrusted leaf=$subj -> REJECTED: ${t.javaClass.simpleName}: ${t.message}")
-                        throw t
-                    }
-                }
-            }
-        }
-    }
-
-    /** OkHttp hostname verification (also used by conscrypt callers). */
-    private fun traceHostnameVerifier(module: XposedModule) {
-        hookSafe(module, "tls trace OkHostnameVerifier") {
-            val clazz = Class.forName("com.android.okhttp.internal.tls.OkHostnameVerifier")
-            for (m in clazz.declaredMethods) {
-                if (m.name != "verify") continue
-                m.isAccessible = true
-                module.hook(m).intercept { chain ->
-                    val host = (chain.getArg(0) as? String) ?: "?"
-                    val r = chain.proceed()
-                    logTls(module, "hostname", "verify host=$host -> $r")
-                    r
-                }
-            }
-        }
-    }
-
-    /** HttpsURLConnection defaults: accept whatever the app sets. */
-    private fun traceHttpsUrlConnection(module: XposedModule) {
-        hookSafe(module, "ssl-unpin HttpsURLConnection") {
-            val clazz = HttpsURLConnection::class.java
-            for (name in arrayOf("setSSLSocketFactory", "setHostnameVerifier", "setDefaultSSLSocketFactory", "setDefaultHostnameVerifier")) {
-                for (m in clazz.declaredMethods) {
-                    if (m.name != name) continue
-                    m.isAccessible = true
-                    module.hook(m).intercept { chain ->
-                        logTls(module, "hc", "$name called")
-                        chain.proceed()
-                    }
-                }
-            }
-        }
-    }
-
-    /** WebView TLS errors: proceed (unpin) + record the primary error code. */
-    private fun traceWebViewSslError(module: XposedModule) {
+        // Defensive: also cover the framework's default onReceivedSslError
+        // implementation. Apps that override without calling super never
+        // reach this (their override calls the handler directly, which the
+        // cancel hook above already covers). Apps that delegate to super
+        // hit this and get an auto-proceed without their default cancel.
         hookSafe(module, "ssl-unpin WebViewClient.onReceivedSslError") {
-            val clazz = Class.forName("android.webkit.WebViewClient")
-            for (m in clazz.declaredMethods) {
-                if (m.name != "onReceivedSslError") continue
-                m.isAccessible = true
-                module.hook(m).intercept { chain ->
-                    val err = chain.args.getOrNull(2)
-                    val primary = try {
-                        err?.javaClass?.getMethod("getPrimaryError")?.invoke(err)
-                    } catch (_: Throwable) {
-                        null
+            val cls = WebViewClient::class.java
+            val m = cls.getDeclaredMethod(
+                "onReceivedSslError",
+                WebView::class.java,
+                SslErrorHandler::class.java,
+                SslError::class.java
+            )
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                val handler = chain.getArg(1) as? SslErrorHandler
+                if (handler != null) {
+                    if (SpoofState.reconOn) {
+                        module.log(
+                            Log.INFO, TAG,
+                            "[PAS] ssl unpin: WebViewClient.onReceivedSslError -> proceed()"
+                        )
                     }
-                    logTls(module, "webview-ssl", "onReceivedSslError primaryError=$primary -> proceed")
-                    try {
-                        val handler = chain.args.getOrNull(1)
-                        handler?.javaClass?.getMethod("proceed")?.invoke(handler)
-                    } catch (_: Throwable) {
-                    }
+                    runCatching { handler.proceed() }
                     null
+                } else {
+                    chain.proceed()
                 }
             }
+            ok = true
         }
+
+        return ok
     }
 }
