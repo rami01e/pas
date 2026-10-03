@@ -1909,7 +1909,7 @@ class MainActivity : Activity() {
                     fridaProc = runSu("ps -A 2>/dev/null | grep -a frida-server")
                     val fp = runSu("pidof frida-server 2>/dev/null")
                     val fpOk = !fp.isNullOrBlank() && !fp.contains("exit code") && fp.trim().isNotEmpty()
-                    sb.append("auto-start: ").append(if (fpOk) "running (pid " + fp.trim() + ")" else "FAILED").append("\n")
+                    sb.append("auto-start: ").append(if (fpOk) "running (pid " + (fp ?: "").trim() + ")" else "FAILED").append("\n")
                     if (!fpOk) {
                         val flog = runSu("head -c 600 '" + fridaLog.absolutePath + "' 2>/dev/null")
                         if (!flog.isNullOrBlank()) sb.append("frida.log: ").append(flog).append("\n")
