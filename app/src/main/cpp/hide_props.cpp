@@ -106,7 +106,10 @@ static bool IsSpoofTarget(const char* name) {
         "ro.soc.model",
         "ro.soc.manufacturer",
     };
-    if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0]))) return true;
+    // The SDK prop is only spoofed upward-safe: values below 35 break the
+    // WebView provider (see spoofcore J1 note), so the native layer falls
+    // back to the real value when the requested level is under the floor.
+    if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0])) && g_sdk_val >= 35) return true;
     if (g_abi_on && NameIn(name, kAbi, sizeof(kAbi) / sizeof(kAbi[0]))) return true;
     if (CpuSpoofActive() && NameIn(name, kSoc, sizeof(kSoc) / sizeof(kSoc[0]))) return true;
     return false;
