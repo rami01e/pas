@@ -1149,6 +1149,19 @@ static long MySyscall(long number, ...) {
     if (number == __NR_ptrace) ReconNote("syscall-ptrace", "ptrace", 0);
 #endif
 #ifdef __NR_openat
+    // Hidden network paths via raw syscall: houdini-translated and hardened
+    // apps call openat directly, bypassing libc. Serving EACCES there leaks
+    // the path's existence (a real device returns ENOENT - the file simply
+    // does not exist). Reject with ENOENT before the kernel ever sees it.
+    if (number == __NR_openat) {
+        const char* hpath = (const char*)a1;
+        if (hpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY && IsHiddenPath(hpath)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
+#endif
+#ifdef __NR_openat
     if (CpuSpoofActive() && number == __NR_openat) {
         const char* cpath = (const char*)a1;
         if (cpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY &&
@@ -1167,6 +1180,13 @@ static long MySyscall(long number, ...) {
     }
 #endif
 #ifdef __NR_open
+    if (number == __NR_open) {
+        const char* hpath = (const char*)a0;
+        if (hpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY && IsHiddenPath(hpath)) {
+            errno = ENOENT;
+            return -1;
+        }
+    }
     if (CpuSpoofActive() && number == __NR_open) {
         const char* cpath = (const char*)a0;
         if (cpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY &&
