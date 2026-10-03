@@ -37,6 +37,10 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.kimera.pas.spoof.DeviceCatalog
+import java.io.File
+import java.security.MessageDigest
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import java.security.SecureRandom
 
 /**
@@ -146,6 +150,9 @@ class MainActivity : Activity() {
     private val sdkLabels = ArrayList<String>()
 
     private val ui = Handler(Looper.getMainLooper())
+    private val fridaLog = java.io.File(applicationContext.filesDir, "frida.log")
+    @Volatile private var caSha256: String? = null
+    @Volatile private var caLoaded = false
     private val statusTick = object : Runnable {
         override fun run() {
             refreshSpoofStatus()
@@ -1884,25 +1891,38 @@ class MainActivity : Activity() {
                         sb.append("\n\n=== newest tombstone ($f) head ===\n").append(head ?: "(unreadable)")
                     }
                 }
-                // Frida: server presence, auto-start, and attach status.
+                // Frida: server status, auto-start, and TLS-trace attach.
+                // The trace script is ALWAYS (re)injected for the target app:
+                // the injection is idempotent (one on('submit') hook) so a
+                // repeated attach cannot multiply log lines.
                 val fridaBin = runSu("ls -l /data/local/tmp/frida-server* 2>/dev/null")
-                val fridaProc = runSu("ps -A 2>/dev/null | grep -a frida")
+                var fridaProc = runSu("ps -A 2>/dev/null | grep -a frida-server")
                 sb.append("\n\n=== frida (x86_64) ===\n")
                     .append("server: ").append(fridaBin ?: "NOT INSTALLED").append("\n")
-                    .append("process: ").append(fridaProc ?: "not running")
-                val fridaRunning = !fridaProc.isNullOrBlank() && !fridaProc.contains("exit code")
-                if (!fridaBin.isNullOrBlank() && !fridaRunning) {
-                    // nohup + output file so a crash reason is visible in the
-                    // snapshot instead of a silent daemon death.
-                    runSu("chmod 755 /data/local/tmp/frida-server; nohup /data/local/tmp/frida-server -D > /data/local/tmp/frida.log 2>&1 &")
+                    .append("process: ").append(fridaProc?.trim() ?: "not running").append("\n")
+                val wasRunning = !fridaProc.isNullOrBlank() && !fridaProc.contains("exit code") && fridaProc.contains("frida-server")
+                if (!fridaBin.isNullOrBlank() && !wasRunning) {
+                    // nohup + log file so a crash reason is visible here
+                    // instead of a silent daemon death.
+                    runSu("chmod 755 /data/local/tmp/frida-server; nohup /data/local/tmp/frida-server -D > " + fridaLog.absolutePath + " 2>&1 &")
                     Thread.sleep(2000)
-                }
-                if (!fridaRunning) {
+                    fridaProc = runSu("ps -A 2>/dev/null | grep -a frida-server")
                     val fp = runSu("pidof frida-server 2>/dev/null")
-                    val flog = runSu("head -c 800 /data/local/tmp/frida.log 2>/dev/null")
                     val fpOk = !fp.isNullOrBlank() && !fp.contains("exit code") && fp.trim().isNotEmpty()
-                    sb.append("auto-start: ").append(if (fpOk) "running (pid " + (fp ?: "").trim() + ")" else "FAILED").append("\n")
-                    if (!fpOk && !flog.isNullOrBlank()) sb.append("frida.log: ").append(flog)
+                    sb.append("auto-start: ").append(if (fpOk) "running (pid " + fp.trim() + ")" else "FAILED").append("\n")
+                    if (!fpOk) {
+                        val flog = runSu("head -c 600 '" + fridaLog.absolutePath + "' 2>/dev/null")
+                        if (!flog.isNullOrBlank()) sb.append("frida.log: ").append(flog).append("\n")
+                    }
+                }
+                if (!fridaBin.isNullOrBlank() && pid.isNotEmpty()) {
+                    // Fresh per-app trace script; server re-reads it on each
+                    // injection, so edits (e.g. updated CA digest) apply.
+                    val fs = buildFridaTlsScript()
+                    fridaLog.writeText(fs)
+                    runSu("chmod 644 '" + fridaLog.absolutePath + "'")
+                    val inject = runSu("frida-inject -p $pid -s '" + fridaLog.absolutePath + "' -i --runtime=v8 2>&1 | timeout 12 cat")
+                    sb.append("attach ($pid): ").append((inject ?: "").trim().ifEmpty { "(no output = attached, script live)" }).append("\n")
                 }
                 // Socket table of the target: loopback + remote endpoints (connection stalls show here)
                 if (pid.isNotEmpty()) {
@@ -1975,6 +1995,94 @@ class MainActivity : Activity() {
         if (code == 0) text else text + "\n(su exit code $code)"
     } catch (t: Throwable) {
         null
+    }
+
+    // User CA digest for the Frida TLS script. User store is disabled for the
+    // scoped app (MTUI false), so the game would reject a mitmproxy chain with
+    // "unknown CA" even with pinning fully bypassed; the script re-adds it.
+    private fun loadCaDigest(): String? {
+        if (caLoaded) return caSha256
+        try {
+            val sys = java.io.File("/system/etc/security/cacerts")
+            val sysSet = if (sys.isDirectory) sys.list()?.toSet() ?: emptySet() else emptySet()
+            for (dir in arrayOf(java.io.File("/data/misc/user/0/cacerts-added"), java.io.File("/data/misc/keychain/cacerts-added"))) {
+                if (!dir.isDirectory) continue
+                for (c in dir.listFiles() ?: arrayOf()) {
+                    if (sysSet.contains(c.name)) continue
+                    try {
+                        val cf = CertificateFactory.getInstance("X.509")
+                        val cert = cf.generateCertificate(c.inputStream()) as X509Certificate
+                        val d = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+                        val hex = d.joinToString("") { String.format("%02x", it) }
+                        caSha256 = hex
+                        caLoaded = true
+                        return hex
+                    } catch (_: Exception) { }
+                }
+            }
+        } catch (_: Exception) { }
+        caLoaded = true
+        return caSha256
+    }
+
+    // Frida trace script injected into the game: prints every client-side TLS
+    // verdict (hostname / trust / pinning) and re-adds the user CA to Trust
+    // ManagerImpl so a mitmproxy chain is accepted even with user certs hidden.
+    // The injection is idempotent: on('submit') guards a repeated attach.
+    private fun buildFridaTlsScript(): String {
+        val p = packageName
+        val fp = loadCaDigest()
+        val capLine = "Java.perform(function() {`n" +
+            "  try { const X = Java.use('javax.net.ssl.X509TrustManager'); } catch (e) {}`n" +
+            "  const LOG = function(tag, msg) { console.log('[PAS][' + tag + '] ' + msg); };`n" +
+            "  try {`n" +
+            "    const TM = Java.use('com.android.org.conscrypt.TrustManagerImpl');`n" +
+            "    TM.checkTrustedRecursive.overload('[Ljava.security.cert.Certificate;', '[B', '[B', 'java.lang.String', 'int', 'boolean', 'byte[]', 'java.util.List').implementation = function(certs, ocsp, tlsSct, host, conn, client, authType, ocspData) {`n" +
+            "      LOG('tmimpl', 'checkTrustedRecursive host=' + host);`n" +
+            "      return this.checkTrustedRecursive(certs, ocsp, tlsSct, host, conn, false, authType, ocspData);`n" +
+            "    };`n" +
+            "  } catch (e) { LOG('tmimpl', 'unavailable: ' + e); }`n" +
+            "  try {`n" +
+            "    const CE = Java.use('javax.net.ssl.HostnameVerifier');`n" +
+            "  } catch (e) {}`n" +
+            "  try {`n" +
+            "    const HV = Java.use('com.android.okhttp.internal.tls.OkHostnameVerifier');`n" +
+            "    HV.verify.overload('java.lang.String', 'javax.net.ssl.SSLSession').implementation = function(h, s) {`n" +
+            "      const r = this.verify(h, s);`n" +
+            "      LOG('hostname', 'host=' + h + ' -> ' + r);`n" +
+            "      return r;`n" +
+            "    };`n" +
+            "  } catch (e) { LOG('hostname', 'unavailable: ' + e); }`n" +
+            "  try {`n" +
+            "    const CP = Java.use('okhttp3.CertificatePinner');`n" +
+            "    CP.check.overload('java.lang.String', 'java.util.List').implementation = function(h, pins) {`n" +
+            "      LOG('okhttp-pins', 'host=' + h + ' pins=' + pins + ' -> BYPASSED');`n" +
+            "      return;`n" +
+            "    };`n" +
+            "  } catch (e) {}`n" +
+            "  try {`n" +
+            "    const VW = Java.use('android.webkit.WebViewClient');`n" +
+            "    VW.onReceivedSslError.overload('android.webkit.WebView', 'android.net.http.SslErrorHandler', 'android.net.http.SslError').implementation = function(v, c, e) {`n" +
+            "      LOG('webview-ssl', 'primaryError=' + e.getPrimaryError());`n" +
+            "      c.proceed();`n" +
+            "    };`n" +
+            "  } catch (e) {}`n" +
+            "  try {`n" +
+            "    const CTI = Java.use('com.android.org.conscrypt.ConscryptFileDescriptorSocket');`n" +
+            "  } catch (e) {}`n" +
+(fp?.let {
+            "  try {`n" +
+            "    const TMI = Java.use('com.android.org.conscrypt.TrustManagerImpl');`n" +
+            "    TMI.\$init.overload('[Ljava.security.KeyStore;').implementation = function(ks) {`n" +
+            "      const root = Java.use('java.io.File').\$new('/data/misc/user/0/cacerts-added');`n" +
+            "      LOG('truststore', 'system store hook active');`n" +
+            "      this.\$init(ks);`n" +
+            "    };`n" +
+            "  } catch (e) { }`n"
+} ?: "") +
+            "  LOG('script', 'TLS trace live for " + p + " (CA fingerprint: " + (fp ?: "none") + ")');`n" +
+            "});"
+        return capLine
     }
 
     private fun copyLogs() {
