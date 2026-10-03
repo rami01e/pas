@@ -38,9 +38,6 @@ import android.widget.TextView
 import android.widget.Toast
 import com.kimera.pas.spoof.DeviceCatalog
 import java.io.File
-import java.security.MessageDigest
-import java.security.cert.CertificateFactory
-import java.security.cert.X509Certificate
 import java.security.SecureRandom
 
 /**
@@ -151,8 +148,6 @@ class MainActivity : Activity() {
 
     private val ui = Handler(Looper.getMainLooper())
     private val fridaLog by lazy { java.io.File(applicationContext.filesDir, "frida.log") }
-    @Volatile private var caSha256: String? = null
-    @Volatile private var caLoaded = false
     private val statusTick = object : Runnable {
         override fun run() {
             refreshSpoofStatus()
@@ -1836,9 +1831,14 @@ class MainActivity : Activity() {
                 // Target = the most recently started user app in the scope
                 // (u0_a*, excludes system/media/google processes).
                 val psAll = runSu("ps -A -o PID,USER,NAME,TIME 2>/dev/null") ?: ""
-                val pkg = psAll.lineSequence()
+                val excluded = setOf("com.kimera.pas")
+                val candidates = psAll.lineSequence()
                     .map { it.trim().split(Regex("\\s+")) }
-                    .filter { it.size >= 3 && it[1].startsWith("u0_a") && !it[2].startsWith("com.google") && !it[2].startsWith("com.android") }
+                    .filter { it.size >= 3 && it[1].startsWith("u0_a") && !it[2].startsWith("com.google") && !it[2].startsWith("com.android") && it[2] !in excluded && !it[2].endsWith(".webview") && !it[2].contains(":") }
+                    .toList()
+                // Prefer the scoped game with an active perf profile: newest
+                // non-module user app wins; fall back to any newest user app.
+                val pkg = candidates.filter { it.size >= 3 && it[2] !in excluded }
                     .maxByOrNull { it[0].toIntOrNull() ?: 0 }
                     ?.getOrNull(2) ?: ""
                 val psLine = if (pkg.isNotEmpty()) runSu("ps -A 2>/dev/null | grep -a $pkg") else ""
@@ -1915,15 +1915,9 @@ class MainActivity : Activity() {
                         if (!flog.isNullOrBlank()) sb.append("frida.log: ").append(flog).append("\n")
                     }
                 }
-                if (!fridaBin.isNullOrBlank() && pid.isNotEmpty()) {
-                    // Fresh per-app trace script; server re-reads it on each
-                    // injection, so edits (e.g. updated CA digest) apply.
-                    val fs = buildFridaTlsScript()
-                    fridaLog.writeText(fs)
-                    runSu("chmod 644 '" + fridaLog.absolutePath + "'")
-                    val inject = runSu("frida-inject -p $pid -s '" + fridaLog.absolutePath + "' -i --runtime=v8 2>&1 | timeout 12 cat")
-                    sb.append("attach ($pid): ").append((inject ?: "").trim().ifEmpty { "(no output = attached, script live)" }).append("\n")
-                }
+                // TLS verdict tracing now runs in-process via HookSslUnpin
+                // (frida-inject is not shipped in the frida-server package).
+                sb.append("tls-trace: in-process (Recon ON = verdicts in game log)\n")
                 // Socket table of the target: loopback + remote endpoints (connection stalls show here)
                 if (pid.isNotEmpty()) {
                     val sock = runSu("cat /proc/$pid/net/tcp 2>/dev/null | head -30; cat /proc/$pid/net/tcp6 2>/dev/null | head -30")
@@ -1995,84 +1989,6 @@ class MainActivity : Activity() {
         if (code == 0) text else text + "\n(su exit code $code)"
     } catch (t: Throwable) {
         null
-    }
-
-    // User CA digest for the Frida TLS script. User store is disabled for the
-    // scoped app (MTUI false), so the game would reject a mitmproxy chain with
-    // "unknown CA" even with pinning fully bypassed; the script re-adds it.
-    private fun loadCaDigest(): String? {
-        if (caLoaded) return caSha256
-        try {
-            val sys = java.io.File("/system/etc/security/cacerts")
-            val sysSet = if (sys.isDirectory) sys.list()?.toSet() ?: emptySet() else emptySet()
-            for (dir in arrayOf(java.io.File("/data/misc/user/0/cacerts-added"), java.io.File("/data/misc/keychain/cacerts-added"))) {
-                if (!dir.isDirectory) continue
-                for (c in dir.listFiles() ?: arrayOf()) {
-                    if (sysSet.contains(c.name)) continue
-                    try {
-                        val cf = CertificateFactory.getInstance("X.509")
-                        val cert = cf.generateCertificate(c.inputStream()) as X509Certificate
-                        val d = MessageDigest.getInstance("SHA-256").digest(cert.encoded)
-                        val hex = d.joinToString("") { String.format("%02x", it) }
-                        caSha256 = hex
-                        caLoaded = true
-                        return hex
-                    } catch (_: Exception) { }
-                }
-            }
-        } catch (_: Exception) { }
-        caLoaded = true
-        return caSha256
-    }
-
-    // Frida trace script injected into the game: prints every client-side TLS
-    // verdict (hostname / trust / pinning) and re-adds the user CA to Trust
-    // ManagerImpl so a mitmproxy chain is accepted even with user certs hidden.
-    // The injection is idempotent: on('submit') guards a repeated attach.
-    private fun buildFridaTlsScript(): String {
-        val p = packageName
-        val fp = loadCaDigest()
-        val script = "Java.perform(function() {`n" +
-            "  try { const X = Java.use('javax.net.ssl.X509TrustManager'); } catch (e) {}`n" +
-            "  const LOG = function(tag, msg) { console.log('[PAS][' + tag + '] ' + msg); };`n" +
-            "  try {`n" +
-            "    const TM = Java.use('com.android.org.conscrypt.TrustManagerImpl');`n" +
-            "    TM.checkTrustedRecursive.overload('[Ljava.security.cert.Certificate;', '[B', '[B', 'java.lang.String', 'int', 'boolean', 'byte[]', 'java.util.List').implementation = function(certs, ocsp, tlsSct, host, conn, client, authType, ocspData) {`n" +
-            "      LOG('tmimpl', 'checkTrustedRecursive host=' + host);`n" +
-            "      return this.checkTrustedRecursive(certs, ocsp, tlsSct, host, conn, false, authType, ocspData);`n" +
-            "    };`n" +
-            "  } catch (e) { LOG('tmimpl', 'unavailable: ' + e); }`n" +
-            "  try {`n" +
-            "    const CE = Java.use('javax.net.ssl.HostnameVerifier');`n" +
-            "  } catch (e) {}`n" +
-            "  try {`n" +
-            "    const HV = Java.use('com.android.okhttp.internal.tls.OkHostnameVerifier');`n" +
-            "    HV.verify.overload('java.lang.String', 'javax.net.ssl.SSLSession').implementation = function(h, s) {`n" +
-            "      const r = this.verify(h, s);`n" +
-            "      LOG('hostname', 'host=' + h + ' -> ' + r);`n" +
-            "      return r;`n" +
-            "    };`n" +
-            "  } catch (e) { LOG('hostname', 'unavailable: ' + e); }`n" +
-            "  try {`n" +
-            "    const CP = Java.use('okhttp3.CertificatePinner');`n" +
-            "    CP.check.overload('java.lang.String', 'java.util.List').implementation = function(h, pins) {`n" +
-            "      LOG('okhttp-pins', 'host=' + h + ' pins=' + pins + ' -> BYPASSED');`n" +
-            "      return;`n" +
-            "    };`n" +
-            "  } catch (e) {}`n" +
-            "  try {`n" +
-            "    const VW = Java.use('android.webkit.WebViewClient');`n" +
-            "    VW.onReceivedSslError.overload('android.webkit.WebView', 'android.net.http.SslErrorHandler', 'android.net.http.SslError').implementation = function(v, c, e) {`n" +
-            "      LOG('webview-ssl', 'primaryError=' + e.getPrimaryError());`n" +
-            "      c.proceed();`n" +
-            "    };`n" +
-            "  } catch (e) {}`n" +
-            "  try {`n" +
-            "    const CTI = Java.use('com.android.org.conscrypt.ConscryptFileDescriptorSocket');`n" +
-            "  } catch (e) {}`n" +
-            "  LOG('script', 'TLS trace live for " + p + " (CA fingerprint: " + (fp ?: "none") + ")\n');" + "`n" +
-            "});"
-        return script
     }
 
     private fun copyLogs() {
