@@ -241,7 +241,7 @@ void InstallSslArm64Hooks() {
         if (s.bytes.empty()) continue;  // placeholder until signatures are filled
         void* addr = ScanLibForSignature("libil2cpp.so", s);
         if (addr == nullptr) continue;
-        void* stub = shadowhook_hook_addr(addr, s.proxy, nullptr);
+        void* stub = shadowhook_hook_sym_addr(addr, s.proxy, nullptr);
         if (stub != nullptr) {
             char detail[160];
             snprintf(detail, sizeof(detail), "%s @ 0x%llx (pattern)",
