@@ -214,7 +214,7 @@ object SpoofCore {
         // Always deliver the config first: it releases the native hook gate
         // (native addon on/off + compatibility mode).
         runCatching {
-            nativeSetConfig(useSdk, if (useSdk) sdkVal else 0, abiOn, abiMode, compat, nativeOn)
+            nativeSetConfig(useSdk, if (useSdk) sdkEff else 0, abiOn, abiMode, compat, nativeOn)
         }
 
         if (!nativeOn) {
@@ -235,9 +235,17 @@ object SpoofCore {
             }
         }
 
+        // WebView provider safety: Chromium 6432+ calls AconfigPackage.load(),
+        // an API that exists only on SDK 35+. Reporting a lower SDK makes the
+        // provider crash (NoSuchMethodError) and every webview in the app
+        // silently dies - the Big Farm / Sunshine stall. The provider
+        // processes see the truth; other processes may still be clamped to
+        // the true device SDK as the floor.
+        val sdkFloor = 35
+        val sdkEff = if (sdkVal < sdkFloor) sdkFloor else sdkVal
         if (useSdk) {
-            patch(Build.VERSION::class.java, "SDK_INT", sdkVal, "SDK_INT")
-            releaseFor(sdkVal)?.let { patch(Build.VERSION::class.java, "RELEASE", it, "RELEASE") }
+            patch(Build.VERSION::class.java, "SDK_INT", sdkEff, "SDK_INT")
+            releaseFor(sdkEff)?.let { patch(Build.VERSION::class.java, "RELEASE", it, "RELEASE") }
         }
         if (SpoofState.bootloader.isNotEmpty()) {
             patch(Build::class.java, "BOOTLOADER", SpoofState.bootloader, "BOOTLOADER")
@@ -275,7 +283,7 @@ object SpoofCore {
         }
         Log.i(
             TAG,
-            "[PAS] spoof applied: sdk=$useSdk/$sdkVal abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
+            "[PAS] spoof applied: sdk=$useSdk/$sdkEff abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
         )
     }
 

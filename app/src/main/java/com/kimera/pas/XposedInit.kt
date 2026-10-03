@@ -15,6 +15,7 @@ import com.kimera.pas.hooks.HookNetworkInfo
 import com.kimera.pas.hooks.HookNetworkInterface
 import com.kimera.pas.hooks.HookNetworkRequestBuilder
 import com.kimera.pas.hooks.HookRecon
+import com.kimera.pas.hooks.HookSslUnpin
 
 const val TAG = "PerAppSpoofer"
 
@@ -73,6 +74,7 @@ class XposedInit : XposedModule() {
                 HookNetworkRequestBuilder(),
                 HookLinkProperties(),
                 HookMediaDrm(),
+                HookSslUnpin(),
                 HookGsfId(),
                 HookGpu(),
                 HookRecon(),
