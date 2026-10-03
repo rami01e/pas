@@ -14,7 +14,7 @@ import java.security.cert.X509Certificate
  * process spawn, so the verdict logging runs in-process with no external
  * daemon. While Recon (DEBUG master) is on, every Java-layer TLS decision is
  * mirrored into the module log:
- *  - TrustManagerImpl.checkTrusted*/verifyChain: hostname + verdict
+ *  - TrustManagerImpl (checkTrusted family and verifyChain): hostname + verdict
  *  - platform X509TrustManagerImpl.checkServerTrusted: chain errors
  *  - OkHostnameVerifier.verify: hostname verdict
  *  - okhttp3.CertificatePinner.check / check$okhttp: BYPASSED (unpin)
