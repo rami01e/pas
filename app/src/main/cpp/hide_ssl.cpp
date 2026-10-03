@@ -164,8 +164,27 @@ static void HookSslSym(const char* sym, void* proxy) {
     }
 }
 
+// Diagnostic: query the process-global symbol table for the SSL/X509 verify
+// entry points. If any of these return non-null, that symbol is exported by
+// *some* loaded library and bytehook could in principle hook it (subject to
+// translation-layer limits). If all return null, the app's SSL is either
+// statically linked with hidden visibility or not present by that name -
+// in which case no name-based approach will ever reach it.
+static void ProbeSslSymbols() {
+    static const char* const kProbe[] = {
+        "SSL_set_verify", "SSL_CTX_set_verify", "SSL_set_custom_verify",
+        "SSL_CTX_set_custom_verify", "SSL_get_verify_result",
+        "X509_verify_cert", "X509_STORE_CTX_get_error", "X509_STORE_CTX_set_error",
+    };
+    for (const char* n : kProbe) {
+        void* p = dlsym(RTLD_DEFAULT, n);
+        Log("native: ssl probe %s = %p", n, p);
+    }
+}
+
 void InstallSslHooks() {
     if (!g_ssl_unpin) return;
+    ProbeSslSymbols();
     HookSslSym("SSL_set_verify", (void*)MySslSetVerify);
     HookSslSym("SSL_CTX_set_verify", (void*)MySslCtxSetVerify);
     HookSslSym("SSL_set_custom_verify", (void*)MySslSetCustomVerify);
