@@ -678,13 +678,19 @@ static void* InitWorker(void* arg) {
         Log("native: stage4c recon hooks");
     }
     // Native TLS verification bypass (SSL_set_verify / X509_verify_cert).
-    // Independent of the GPU group and of compatibility mode: it is a
-    // feature, not a diagnostic, so it stays on whenever the addon runs.
     if (SslUnpinActive()) {
         InstallSslHooks();
         Log("native: stage4d ssl unpin hooks");
     } else {
         Log("native: ssl unpin off - ssl hooks skipped");
+    }
+    // ARM64 inline-hook SSL path (ShadowHook). Runs only when the native
+    // addon and SSL unpin are both on; harmless no-op otherwise.
+    if (SslArm64Active() && SslUnpinActive()) {
+        InstallSslArm64Hooks();
+        Log("native: stage4e ssl-arm64 hooks");
+    } else {
+        Log("native: ssl-arm64 hooks skipped");
     }
     // setsockopt (SO_BINDTODEVICE hiding) is a core hiding primitive and stays
     // on in every mode, including compatibility mode.

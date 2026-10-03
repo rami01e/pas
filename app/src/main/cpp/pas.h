@@ -128,10 +128,19 @@ bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, s
 // Native TLS verification bypass (hide_ssl.cpp): SSL_set_verify /
 // SSL_CTX_set_verify / *_custom_verify forced to SSL_VERIFY_NONE, plus
 // X509_verify_cert / X509_STORE_CTX_get_error / SSL_get_verify_result forced
-// to success. Installed only when the native addon is enabled.
+// to success. ByteHook engine; only reaches libraries that export the
+// symbols. Installed only when the native addon is enabled.
 void InstallSslHooks();
 void SetSslUnpin(bool on);
 bool SslUnpinActive();
+
+// ARM64 inline-hook SSL unpinning (hook_ssl_arm64.cpp): ShadowHook 1.0.10
+// engine, reaches statically-linked BoringSSL in translated ARM64 libraries
+// where the symbol table is empty. Same feature as hide_ssl.cpp, different
+// hook mechanism. Compiled to a no-op on non-ARM64 ABIs.
+void InstallSslArm64Hooks();
+void SetSslArm64(bool on);
+bool SslArm64Active();
 
 // Hook-installation gate: the worker waits briefly for the Kotlin side to
 // deliver the config so it can either skip all hook installation (native
