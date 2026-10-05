@@ -1,4 +1,4 @@
-name: Build & Publish Debug/Release APK
+name: Build & Release
 
 on:
   push:
@@ -11,7 +11,7 @@ permissions:
   contents: write
 
 jobs:
-  Build:
+  build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -28,6 +28,7 @@ jobs:
 
       - name: Set up NDK and CMake
         run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null 2>&1 || true
+
       - name: Use github keystore for release
         run: |
           echo 'RELEASE_STORE_FILE=github.keystore' >> gradle.properties
@@ -35,14 +36,7 @@ jobs:
           echo 'RELEASE_KEY_ALIAS=key' >> gradle.properties
           echo 'RELEASE_KEY_PASSWORD=123456789' >> gradle.properties
 
-      - name: Build Debug APK
-        if: github.ref_type == 'branch'
-        run: |
-          set -o pipefail
-          ./gradlew assembleDebug --stacktrace 2>&1 | tee buildlog.txt
-
       - name: Build Release APK
-        if: github.ref_type == 'tag'
         run: |
           set -o pipefail
           ./gradlew assembleRelease --stacktrace 2>&1 | tee buildlog.txt
@@ -54,24 +48,40 @@ jobs:
           name: buildlog
           path: buildlog.txt
           if-no-files-found: ignore
-      - name: Set APK path
+
+      - name: Extract version
+        id: ver
+        if: success()
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            echo "APK_PATH=app/build/outputs/apk/release/app-release.apk" >> $GITHUB_ENV
-            echo "APK_NAME=app-release.apk" >> $GITHUB_ENV
+          VERSION_NAME=$(grep -oP 'versionName\s*"\K[^"]+' app/build.gradle | head -1)
+          VERSION_CODE=$(grep -oP 'versionCode\s+\K[0-9]+' app/build.gradle | head -1)
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           else
-            echo "APK_PATH=app/build/outputs/apk/debug/app-debug.apk" >> $GITHUB_ENV
-            echo "APK_NAME=app-debug.apk" >> $GITHUB_ENV
+            echo "tag=v${VERSION_NAME}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+            echo "name=v${VERSION_NAME} (${SHORT_SHA})" >> "$GITHUB_OUTPUT"
           fi
+          echo "versionName=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "Resolved: v$VERSION_NAME vc=$VERSION_CODE sha=$SHORT_SHA"
 
       - name: Upload APK artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APK_NAME }}
-          path: ${{ env.APK_PATH }}
+          name: app-release-v${{ steps.ver.outputs.versionName }}
+          path: app/build/outputs/apk/release/app-release.apk
 
-      - name: Publish APK
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@v2.6.1
+      - name: Publish Release
+        if: success()
+        uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.APK_PATH }}
+          tag_name: ${{ steps.ver.outputs.tag }}
+          name: ${{ steps.ver.outputs.name }}
+          files: app/build/outputs/apk/release/app-release.apk
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false
