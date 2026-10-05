@@ -32,8 +32,8 @@
 // Known limits:
 //   * Only dynamically visible symbols are reachable. A library that
 //     statically links BoringSSL with hidden visibility does not export
-//     these names and cannot be hooked by name. Address-based scanning is
-//     the only path for that case.
+//     these names and cannot be hooked by name. The ARM64 ShadowHook path
+//     (hook_ssl_arm64.cpp) is the second engine for those cases.
 //   * Callers living in ARM-translated APK libraries are skipped by the
 //     shared CallerAllow filter (patching translated code corrupts it), so
 //     on an x86_64 emulator an arm64 game's own bundled SSL stack is out
@@ -213,4 +213,13 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetSslUnpin(JNIEnv* env, jobject thiz,
     (void)env;
     (void)thiz;
     pas::SetSslUnpin(on == JNI_TRUE);
+}
+
+// >>> v2.4.0: flag for the ARM64 inline-hook path. Purely a gate; the actual
+// installation is invoked from pas.cpp's InitWorker via InstallSslArm64Hooks.
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetSslArm64(JNIEnv* env, jobject thiz, jboolean on) {
+    (void)env;
+    (void)thiz;
+    pas::SetSslArm64(on == JNI_TRUE);
 }
