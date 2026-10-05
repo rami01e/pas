@@ -1,11 +1,15 @@
 // Netlink response filtering.
 //
-// Detector probes enumerate interfaces, addresses, routes and policy rules
-// via NETLINK_ROUTE sockets, which bypasses every libc *file* hook. We track
-// NETLINK_ROUTE sockets created by the process and post-process their
+// Detector probes that enumerate interfaces, addresses, routes, policy rules
+// and sockets via NETLINK sockets bypass every libc *file* hook. We track
+// NETLINK sockets created by the process and post-process their
 // recv()/recvfrom()/recvmsg() results, dropping dump messages that reference
-// hidden (VPN) interfaces or VPN policy tables so the netlink view matches
-// every other hooked path (getifaddrs, /proc/net/*, sysfs, if_indextoname).
+// hidden (VPN) interfaces / VPN policy tables, or that expose a loopback
+// SOCKS5/HTTP proxy on well-known ports (127.0.0.1:1080 etc).
+//
+// Two netlink families are covered:
+//   NETLINK_ROUTE      - RTM_NEWLINK / RTM_NEWADDR / RTM_NEWROUTE / RTM_NEWRULE
+//   NETLINK_SOCK_DIAG  - SOCK_DIAG_BY_FAMILY (inet_diag_msg entries)
 
 #include "pas.h"
 
@@ -19,6 +23,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/if_addr.h>
 #include <linux/if_link.h>
+#include <linux/inet_diag.h>
 
 #include "bytehook.h"
 
@@ -28,39 +33,58 @@ namespace pas {
 #define NETLINK_ROUTE 0
 #endif
 
+#ifndef NETLINK_SOCK_DIAG
+#define NETLINK_SOCK_DIAG 4
+#endif
+
 // ---------------------------------------------------------------------------
-// NETLINK_ROUTE fd tracking (small fixed table, no allocations)
+// netlink fd tracking (small fixed table, no allocations)
+//
+// Each entry stores the fd and the netlink protocol it belongs to, so the
+// filter can pick the right message-layout parser without a second lookup.
 // ---------------------------------------------------------------------------
 
 static const int kMaxTracked = 32;
-static int g_tracked[kMaxTracked];
+
+struct TrackedFd {
+    int fd;
+    int protocol;
+};
+
+static TrackedFd g_tracked[kMaxTracked];
 static pthread_mutex_t g_mtx = PTHREAD_MUTEX_INITIALIZER;
 static bool g_inited = false;
 
 static void EnsureInitLocked() {
     if (!g_inited) {
-        for (int i = 0; i < kMaxTracked; i++) g_tracked[i] = -1;
+        for (int i = 0; i < kMaxTracked; i++) {
+            g_tracked[i].fd = -1;
+            g_tracked[i].protocol = 0;
+        }
         g_inited = true;
     }
 }
 
-static void TrackFd(int fd) {
+static void TrackFd(int fd, int protocol) {
     pthread_mutex_lock(&g_mtx);
     EnsureInitLocked();
     for (int i = 0; i < kMaxTracked; i++) {
-        if (g_tracked[i] == fd) {
+        if (g_tracked[i].fd == fd) {
+            g_tracked[i].protocol = protocol;
             pthread_mutex_unlock(&g_mtx);
             return;
         }
     }
     for (int i = 0; i < kMaxTracked; i++) {
-        if (g_tracked[i] == -1) {
-            g_tracked[i] = fd;
+        if (g_tracked[i].fd == -1) {
+            g_tracked[i].fd = fd;
+            g_tracked[i].protocol = protocol;
             pthread_mutex_unlock(&g_mtx);
             return;
         }
     }
-    g_tracked[0] = fd;  // table full: replace slot 0 (extremely rare)
+    g_tracked[0].fd = fd;
+    g_tracked[0].protocol = protocol;
     pthread_mutex_unlock(&g_mtx);
 }
 
@@ -68,30 +92,32 @@ static void UntrackFd(int fd) {
     pthread_mutex_lock(&g_mtx);
     EnsureInitLocked();
     for (int i = 0; i < kMaxTracked; i++) {
-        if (g_tracked[i] == fd) {
-            g_tracked[i] = -1;
+        if (g_tracked[i].fd == fd) {
+            g_tracked[i].fd = -1;
+            g_tracked[i].protocol = 0;
             break;
         }
     }
     pthread_mutex_unlock(&g_mtx);
 }
 
-static bool IsTracked(int fd) {
+// Returns the netlink protocol for a tracked fd, or 0 when not tracked.
+static int TrackedProtocol(int fd) {
     pthread_mutex_lock(&g_mtx);
     EnsureInitLocked();
-    bool found = false;
+    int proto = 0;
     for (int i = 0; i < kMaxTracked; i++) {
-        if (g_tracked[i] == fd) {
-            found = true;
+        if (g_tracked[i].fd == fd) {
+            proto = g_tracked[i].protocol;
             break;
         }
     }
     pthread_mutex_unlock(&g_mtx);
-    return found;
+    return proto;
 }
 
 // ---------------------------------------------------------------------------
-// message predicates
+// NETLINK_ROUTE message predicates
 // ---------------------------------------------------------------------------
 
 struct AttrSink {
@@ -172,10 +198,87 @@ static bool NewruleHidden(const struct nlmsghdr* nh) {
     int len = (int)(nh->nlmsg_len - NLMSG_LENGTH(sizeof(struct rtmsg)));
     if (len > 0) WalkAttrs((const char*)rtm + NLMSG_ALIGN(sizeof(struct rtmsg)), len, &sink);
     unsigned int table = sink.hasTable ? sink.table : rtm->rtm_table;
-    // VPN policy tables: wireguard-style 100..110 range (also catches the
-    // per-UID tables detectors probe for).
     if (table >= 100 && table <= 110) return true;
     if (sink.hasOif && sink.oif > 0 && IsHiddenIndex((unsigned int)sink.oif)) return true;
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// NETLINK_SOCK_DIAG message predicate
+//
+// SOCK_DIAG_BY_FAMILY returns a stream of inet_diag_msg entries, one per
+// socket. The entry exposes the local and remote endpoints of every TCP/UDP
+// socket in the system, including a loopback proxy listener that a userspace
+// tunnel opens for its own operation. The owning process isn't visible in
+// the dump (uid 0, no matching /proc entry), so the port number itself is
+// the tell: 1080, 10808, 7890, 8888 and friends are the well-known defaults
+// of nearly every tunnel client in circulation.
+//
+// This filter drops any inet_diag_msg whose LOCAL or REMOTE endpoint is a
+// loopback address on one of those ports. Everything else passes through
+// unchanged. The proxy socket still exists and still works - the caller
+// just doesn't see it in the enumeration.
+// ---------------------------------------------------------------------------
+
+static const unsigned short kProxyPorts[] = {
+    1080,   // SOCKS5 (xray/v2ray/sing-box/neko/cat default)
+    1081,   // SOCKS5 alt
+    1087,   // SOCKS5 alt
+    1088,   // SOCKS5 alt
+    3128,   // Squid HTTP
+    4444,   // various tunnels
+    7890,   // Clash HTTP
+    7891,   // Clash SOCKS
+    7892,   // Clash alt
+    8118,   // Privoxy
+    8123,   // Polipo
+    8888,   // HTTP proxy alt
+    8889,   // HTTP proxy alt
+    9050,   // Tor SOCKS
+    9051,   // Tor control
+    9090,   // Clash dashboard
+    10808,  // v2ray default
+    10809,  // v2ray default
+    10810,  // v2ray alt
+};
+
+static bool IsProxyPort(unsigned short port) {
+    for (size_t i = 0; i < sizeof(kProxyPorts) / sizeof(kProxyPorts[0]); i++) {
+        if (port == kProxyPorts[i]) return true;
+    }
+    return false;
+}
+
+static bool IsLoopbackV4(const unsigned char* a) {
+    // 127.0.0.0/8
+    return a[0] == 127;
+}
+
+static bool IsLoopbackV6(const unsigned char* a) {
+    static const unsigned char kLoop6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+    if (memcmp(a, kLoop6, 16) == 0) return true;
+    // IPv4-mapped loopback ::ffff:127.x.x.x
+    static const unsigned char kMapped[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
+    if (memcmp(a, kMapped, 12) == 0 && a[12] == 127) return true;
+    return false;
+}
+
+static bool InetDiagHidden(const struct nlmsghdr* nh) {
+    if (nh->nlmsg_len < NLMSG_LENGTH(sizeof(struct inet_diag_msg))) return false;
+    const struct inet_diag_msg* d = (const struct inet_diag_msg*)NLMSG_DATA(nh);
+    unsigned short sport = ntohs(d->idiag_sport);
+    unsigned short dport = ntohs(d->idiag_dport);
+    if (d->idiag_family == AF_INET) {
+        const unsigned char* src = (const unsigned char*)d->idiag_src;
+        const unsigned char* dst = (const unsigned char*)d->idiag_dst;
+        if (IsProxyPort(sport) && IsLoopbackV4(src)) return true;
+        if (IsProxyPort(dport) && IsLoopbackV4(dst)) return true;
+    } else if (d->idiag_family == AF_INET6) {
+        const unsigned char* src = (const unsigned char*)d->idiag_src;
+        const unsigned char* dst = (const unsigned char*)d->idiag_dst;
+        if (IsProxyPort(sport) && IsLoopbackV6(src)) return true;
+        if (IsProxyPort(dport) && IsLoopbackV6(dst)) return true;
+    }
     return false;
 }
 
@@ -183,8 +286,8 @@ static bool NewruleHidden(const struct nlmsghdr* nh) {
 // buffer filtering (in place, message-wise compaction)
 // ---------------------------------------------------------------------------
 
-static ssize_t FilterNetlinkBuffer(void* buf, ssize_t len) {
-    if (len <= 0) return len;
+static ssize_t FilterNetlinkBuffer(void* buf, ssize_t len, int protocol) {
+    if (len <= 0 || protocol == 0) return len;
     char* base = (char*)buf;
     size_t total = (size_t)len;
     size_t off = 0;
@@ -195,12 +298,18 @@ static ssize_t FilterNetlinkBuffer(void* buf, ssize_t len) {
         size_t aligned = NLMSG_ALIGN(nh->nlmsg_len);
         if (aligned > total - off) aligned = total - off;
         bool drop = false;
-        switch (nh->nlmsg_type) {
-            case RTM_NEWLINK: drop = NewlinkHidden(nh); break;
-            case RTM_NEWADDR: drop = NewaddrHidden(nh); break;
-            case RTM_NEWROUTE: drop = NewrouteHidden(nh); break;
-            case RTM_NEWRULE: drop = NewruleHidden(nh); break;
-            default: break;
+        if (protocol == NETLINK_ROUTE) {
+            switch (nh->nlmsg_type) {
+                case RTM_NEWLINK: drop = NewlinkHidden(nh); break;
+                case RTM_NEWADDR: drop = NewaddrHidden(nh); break;
+                case RTM_NEWROUTE: drop = NewrouteHidden(nh); break;
+                case RTM_NEWRULE: drop = NewruleHidden(nh); break;
+                default: break;
+            }
+        } else if (protocol == NETLINK_SOCK_DIAG) {
+            if (nh->nlmsg_type == SOCK_DIAG_BY_FAMILY) {
+                drop = InetDiagHidden(nh);
+            }
         }
         if (!drop) {
             if (out != off) memmove(base + out, base + off, aligned);
@@ -223,7 +332,10 @@ static ssize_t FilterNetlinkBuffer(void* buf, ssize_t len) {
 int HideSocket(int domain, int type, int protocol) {
     BYTEHOOK_STACK_SCOPE();
     int fd = BYTEHOOK_CALL_PREV(HideSocket, domain, type, protocol);
-    if (fd >= 0 && domain == AF_NETLINK && protocol == NETLINK_ROUTE) TrackFd(fd);
+    if (fd >= 0 && domain == AF_NETLINK &&
+        (protocol == NETLINK_ROUTE || protocol == NETLINK_SOCK_DIAG)) {
+        TrackFd(fd, protocol);
+    }
     return fd;
 }
 
@@ -236,7 +348,10 @@ int HideClose(int fd) {
 ssize_t HideRecv(int fd, void* buf, size_t len, int flags) {
     BYTEHOOK_STACK_SCOPE();
     ssize_t n = BYTEHOOK_CALL_PREV(HideRecv, fd, buf, len, flags);
-    if (n > 0 && IsTracked(fd)) n = FilterNetlinkBuffer(buf, n);
+    if (n > 0) {
+        int proto = TrackedProtocol(fd);
+        if (proto != 0) n = FilterNetlinkBuffer(buf, n, proto);
+    }
     return n;
 }
 
@@ -244,16 +359,19 @@ ssize_t HideRecvFrom(int fd, void* buf, size_t len, int flags, struct sockaddr* 
                      socklen_t* addrlen) {
     BYTEHOOK_STACK_SCOPE();
     ssize_t n = BYTEHOOK_CALL_PREV(HideRecvFrom, fd, buf, len, flags, addr, addrlen);
-    if (n > 0 && IsTracked(fd)) n = FilterNetlinkBuffer(buf, n);
+    if (n > 0) {
+        int proto = TrackedProtocol(fd);
+        if (proto != 0) n = FilterNetlinkBuffer(buf, n, proto);
+    }
     return n;
 }
 
 ssize_t HideRecvMsg(int fd, struct msghdr* msg, int flags) {
     BYTEHOOK_STACK_SCOPE();
     ssize_t n = BYTEHOOK_CALL_PREV(HideRecvMsg, fd, msg, flags);
-    if (n > 0 && msg && msg->msg_iovlen == 1 && msg->msg_iov &&
-        msg->msg_iov[0].iov_len >= (size_t)n && IsTracked(fd)) {
-        n = FilterNetlinkBuffer(msg->msg_iov[0].iov_base, n);
+    if (n > 0 && msg && msg->msg_iovlen == 1 && msg->msg_iov) {
+        int proto = TrackedProtocol(fd);
+        if (proto != 0) n = FilterNetlinkBuffer(msg->msg_iov[0].iov_base, n, proto);
     }
     return n;
 }

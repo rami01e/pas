@@ -90,7 +90,7 @@ static WatchedFile ResolveWatchedFile(const char* path) {
 // served as "1\n" so the process sees an enforcing kernel.
 // ---------------------------------------------------------------------------
 
-enum class SpecialAction { None, NotFound, EnforceOne };
+enum class SpecialAction { None, NotFound, EnforceOne, RpFilterOne };
 
 static SpecialAction ResolveSpecial(const char* path) {
     if (!path) return SpecialAction::None;
@@ -100,6 +100,21 @@ static SpecialAction ResolveSpecial(const char* path) {
     }
     if (strcmp(path, "/sys/fs/selinux/enforce") == 0) {
         return SpecialAction::EnforceOne;
+    }
+    // rp_filter: the userspace tunnel disables reverse-path filtering
+    // (writes 0 to /proc/sys/net/ipv4/conf/*/rp_filter so it can route
+    // through the proxy peer). A clean Android device runs 1 (strict) or
+    // 2 (loose). Serve 1 on read so the sysctl does not stand out.
+    {
+        static const char kPre[] = "/proc/sys/net/ipv4/conf/";
+        static const char kSuf[] = "/rp_filter";
+        const size_t pl = sizeof(kPre) - 1;
+        const size_t sl = sizeof(kSuf) - 1;
+        const size_t n = strlen(path);
+        if (n > pl + sl && strncmp(path, kPre, pl) == 0 &&
+            strcmp(path + n - sl, kSuf) == 0) {
+            return SpecialAction::RpFilterOne;
+        }
     }
     return SpecialAction::None;
 }
@@ -477,6 +492,11 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
         *fdOut = -1;
         return true;
     }
+    if (sp == SpecialAction::RpFilterOne) {
+        *fdOut = CreateMemfdWith("1\n", 2, flags);
+        return true;
+    }
+    // SpecialAction::EnforceOne
     *fdOut = CreateMemfdWith("1\n", 2, flags);
     return true;
 }
