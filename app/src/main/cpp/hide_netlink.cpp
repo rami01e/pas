@@ -37,6 +37,13 @@ namespace pas {
 #define NETLINK_SOCK_DIAG 4
 #endif
 
+// SOCK_DIAG_BY_FAMILY lives in <linux/sock_diag.h>, which is not guaranteed
+// to be transitively included by <linux/inet_diag.h> across all NDK
+// versions. Its value is fixed at 20 in the kernel UAPI.
+#ifndef SOCK_DIAG_BY_FAMILY
+#define SOCK_DIAG_BY_FAMILY 20
+#endif
+
 // ---------------------------------------------------------------------------
 // netlink fd tracking (small fixed table, no allocations)
 //
@@ -214,6 +221,9 @@ static bool NewruleHidden(const struct nlmsghdr* nh) {
 // the tell: 1080, 10808, 7890, 8888 and friends are the well-known defaults
 // of nearly every tunnel client in circulation.
 //
+// Port and address fields live inside the nested `id` struct
+// (struct inet_diag_sockid), not directly on inet_diag_msg.
+//
 // This filter drops any inet_diag_msg whose LOCAL or REMOTE endpoint is a
 // loopback address on one of those ports. Everything else passes through
 // unchanged. The proxy socket still exists and still works - the caller
@@ -266,16 +276,18 @@ static bool IsLoopbackV6(const unsigned char* a) {
 static bool InetDiagHidden(const struct nlmsghdr* nh) {
     if (nh->nlmsg_len < NLMSG_LENGTH(sizeof(struct inet_diag_msg))) return false;
     const struct inet_diag_msg* d = (const struct inet_diag_msg*)NLMSG_DATA(nh);
-    unsigned short sport = ntohs(d->idiag_sport);
-    unsigned short dport = ntohs(d->idiag_dport);
+    const unsigned short sport = ntohs(d->id.idiag_sport);
+    const unsigned short dport = ntohs(d->id.idiag_dport);
     if (d->idiag_family == AF_INET) {
-        const unsigned char* src = (const unsigned char*)d->idiag_src;
-        const unsigned char* dst = (const unsigned char*)d->idiag_dst;
+        // For IPv4 the address occupies the first 4 bytes of the 16-byte
+        // src/dst array (stored as __be32); the remaining bytes are zero.
+        const unsigned char* src = (const unsigned char*)&d->id.idiag_src[0];
+        const unsigned char* dst = (const unsigned char*)&d->id.idiag_dst[0];
         if (IsProxyPort(sport) && IsLoopbackV4(src)) return true;
         if (IsProxyPort(dport) && IsLoopbackV4(dst)) return true;
     } else if (d->idiag_family == AF_INET6) {
-        const unsigned char* src = (const unsigned char*)d->idiag_src;
-        const unsigned char* dst = (const unsigned char*)d->idiag_dst;
+        const unsigned char* src = (const unsigned char*)&d->id.idiag_src[0];
+        const unsigned char* dst = (const unsigned char*)&d->id.idiag_dst[0];
         if (IsProxyPort(sport) && IsLoopbackV6(src)) return true;
         if (IsProxyPort(dport) && IsLoopbackV6(dst)) return true;
     }
