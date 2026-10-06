@@ -1228,6 +1228,36 @@ static long MySyscall(long number, ...) {
         }
     }
 #endif
+    // --- v2.3.9: raw netlink syscall paths ---------------------------------
+    //
+    // Anti-tamper tools that bypass libc and issue socket()/recvmsg()/read()
+    // through syscall() directly evade the bytehook-based netlink filter in
+    // hide_netlink.cpp. The three branches below mirror that filter at the
+    // syscall layer so a hardened prober still sees a clean enumeration.
+#ifdef __NR_socket
+    if (number == __NR_socket) {
+        long rc = BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
+        if (rc >= 0 && (int)a0 == AF_NETLINK) {
+            pas::TrackNetlinkFd((int)rc, (int)a2);
+        }
+        return rc;
+    }
+#endif
+#ifdef __NR_recvfrom
+    if (number == __NR_recvfrom) {
+        long rc = BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
+        if (rc > 0) rc = (long)pas::FilterNetlinkRecv((int)a0, (void*)a1, (ssize_t)rc);
+        return rc;
+    }
+#endif
+#ifdef __NR_read
+    if (number == __NR_read) {
+        long rc = BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
+        if (rc > 0) rc = (long)pas::FilterNetlinkRecv((int)a0, (void*)a1, (ssize_t)rc);
+        return rc;
+    }
+#endif
+
     return BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
 }
 
