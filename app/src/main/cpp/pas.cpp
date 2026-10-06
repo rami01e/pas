@@ -732,6 +732,10 @@ void StartInitWorker() {
     pthread_once(&once, SpawnInitWorker);
 }
 
+// --- v2.3.9: raw-syscall netlink tracking ---
+void TrackNetlinkFd(int fd, int protocol);
+ssize_t FilterNetlinkRecv(int fd, void* buf, ssize_t len);
+
 }  // namespace pas
 
 // ---------------------------------------------------------------------------
