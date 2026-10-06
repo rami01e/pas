@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <sys/types.h>
 
 #include <string>
 
@@ -141,6 +142,22 @@ bool SslUnpinActive();
 void InstallSslArm64Hooks();
 void SetSslArm64(bool on);
 bool SslArm64Active();
+
+// --- v2.3.9: raw-syscall netlink tracking ---
+//
+// Anti-tamper tools that bypass libc and issue the socket/recv syscalls
+// directly evade the bytehook-based netlink filter (hide_netlink.cpp hooks
+// libc's socket/recv/recvfrom/recvmsg). This pair of functions lets the raw
+// syscall handler in hide_fs.cpp observe and filter the same traffic:
+//
+//   TrackNetlinkFd    - registers a netlink fd created via
+//                       syscall(SYS_socket, AF_NETLINK, ..., protocol) so
+//                       subsequent reads on it get filtered.
+//   FilterNetlinkRecv - filters a received buffer from a tracked fd. Returns
+//                       the new length, or `len` unchanged when the fd is
+//                       not a tracked netlink socket.
+void TrackNetlinkFd(int fd, int protocol);
+ssize_t FilterNetlinkRecv(int fd, void* buf, ssize_t len);
 
 // Hook-installation gate: the worker waits briefly for the Kotlin side to
 // deliver the config so it can either skip all hook installation (native
