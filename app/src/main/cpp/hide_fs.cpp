@@ -600,6 +600,34 @@ static bool IsLoopbackListenerLine(const char* line, bool tcp) {
     return false;
 }
 
+// Direct token scan of a line against the hidden-interface-name rules.
+// Used when the /proc/net/dev-derived name cache cannot see an interface
+// (wgtunnel's if9 is not listed there, so the cache is empty and
+// LineContainsHiddenName finds nothing). Each whitespace-separated token
+// is tested against IsHiddenIfaceName, so route/dev/if_inet6 entries that
+// mention the tunnel by name are still caught.
+static bool LineContainsHiddenToken(const char* line) {
+    if (!line) return false;
+    char buf[512];
+    size_t bl = strlen(line);
+    if (bl >= sizeof(buf)) bl = sizeof(buf) - 1;
+    memcpy(buf, line, bl);
+    buf[bl] = '\0';
+    char* p = buf;
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == ':') p++;
+        if (!*p) break;
+        char* start = p;
+        while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' && *p != ':' && *p != '/') p++;
+        char save = *p;
+        *p = '\0';
+        if (IsHiddenIfaceName(start)) return true;
+        if (save == '\0') break;
+        p++;
+    }
+    return false;
+}
+
 static void FilterLines(const std::string& raw, WatchedFile kind, std::string* out) {
     bool tcpLike = (kind == WatchedFile::Tcp || kind == WatchedFile::Udp);
     size_t i = 0;
@@ -608,7 +636,7 @@ static void FilterLines(const std::string& raw, WatchedFile kind, std::string* o
         j = (j == std::string::npos) ? raw.size() : j + 1;
         std::string line(raw, i, j - i);
         const char* c = line.c_str();
-        bool blocked = LineContainsHiddenName(c);
+        bool blocked = LineContainsHiddenName(c) || LineContainsHiddenToken(c);
         if (!blocked && tcpLike) blocked = LineContainsProxyPortToken(c);
         if (!blocked && kind == WatchedFile::Tcp) blocked = IsLoopbackListenerLine(c, true);
         if (!blocked && kind == WatchedFile::Udp) blocked = IsLoopbackListenerLine(c, false);

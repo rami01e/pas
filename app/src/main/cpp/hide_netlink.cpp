@@ -11,14 +11,12 @@
 //   NETLINK_ROUTE      - RTM_NEWLINK / RTM_NEWADDR / RTM_NEWROUTE / RTM_NEWRULE
 //   NETLINK_SOCK_DIAG  - SOCK_DIAG_BY_FAMILY (inet_diag_msg entries)
 //
-// v2.3.9 additions:
-//   * TrackNetlinkFd / FilterNetlinkRecv are exported so the raw-syscall
-//     layer in hide_fs.cpp can register netlink sockets created via
-//     syscall(SYS_socket) and filter their reads. This closes the gap when
-//     a hardened anti-tamper tool bypasses the libc wrappers entirely.
-//   * The hidden-index cache learned from RTM_NEWLINK now includes
-//     if<N>-style names, matching the updated IsHiddenIfaceName rules in
-//     pas.cpp (MuMu + wgtunnel create if0, if1, ... ifN).
+// v2.3.10 fix: the "not tracked" sentinel was 0, which collides with
+// NETLINK_ROUTE (also 0). Every route/link/rule filter was short-circuiting
+// out of FilterNetlinkBuffer and letting the kernel's response pass through
+// unfiltered. The sentinel is now -1, and the checks were updated to match.
+// (SOCK_DIAG = 4 was never affected, which is why the local-proxy filter
+// worked all along.)
 
 #include "pas.h"
 
@@ -46,12 +44,13 @@ namespace pas {
 #define NETLINK_SOCK_DIAG 4
 #endif
 
-// SOCK_DIAG_BY_FAMILY lives in <linux/sock_diag.h>, which is not guaranteed
-// to be transitively included by <linux/inet_diag.h> across all NDK
-// versions. Its value is fixed at 20 in the kernel UAPI.
 #ifndef SOCK_DIAG_BY_FAMILY
 #define SOCK_DIAG_BY_FAMILY 20
 #endif
+
+// Sentinel for "fd not tracked" - must be distinct from every valid
+// netlink protocol number, and NETLINK_ROUTE is 0.
+static const int kProtoUntracked = -1;
 
 // ---------------------------------------------------------------------------
 // netlink fd tracking (small fixed table, no allocations)
@@ -72,7 +71,7 @@ static void EnsureInitLocked() {
     if (!g_inited) {
         for (int i = 0; i < kMaxTracked; i++) {
             g_tracked[i].fd = -1;
-            g_tracked[i].protocol = 0;
+            g_tracked[i].protocol = kProtoUntracked;
         }
         g_inited = true;
     }
@@ -107,17 +106,18 @@ static void UntrackFd(int fd) {
     for (int i = 0; i < kMaxTracked; i++) {
         if (g_tracked[i].fd == fd) {
             g_tracked[i].fd = -1;
-            g_tracked[i].protocol = 0;
+            g_tracked[i].protocol = kProtoUntracked;
             break;
         }
     }
     pthread_mutex_unlock(&g_mtx);
 }
 
+// Returns the netlink protocol for a tracked fd, or kProtoUntracked (-1).
 static int TrackedProtocol(int fd) {
     pthread_mutex_lock(&g_mtx);
     EnsureInitLocked();
-    int proto = 0;
+    int proto = kProtoUntracked;
     for (int i = 0; i < kMaxTracked; i++) {
         if (g_tracked[i].fd == fd) {
             proto = g_tracked[i].protocol;
@@ -137,13 +137,6 @@ void TrackNetlinkFd(int fd, int protocol) {
 
 // ---------------------------------------------------------------------------
 // learned hidden interface indices
-//
-// The /proc/net/dev-based discovery in pas.cpp never sees if9 (wgtunnel)
-// on MuMu, so routing messages that reference it by index could not be
-// filtered. Every RTM_NEWLINK response whose interface name matches the
-// hidden rules adds its ifi_index to this small fixed cache; route, addr
-// and policy-rule filters consult it in addition to the /proc-derived
-// index list.
 // ---------------------------------------------------------------------------
 
 static const int kMaxLearnedIndices = 16;
@@ -181,8 +174,6 @@ static bool IsLearnedHiddenIndex(unsigned int idx) {
     return found;
 }
 
-// Combined check: /proc-derived index list OR indices learned from
-// netlink observations.
 static bool IsAnyHiddenIndex(unsigned int idx) {
     return IsHiddenIndex(idx) || IsLearnedHiddenIndex(idx);
 }
@@ -220,9 +211,6 @@ static void WalkAttrs(const char* base, int len, AttrSink* sink) {
     }
 }
 
-// RTM_NEWLINK: drop messages for hidden interfaces. When the name matches,
-// also cache the interface index so subsequent route / addr / rule
-// messages that reference this interface by index are filtered.
 static bool NewlinkHidden(const struct nlmsghdr* nh) {
     const struct ifinfomsg* ifi = (const struct ifinfomsg*)NLMSG_DATA(nh);
     const unsigned int idx = (unsigned int)ifi->ifi_index;
@@ -262,10 +250,6 @@ static bool NewaddrHidden(const struct nlmsghdr* nh) {
     return IsAnyHiddenIndex((unsigned int)ifa->ifa_index);
 }
 
-// A route is hidden when:
-//   * it lives in the VPN policy table range 100..110, OR
-//   * its egress interface index is a hidden interface (either discovered
-//     via /proc or learned from RTM_NEWLINK).
 static bool NewrouteHidden(const struct nlmsghdr* nh) {
     const struct rtmsg* rtm = (const struct rtmsg*)NLMSG_DATA(nh);
     AttrSink sink;
@@ -294,30 +278,10 @@ static bool NewruleHidden(const struct nlmsghdr* nh) {
 // ---------------------------------------------------------------------------
 
 static const unsigned short kProxyPorts[] = {
-    1080,   // SOCKS5 (xray/v2ray/sing-box/neko/cat default)
-    1081,   // SOCKS5 alt
-    1087,   // SOCKS5 alt
-    1088,   // SOCKS5 alt
-    3128,   // Squid HTTP
-    4444,   // various tunnels
-    7890,   // Clash HTTP
-    7891,   // Clash SOCKS
-    7892,   // Clash HTTPs
-    7893,   // Clash redir / TProxy
-    7894,   // Clash socks (alt) / wgtunnel default
-    7895,   // Clash mixed
-    7896,   // Clash DNS
-    7897,   // Clash controller
-    8118,   // Privoxy
-    8123,   // Polipo
-    8888,   // HTTP proxy alt
-    8889,   // HTTP proxy alt
-    9050,   // Tor SOCKS
-    9051,   // Tor control
-    9090,   // Clash dashboard
-    10808,  // v2ray default
-    10809,  // v2ray default
-    10810,  // v2ray alt
+    1080, 1081, 1087, 1088, 3128, 4444,
+    7890, 7891, 7892, 7893, 7894, 7895, 7896, 7897,
+    8118, 8123, 8888, 8889, 9050, 9051, 9090,
+    10808, 10809, 10810,
 };
 
 static bool IsProxyPort(unsigned short port) {
@@ -363,7 +327,7 @@ static bool InetDiagHidden(const struct nlmsghdr* nh) {
 // ---------------------------------------------------------------------------
 
 static ssize_t FilterNetlinkBuffer(void* buf, ssize_t len, int protocol) {
-    if (len <= 0 || protocol == 0) return len;
+    if (len <= 0 || protocol < 0) return len;
     char* base = (char*)buf;
     size_t total = (size_t)len;
     size_t off = 0;
@@ -405,7 +369,7 @@ static ssize_t FilterNetlinkBuffer(void* buf, ssize_t len, int protocol) {
 ssize_t FilterNetlinkRecv(int fd, void* buf, ssize_t len) {
     if (len <= 0 || buf == nullptr) return len;
     int proto = TrackedProtocol(fd);
-    if (proto == 0) return len;
+    if (proto < 0) return len;
     return FilterNetlinkBuffer(buf, len, proto);
 }
 
@@ -434,7 +398,7 @@ ssize_t HideRecv(int fd, void* buf, size_t len, int flags) {
     ssize_t n = BYTEHOOK_CALL_PREV(HideRecv, fd, buf, len, flags);
     if (n > 0) {
         int proto = TrackedProtocol(fd);
-        if (proto != 0) n = FilterNetlinkBuffer(buf, n, proto);
+        if (proto >= 0) n = FilterNetlinkBuffer(buf, n, proto);
     }
     return n;
 }
@@ -445,7 +409,7 @@ ssize_t HideRecvFrom(int fd, void* buf, size_t len, int flags, struct sockaddr* 
     ssize_t n = BYTEHOOK_CALL_PREV(HideRecvFrom, fd, buf, len, flags, addr, addrlen);
     if (n > 0) {
         int proto = TrackedProtocol(fd);
-        if (proto != 0) n = FilterNetlinkBuffer(buf, n, proto);
+        if (proto >= 0) n = FilterNetlinkBuffer(buf, n, proto);
     }
     return n;
 }
@@ -455,7 +419,7 @@ ssize_t HideRecvMsg(int fd, struct msghdr* msg, int flags) {
     ssize_t n = BYTEHOOK_CALL_PREV(HideRecvMsg, fd, msg, flags);
     if (n > 0 && msg && msg->msg_iovlen == 1 && msg->msg_iov) {
         int proto = TrackedProtocol(fd);
-        if (proto != 0) n = FilterNetlinkBuffer(msg->msg_iov[0].iov_base, n, proto);
+        if (proto >= 0) n = FilterNetlinkBuffer(msg->msg_iov[0].iov_base, n, proto);
     }
     return n;
 }
