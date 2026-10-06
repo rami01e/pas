@@ -47,7 +47,12 @@ static bool IsProxyPort(unsigned short port) {
         4444,   // various tunnels
         7890,   // Clash HTTP
         7891,   // Clash SOCKS
-        7892,   // Clash alt
+        7892,   // Clash HTTPs
+        7893,   // Clash redir / TProxy
+        7894,   // Clash socks (alt) / wgtunnel default
+        7895,   // Clash mixed
+        7896,   // Clash DNS
+        7897,   // Clash controller
         8118,   // Privoxy
         8123,   // Polipo
         8888,   // HTTP proxy alt

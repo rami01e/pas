@@ -72,6 +72,13 @@ bool IsHiddenIfaceName(const char* name) {
         {"tun", 0},   {"tap", 0},    {"wg", 0},       {"gre", 0},    {"l2tp", 0},
         {"ppp", 0},   {"utun", 1},   {"tailscale", 1}, {"svpn", 1},
         {"pptp", 2},  {"zt", 2},     {"he-ipv6", 2},  {"ipsec", 2},  {"xfrm", 2},
+        // Emulator / userspace-tunnel naming: MuMu and several userspace
+        // WireGuard backends (wgtunnel, wireguard-go variants) create
+        // interfaces named if0, if1, ... ifN. They do not exist on stock
+        // Android, so hiding them is safe on real devices and necessary
+        // on emulators. Digits required so a hypothetical non-numeric
+        // "if..." prefix is left alone.
+        {"if", 0},
     };
     for (const Rule& r : kRules) {
         size_t n = strlen(r.prefix);
@@ -105,6 +112,7 @@ bool IsHiddenPathFast(const char* path) {
         static const char* kIfacePrefixes[] = {
             "tun", "tap", "wg", "gre", "l2tp", "ppp", "pptp", "zt",
             "utun", "tailscale", "svpn", "he-ipv6", "ipsec", "xfrm",
+            "if",   // emulator / userspace-tunnel naming (if0, if1, ...)
         };
         for (const char* pre : kIfacePrefixes) {
             size_t n = strlen(pre);

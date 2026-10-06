@@ -10,6 +10,11 @@
 // Two netlink families are covered:
 //   NETLINK_ROUTE      - RTM_NEWLINK / RTM_NEWADDR / RTM_NEWROUTE / RTM_NEWRULE
 //   NETLINK_SOCK_DIAG  - SOCK_DIAG_BY_FAMILY (inet_diag_msg entries)
+//
+// v2.3.8: NewrouteHidden also drops any route in the VPN policy table range
+// (100..110) regardless of OIF, so userspace-tunnel default routes are
+// filtered even when the underlying interface index was not learned from
+// /proc/net/dev (e.g. wgtunnel's if9 on MuMu).
 
 #include "pas.h"
 
@@ -190,11 +195,23 @@ static bool NewaddrHidden(const struct nlmsghdr* nh) {
     return IsHiddenIndex((unsigned int)ifa->ifa_index);
 }
 
+// A route is hidden when it belongs to a VPN policy table (100..110) OR it
+// egresses through a hidden interface index. The table check matters for
+// userspace-tunnel stacks (wgtunnel etc.) whose default route lives in
+// table 100 and whose interface index was never observed in /proc/net/dev
+// (MuMu hides it there), so an index-only check would let it through.
+//
+// For tables < 256 the kernel writes the table into rtm->rtm_table; for
+// larger tables (or when the kernel chooses to) it is emitted as the
+// RTA_TABLE attribute. Both are checked.
 static bool NewrouteHidden(const struct nlmsghdr* nh) {
     const struct rtmsg* rtm = (const struct rtmsg*)NLMSG_DATA(nh);
     AttrSink sink;
     int len = (int)(nh->nlmsg_len - NLMSG_LENGTH(sizeof(struct rtmsg)));
     if (len > 0) WalkAttrs((const char*)rtm + NLMSG_ALIGN(sizeof(struct rtmsg)), len, &sink);
+    unsigned int table = rtm->rtm_table;
+    if (sink.hasTable) table = sink.table;
+    if (table >= 100 && table <= 110) return true;
     if (sink.hasOif && sink.oif > 0 && IsHiddenIndex((unsigned int)sink.oif)) return true;
     return false;
 }
@@ -216,10 +233,7 @@ static bool NewruleHidden(const struct nlmsghdr* nh) {
 // SOCK_DIAG_BY_FAMILY returns a stream of inet_diag_msg entries, one per
 // socket. The entry exposes the local and remote endpoints of every TCP/UDP
 // socket in the system, including a loopback proxy listener that a userspace
-// tunnel opens for its own operation. The owning process isn't visible in
-// the dump (uid 0, no matching /proc entry), so the port number itself is
-// the tell: 1080, 10808, 7890, 8888 and friends are the well-known defaults
-// of nearly every tunnel client in circulation.
+// tunnel opens for its own operation.
 //
 // Port and address fields live inside the nested `id` struct
 // (struct inet_diag_sockid), not directly on inet_diag_msg.
@@ -239,7 +253,12 @@ static const unsigned short kProxyPorts[] = {
     4444,   // various tunnels
     7890,   // Clash HTTP
     7891,   // Clash SOCKS
-    7892,   // Clash alt
+    7892,   // Clash HTTPs
+    7893,   // Clash redir / TProxy
+    7894,   // Clash socks (alt) / wgtunnel default
+    7895,   // Clash mixed
+    7896,   // Clash DNS
+    7897,   // Clash controller
     8118,   // Privoxy
     8123,   // Polipo
     8888,   // HTTP proxy alt
