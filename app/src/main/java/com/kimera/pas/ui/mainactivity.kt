@@ -805,11 +805,22 @@ class MainActivity : Activity() {
         )
     }
 
+    /**
+     * v2.4.1: defensive re-parent guard. A view reused in two rows throws
+     * "child already has a parent" and kills the activity at startup; this
+     * guard detaches the old parent first so the last writer wins instead.
+     */
+    private fun detachIfNeeded(v: View) {
+        val p = v.parent as? ViewGroup ?: return
+        p.removeView(v)
+    }
+
     private fun rowHead(sw: SwitchView, name: String, chip: TextView?): LinearLayout {
         val head = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        detachIfNeeded(sw)
         head.addView(
             sw,
             LinearLayout.LayoutParams(dp(32), dp(20)).apply { rightMargin = dp(8) }
@@ -822,7 +833,10 @@ class MainActivity : Activity() {
             },
             LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         )
-        if (chip != null) head.addView(chip)
+        if (chip != null) {
+            detachIfNeeded(chip)
+            head.addView(chip)
+        }
         return head
     }
 
@@ -875,6 +889,7 @@ class MainActivity : Activity() {
                     setOnClickListener { onPick() }
                 }
             }
+            detachIfNeeded(value)
             valWrap.addView(value)
             if (onPick != null) {
                 valWrap.addView(
