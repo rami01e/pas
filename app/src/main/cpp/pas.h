@@ -61,10 +61,14 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compat
                     bool nativeEnabled);
 
 // CPU model / GPU (OpenGL + Vulkan) spoof (hide_gpu.cpp, hide_vulkan.cpp)
+// v2.4.3: SetCpuConfig restored to the exact v2.4.1 signature (identity
+// only); cluster layout arrives through the separate SetCpuClusters call so
+// it can never scramble the working identity path positionally.
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
                   int maxKHz, const char* hwLine, const char* implementer,
-                  const char* hardware, const char* clusters);
+                  const char* hardware);
+void SetCpuClusters(bool cpuOn, const char* clusters);
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,

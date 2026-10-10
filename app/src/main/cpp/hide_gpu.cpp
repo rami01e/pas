@@ -68,7 +68,7 @@ static void CopyStr(char* dst, size_t cap, const char* src) {
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
                   int maxKHz, const char* hwLine, const char* implementer,
-                  const char* hardware, const char* clusters) {
+                  const char* hardware) {
     g_cpu_on = false;
     CopyStr(g_cpu_display, sizeof(g_cpu_display), display);
     CopyStr(g_cpu_mfr, sizeof(g_cpu_mfr), mfr);
@@ -83,23 +83,24 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
     CopyStr(g_cpu_features, sizeof(g_cpu_features), features);
     CopyStr(g_cpu_hwline, sizeof(g_cpu_hwline), hwLine);
     CopyStr(g_cpu_hardware, sizeof(g_cpu_hardware), hardware);
-    // v2.4.2: cluster layout ("4+4", "1+3+4"...) for the sysfs topology
-    // mirrors; empty / invalid keeps the 4+4 default (8-core reference).
-    {
-        char tmp[32];
-        CopyStr(tmp, sizeof(tmp), clusters);
-        if (tmp[0] != '\0') {
-            CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), tmp);
-        } else {
-            CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), "4+4");
-        }
-    }
     g_cpu_min_khz = minKHz;
     g_cpu_max_khz = maxKHz;
     g_cpu_on = cpuOn && g_cpu_display[0] != '\0';
-    Log("native: cpu config on=%d display=%s part=%s impl=%s hw=%s clusters=%s khz=%d-%d",
-        (int)g_cpu_on, g_cpu_display, g_cpu_part, g_cpu_implementer, g_cpu_hardware,
-        g_cpu_clusters, (int)g_cpu_min_khz, (int)g_cpu_max_khz);
+    Log("native: cpu config on=%d display=%s part=%s impl=%s hw=%s khz=%d-%d", (int)g_cpu_on,
+        g_cpu_display, g_cpu_part, g_cpu_implementer, g_cpu_hardware, (int)g_cpu_min_khz,
+        (int)g_cpu_max_khz);
+}
+
+// v2.4.3: cluster layout arrives through its own call (isolated from the
+// identity path). Same core info in every cluster - no per-cluster parts or
+// clocks; the mirrors only change the sysfs grouping view.
+void SetCpuClusters(bool cpuOn, const char* clusters) {
+    if (clusters != nullptr && clusters[0] != '\0') {
+        CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), clusters);
+    } else {
+        CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), "4+4");
+    }
+    Log("native: cpu clusters on=%d layout=%s", (int)cpuOn, g_cpu_clusters);
 }
 
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
@@ -594,8 +595,7 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
                                                          jstring cpuFeatures, jint minKhz,
                                                          jint maxKhz, jstring cpuHwLine,
                                                          jstring cpuImplementer,
-                                                         jstring cpuHardware,
-                                                         jstring cpuClusters) {
+                                                         jstring cpuHardware) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -613,10 +613,21 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
     std::string hwLine = toStr(cpuHwLine);
     std::string impl = toStr(cpuImplementer);
     std::string hw = toStr(cpuHardware);
-    std::string clu = toStr(cpuClusters);
     pas::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
                       infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz,
-                      hwLine.c_str(), impl.c_str(), hw.c_str(), clu.c_str());
+                      hwLine.c_str(), impl.c_str(), hw.c_str());
+}
+
+// v2.4.3: cluster layout in its own JNI entry point - isolated from the
+// identity config so a signature mismatch can never scramble the working
+// cpuinfo / Build / props path again.
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpuClusters(JNIEnv* env, jobject thiz,
+                                                         jboolean cpuOn, jstring cpuClusters) {
+    (void)thiz;
+    const char* c = cpuClusters ? env->GetStringUTFChars(cpuClusters, nullptr) : nullptr;
+    pas::SetCpuClusters(cpuOn == JNI_TRUE, c ? c : "");
+    if (c) env->ReleaseStringUTFChars(cpuClusters, c);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -677,3 +688,4 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuOptions(JNIEnv* env, jobject thi
     (void)thiz;
     pas::SetGpuOptions(chain == JNI_TRUE, vulkan == JNI_TRUE);
 }
+

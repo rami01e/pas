@@ -35,6 +35,10 @@ object SpoofCore {
         nativeEnabled: Boolean
     )
 
+    // v2.4.3: restored to the exact v2.4.1 signature (the one verified
+    // working in DevCheck) - identity args ONLY. The cluster layout travels
+    // through its own nativeSetCpuClusters call so it can never scramble
+    // the identity strings positionally.
     external fun nativeSetCpu(
         cpuOn: Boolean,
         cpuDisplay: String,
@@ -47,9 +51,12 @@ object SpoofCore {
         cpuMaxKHz: Int,
         cpuHwLine: String,
         cpuImplementer: String,
-        cpuHardware: String,
-        cpuClusters: String
+        cpuHardware: String
     )
+
+    // >>> v2.4.2/2.4.3: cluster layout ("4+4", "1+3+4", "2+6"...) for the
+    // sysfs topology mirrors. Separate call by design - see nativeSetCpu.
+    external fun nativeSetCpuClusters(cpuOn: Boolean, clusters: String)
 
     external fun nativeSetGpu(
         gpuOn: Boolean,
@@ -242,18 +249,28 @@ object SpoofCore {
         )
         // Delivered before the config gate so the native worker can decide
         // whether to install the CPU/GPU hook groups right away.
+        // v2.4.3: named args + the exact v2.4.1 argument list.
         runCatching {
             nativeSetCpu(
-                cpuOnEff, cpuEntry.display, cpuEntry.manufacturer, cpuEntry.socModel,
-                cpuEntry.part, cpuEntry.cpuinfoModel, cpuEntry.features,
-                cpuEntry.minKHz, cpuEntry.maxKHz,
-                cpuEntry.hardwareLine.ifEmpty {
+                cpuOn = cpuOnEff,
+                cpuDisplay = cpuEntry.display,
+                cpuMfr = cpuEntry.manufacturer,
+                cpuModel = cpuEntry.socModel,
+                cpuPart = cpuEntry.part,
+                cpuInfoModel = cpuEntry.cpuinfoModel,
+                cpuFeatures = cpuEntry.features,
+                cpuMinKHz = cpuEntry.minKHz,
+                cpuMaxKHz = cpuEntry.maxKHz,
+                cpuHwLine = cpuEntry.hardwareLine.ifEmpty {
                     "${cpuEntry.hardware} (Samsung board based on ${cpuEntry.socModel})"
                 },
-                cpuEntry.implementer,
-                cpuEntry.hardware,
-                cpuEntry.clusters
+                cpuImplementer = cpuEntry.implementer,
+                cpuHardware = cpuEntry.hardware
             )
+        }
+        // v2.4.3: cluster layout in its own call - isolated from identity.
+        runCatching {
+            nativeSetCpuClusters(cpuOn = cpuOnEff, clusters = cpuEntry.clusters)
         }
         runCatching {
             nativeSetGpu(
