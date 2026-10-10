@@ -147,6 +147,10 @@ static const char* const kReconTokens[] = {
     "board", "platform", "vendor_id", "bogomips", "physical_package",
     "libssl", "libcrypto", "boring", "conscrypt", "cacerts",
     ".pem", ".crt", ".cer", "pinning", "truststore",
+    // v2.4.6: GPU sysfs probes (Mali / Adreno / generic devfreq) so the next
+    // Diagnose capture reveals what DevCheck reads for GPU core counts.
+    "mali", "kgsl", "devfreq", "gpufreq", "gpu_model", "gpuclk",
+    "gpu_cores", "core_count", "shader_core", "mp_count",
 };
 
 static bool ReconHit(const char* s) {
@@ -407,6 +411,64 @@ static int CpuClusterMap(int* coreCluster, int* coreIndexInCluster) {
     return total;
 }
 
+// v2.4.6: number of clusters in the layout string. "1+2+2+3" -> 4 clusters.
+static int CpuClusterCount() {
+    const char* s = CpuSpoofClusters();
+    if (!s || !*s) return 0;
+    int count = 0;
+    bool inNum = false;
+    while (*s) {
+        if (*s >= '0' && *s <= '9') {
+            if (!inNum) { count++; inNum = true; }
+        } else {
+            inNum = false;
+        }
+        s++;
+    }
+    return count;
+}
+
+// v2.4.6: is this path a cpufreq/policyN directory that must NOT exist?
+// DevCheck enumerates policy dirs to determine the cluster count. On the
+// emulator every CPU has its own policy dir, so without hiding policy4..N
+// DevCheck sees one cluster per core.
+static bool IsHiddenPolicyPath(const char* path) {
+    if (!CpuSpoofActive() || !path) return false;
+    static const char kPre[] = "/sys/devices/system/cpu/cpufreq/policy";
+    if (strncmp(path, kPre, sizeof(kPre) - 1) != 0) return false;
+    const char* p = path + sizeof(kPre) - 1;
+    int n = 0;
+    bool hasN = false;
+    while (*p >= '0' && *p <= '9') {
+        n = n * 10 + (*p - '0');
+        p++;
+        hasN = true;
+    }
+    if (!hasN) return false;
+    // Match the policy dir itself or any file inside it - but NOT names like
+    // "policy0x" or "policy0_alt".
+    if (*p != '\0' && *p != '/') return false;
+    int clusterCount = CpuClusterCount();
+    if (clusterCount <= 0) return false;
+    return n >= clusterCount;
+}
+
+// v2.4.6: same test for a dirent name (no leading path).
+static bool IsHiddenPolicyDirEntry(const char* name) {
+    if (!name || strncmp(name, "policy", 6) != 0) return false;
+    const char* p = name + 6;
+    if (*p < '0' || *p > '9') return false;
+    int n = 0;
+    while (*p >= '0' && *p <= '9') {
+        n = n * 10 + (*p - '0');
+        p++;
+    }
+    if (*p != '\0') return false;
+    int clusterCount = CpuClusterCount();
+    if (clusterCount <= 0) return false;
+    return n >= clusterCount;
+}
+
 static void CpuClusterList(int c, const int* coreCluster, int total, char* out, size_t cap) {
     int first = -1, last = -1;
     for (int i = 0; i < total; i++) {
@@ -462,10 +524,27 @@ static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
         v = CpuSpoofMinKHz();
     } else if (strcmp(leaf, "cpuinfo_max_freq") == 0 || strcmp(leaf, "scaling_max_freq") == 0) {
         v = CpuSpoofMaxKHz();
+    } else if (strcmp(leaf, "scaling_cur_freq") == 0) {
+        // v2.4.6: DevCheck polls this per-core and uses it (with max freq)
+        // to render the live cluster view. Report a value inside the
+        // cluster's range so higher clusters do not appear idle.
+        v = (CpuSpoofMinKHz() + CpuSpoofMaxKHz()) / 2;
     } else {
         return false;
     }
     snprintf(out, cap, "%d\n", v);
+    return true;
+}
+
+static bool CpuGovernorSpoofValue(const char* path, char* out, size_t cap) {
+    static const char kRoot[] = "/sys/devices/system/cpu/";
+    if (strncmp(path, kRoot, sizeof(kRoot) - 1) != 0) return false;
+    const char* cpufreq = strstr(path, "cpufreq/");
+    if (cpufreq == nullptr) return false;
+    const char* slash = strrchr(path, '/');
+    if (!slash || slash[1] == '\0') return false;
+    if (strcmp(slash + 1, "scaling_governor") != 0) return false;
+    snprintf(out, cap, "schedutil\n");
     return true;
 }
 
@@ -479,6 +558,9 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
 
     static const char kCpuRoot[] = "/sys/devices/system/cpu/";
 
+    // --- cpufreq/policyN/{affected,related}_cpus ----------------------------
+    // v2.4.6: policyN is the CLUSTER index, not a CPU index. On a real device
+    // policy0 contains the first cluster's members, policy1 the second's, ...
     {
         static const char kPolicy[] = "/sys/devices/system/cpu/cpufreq/policy";
         if (strncmp(path, kPolicy, sizeof(kPolicy) - 1) == 0) {
@@ -496,13 +578,12 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
             if (strcmp(leaf, "affected_cpus") != 0 && strcmp(leaf, "related_cpus") != 0) {
                 return false;
             }
-            int cluster = 0;
-            if (pol >= 0 && pol < total) cluster = coreCluster[pol];
-            CpuClusterList(cluster, coreCluster, total, out, cap);
+            CpuClusterList(pol, coreCluster, total, out, cap);
             return true;
         }
     }
 
+    // --- cpuN/... -----------------------------------------------------------
     if (strncmp(path, kCpuRoot, sizeof(kCpuRoot) - 1) != 0) return false;
     const char* p = path + sizeof(kCpuRoot) - 1;
     int core = 0;
@@ -548,9 +629,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
         return true;
     }
 
-    // v2.4.5: Linux 6.x exposes cluster_cpus / cluster_cpus_list as the true
-    // cluster-membership nodes. Without these DevCheck falls back to per-core
-    // grouping when core_siblings reports all cores as siblings.
     if (strcmp(leaf, "core_cpus_list") == 0 ||
         strcmp(leaf, "thread_siblings_list") == 0 ||
         strcmp(leaf, "cluster_cpus_list") == 0) {
@@ -593,6 +671,7 @@ static long ServeSysfsSpoofFd(const char* path, int flags) {
     }
     char val[64];
     if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
+        CpuGovernorSpoofValue(path, val, sizeof(val)) ||
         CpuTopologySpoofValue(path, val, sizeof(val))) {
         return CreateMemfdWith(val, strlen(val), flags);
     }
@@ -602,6 +681,12 @@ static long ServeSysfsSpoofFd(const char* path, int flags) {
 static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
     SpecialAction sp = ResolveSpecial(path);
     if (sp == SpecialAction::None) {
+        // v2.4.6: hide non-existent policy dirs.
+        if (IsHiddenPolicyPath(path)) {
+            errno = ENOENT;
+            *fdOut = -1;
+            return true;
+        }
         if (SpoofActive() && IsPropsFile(path) && (flags & O_ACCMODE) == O_RDONLY) {
             std::string raw;
             if (!ReadWholeFile(path, &raw)) return false;
@@ -627,6 +712,7 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
         if (CpuSpoofActive() && (flags & O_ACCMODE) == O_RDONLY) {
             char val[64];
             if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
+                CpuGovernorSpoofValue(path, val, sizeof(val)) ||
                 CpuTopologySpoofValue(path, val, sizeof(val))) {
                 int mfd = CreateMemfdWith(val, strlen(val), flags);
                 if (mfd >= 0) {
@@ -1036,7 +1122,8 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
         auto* d = (PasLinuxDirent64*)p;
         size_t rl = d->d_reclen;
         if (rl < sizeof(PasLinuxDirent64) || p + rl > end) break;
-        if (!IsHiddenIfaceName(d->d_name)) {
+        // v2.4.6: also hide cpufreq/policyN entries beyond the cluster count.
+        if (!IsHiddenIfaceName(d->d_name) && !IsHiddenPolicyDirEntry(d->d_name)) {
             if (out != p) memmove(out, p, rl);
             out += rl;
         }
@@ -1048,7 +1135,7 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
 int HideAccess(const char* path, int mode) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("access", path, (long)mode);
-    if (IsHiddenPath(path)) {
+    if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -1058,7 +1145,7 @@ int HideAccess(const char* path, int mode) {
 int HideFAccessAt(int dirfd, const char* path, int mode, int flags) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("faccessat", path, (long)mode);
-    if (IsHiddenPath(path)) {
+    if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -1068,7 +1155,7 @@ int HideFAccessAt(int dirfd, const char* path, int mode, int flags) {
 int HideStat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("stat", path, 0);
-    if (IsHiddenPath(path)) {
+    if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -1078,7 +1165,7 @@ int HideStat(const char* path, struct stat* buf) {
 int HideLstat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("lstat", path, 0);
-    if (IsHiddenPath(path)) {
+    if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
         return -1;
     }
@@ -1088,12 +1175,16 @@ int HideLstat(const char* path, struct stat* buf) {
 int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("fstatat", path, 0);
-    if (IsHiddenPath(path)) {
+    if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
         return -1;
     }
     return BYTEHOOK_CALL_PREV(HideFStatAt, dirfd, path, buf, flags);
 }
+
+// ---------------------------------------------------------------------------
+// CPU: subprocess readers
+// ---------------------------------------------------------------------------
 
 static std::string g_fake_cpuinfo_path;
 static bool g_fake_cpuinfo_probed = false;
@@ -1321,6 +1412,10 @@ static long MySyscall(long number, ...) {
             errno = ENOENT;
             return -1;
         }
+        if (hpath != nullptr && IsHiddenPolicyPath(hpath)) {
+            errno = ENOENT;
+            return -1;
+        }
     }
 #endif
 #ifdef __NR_openat
@@ -1336,6 +1431,10 @@ static long MySyscall(long number, ...) {
     if (number == __NR_open) {
         const char* hpath = (const char*)a0;
         if (hpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY && IsHiddenPathFast(hpath)) {
+            errno = ENOENT;
+            return -1;
+        }
+        if (hpath != nullptr && IsHiddenPolicyPath(hpath)) {
             errno = ENOENT;
             return -1;
         }
