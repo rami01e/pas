@@ -3,15 +3,9 @@ package com.kimera.pas.spoof
 /**
  * Shared CPU / GPU model catalogs.
  *
- * v2.4.4: the CPUS list now uses NAMED ARGUMENTS exclusively. In v2.4.3 the
- * new `clusters` string was appended positionally to entries that did not
- * have a `hardwareLine`, so the "cluster layout" landed in `hardwareLine`
- * instead and `clusters` fell back to the default. Native then wrote that
- * layout string into the /proc/cpuinfo Hardware row, and DevCheck (which
- * treats that row as the CPU name on ARM) reported "2+6" as the CPU.
- *
- * GPU entries keep their positional helper calls (mali/adreno/xclipse) -
- * those helpers own the ordering locally and are not affected.
+ * v2.4.5: GPU entries now carry core count, L2 cache size and architecture
+ * (Bifrost / Valhall / Adreno) so DevCheck-style readers see a fully
+ * coherent GPU identity instead of just a name string.
  */
 object DeviceCatalog {
 
@@ -64,7 +58,11 @@ object DeviceCatalog {
         val conformance: Int,
         val driverId: Int,
         val descriptorIndexing: Boolean,
-        val sparseBinding: Boolean
+        val sparseBinding: Boolean,
+        // v2.4.5: physical characteristics probed by DevCheck for Mali.
+        val gpuCores: Int = 1,
+        val l2CacheKb: Int = 64,
+        val gpuArch: String = "Bifrost"
     )
 
     private fun vk(major: Int, minor: Int, patch: Int): Long =
@@ -74,7 +72,6 @@ object DeviceCatalog {
         (major shl 24) or (minor shl 16) or (sub shl 8) or patch
 
     val CPUS = listOf(
-        // ---- Exynos (2022-2026 devices + the reference E850) ----
         Cpu(
             display = "Samsung Exynos 850",
             manufacturer = "Samsung",
@@ -209,8 +206,6 @@ object DeviceCatalog {
             maxKHz = 2910000,
             clusters = "1+4+3"
         ),
-
-        // ---- Snapdragon (US Samsung flagship / midrange) ----
         Cpu(
             display = "Qualcomm Snapdragon 888",
             manufacturer = "Qualcomm",
@@ -333,8 +328,6 @@ object DeviceCatalog {
             maxKHz = 2400000,
             clusters = "4+4"
         ),
-
-        // ---- MediaTek (budget A-series) ----
         Cpu(
             display = "MediaTek Helio G85",
             manufacturer = "MediaTek",
@@ -361,13 +354,14 @@ object DeviceCatalog {
         )
     )
 
-    // ---- GPU builders -----------------------------------------------------
-
     private fun mali(
         renderer: String,
         deviceId: Long,
         info: String = MALI_INFO_R38_EAC0,
-        descriptorIndexing: Boolean = true
+        descriptorIndexing: Boolean = true,
+        gpuCores: Int = 1,
+        l2CacheKb: Int = 64,
+        gpuArch: String = "Bifrost"
     ) = Gpu(
         vendor = "ARM",
         renderer = renderer,
@@ -383,7 +377,10 @@ object DeviceCatalog {
         conformance = conf(1, 3, 1, 0),
         driverId = 9,
         descriptorIndexing = descriptorIndexing,
-        sparseBinding = false
+        sparseBinding = false,
+        gpuCores = gpuCores,
+        l2CacheKb = l2CacheKb,
+        gpuArch = gpuArch
     )
 
     private fun adreno(
@@ -397,7 +394,9 @@ object DeviceCatalog {
         info: String,
         conformance: Int,
         descriptorIndexing: Boolean = true,
-        sparseBinding: Boolean = true
+        sparseBinding: Boolean = true,
+        gpuCores: Int = 1,
+        l2CacheKb: Int = 64
     ) = Gpu(
         vendor = "Qualcomm",
         renderer = renderer,
@@ -413,7 +412,10 @@ object DeviceCatalog {
         conformance = conformance,
         driverId = 8,
         descriptorIndexing = descriptorIndexing,
-        sparseBinding = sparseBinding
+        sparseBinding = sparseBinding,
+        gpuCores = gpuCores,
+        l2CacheKb = l2CacheKb,
+        gpuArch = "Adreno"
     )
 
     private fun xclipse(
@@ -426,7 +428,9 @@ object DeviceCatalog {
         vkDrv: Long,
         vkGit: String,
         spal: Boolean = false,
-        conformanceV: Int = conf(1, 3, 5, 1)
+        conformanceV: Int = conf(1, 3, 5, 1),
+        gpuCores: Int = 1,
+        l2CacheKb: Int = 64
     ) = Gpu(
         vendor = "Samsung Electronics Co., Ltd.",
         renderer = "ANGLE ((Samsung Xclipse $num) on Vulkan $apiText)",
@@ -442,104 +446,86 @@ object DeviceCatalog {
         conformance = conformanceV,
         driverId = 21,
         descriptorIndexing = true,
-        sparseBinding = true
+        sparseBinding = true,
+        gpuCores = gpuCores,
+        l2CacheKb = l2CacheKb,
+        gpuArch = "RDNA"
     )
 
     val GPUS = listOf(
-        // ---- ARM Mali (Exynos pairing) ----
-        mali("Mali-G52 MC2", 0x74021000L, MALI_INFO_G52, descriptorIndexing = false),
-        mali("Mali-G57 MC2", 0x90930010L),
-        mali("Mali-G68", 0x92041010L),
-        mali("Mali-G68 MP2", 0x92041010L),
-        mali("Mali-G68 MP5", 0x92041010L),
-        mali("Mali-G76 MP12", 0x72110000L, MALI_INFO_R38_EAC0),
-        mali("Mali-G77 MP11", 0x90800011L, MALI_INFO_G77),
-        mali("Mali-G78 MP14", 0x92020000L, MALI_INFO_G78),
-
-        // ---- Adreno (Snapdragon pairing) ----
-        adreno(
-            "Adreno (TM) 610", 0x6010000L, 512, 502, 39, vk(1, 1, 128),
-            "OpenGL ES 3.2 V@0502.39.1 (GIT@a22bdbeed1, I9e7c613add, 1749016775) (Date:06/04/25)",
-            "Driver Build: a22bdbeed1, I9e7c613add, 1749016775\nDate: 06/04/25\nCompiler Version: EV031.36.08.35\nDriver Branch:",
-            conf(1, 2, 7, 2), descriptorIndexing = false, sparseBinding = false
-        ),
-        adreno(
-            "Adreno (TM) 619", 0x6010901L, 512, 762, 43, vk(1, 3, 128),
-            "OpenGL ES 3.2 V@0762.43 (GIT@3e46547c6d, I05d4d500aa, 1763457967) (Date:11/18/25)",
-            "Driver Build: 3e46547c6d, I05d4d500aa, 1763457967\nDate: 11/18/25\nCompiler Version: E031.45.02.26\nDriver Branch:",
-            conf(1, 3, 6, 0), sparseBinding = false
-        ),
-        adreno(
-            "Adreno (TM) 640", 0x6040001L, 512, 502, 0, vk(1, 1, 128),
-            "OpenGL ES 3.2 V@0502.0 (GIT@3dad7f8ed7, I593c16c433, 1633080534) (Date:10/01/21)",
-            "Driver Build: 3dad7f8ed7, I593c16c433, 1633080534\nDate: 10/01/21\nCompiler Version: EV031.32.02.02\nDriver Branch:",
-            conf(1, 2, 0, 1), sparseBinding = false
-        ),
-        adreno(
-            "Adreno (TM) 650", 0x6050002L, 512, 819, 2, vk(1, 3, 295),
-            "OpenGL ES 3.2 V@0819.2 (GIT@651341e91d, I8d46b3bbb7, 1754290135) (Date:08/04/25)",
-            "Driver Build: 651341e91d, I8d46b3bbb7, 1754290135\nDate: 08/04/25\nCompiler Version: E031.50.02.00\nDriver Branch:",
-            conf(1, 4, 0, 0), sparseBinding = false
-        ),
-        adreno(
-            "Adreno (TM) 660", 0x6060001L, 512, 530, 0, vk(1, 1, 128),
-            "OpenGL ES 3.2 V@0530.0 (GIT@a1cf8ab5e3, I428bf45773, 1699535026) (Date:11/09/23)",
-            "Driver Build: a1cf8ab5e3, I428bf45773, 1699535026\nDate: 11/09/23\nCompiler Version: EV031.35.01.12\nDriver Branch:",
-            conf(1, 2, 0, 1), sparseBinding = false
-        ),
-        adreno(
-            "Adreno (TM) 642L", 0x6030500L, 512, 863, 1, vk(1, 3, 295),
-            "OpenGL ES 3.2 V@0863.1 (GIT@ffdf890711, I896ce78af2, 1766558511) (Date:12/24/25)",
-            "Driver Build: ffdf890711, I896ce78af2, 1766558511\nDate: 12/24/25\nCompiler Version: E031.50.36.00\nDriver Branch:",
-            conf(1, 4, 1, 0), sparseBinding = false
-        ),
-        adreno(
-            "Adreno (TM) 730", 0x7030001L, 512, 615, 98, vk(1, 1, 128),
-            "OpenGL ES 3.2 V@0615.98 (GIT@0c393b63cf, I94e2bd5684, 1746191168) (Date:05/02/25)",
-            "Driver Build: 0c393b63cf, I94e2bd5684, 1746191168\nDate: 05/02/25\nCompiler Version: EV031.36.08.33\nDriver Branch:",
-            conf(1, 2, 7, 2)
-        ),
-        adreno(
-            "Adreno (TM) 740", 0x43050A01L, 512, 676, 1, vk(1, 3, 128),
-            "OpenGL ES 3.2 V@0676.1 (GIT@bad34dcf83, I1064ae0a1f, 1764326394) (Date:11/28/25)",
-            "Driver Build: bad34dcf83, I1064ae0a1f, 1764326394\nDate: 11/28/25\nCompiler Version: E031.41.03.64\nDriver Branch:",
-            conf(1, 3, 1, 0)
-        ),
-        adreno(
-            "Adreno (TM) 750", 0x43051401L, 512, 762, 1, vk(1, 3, 128),
-            "OpenGL ES 3.2 V@0762.1 (GIT@a0053eb399, I31b05c049d, 1766398679) (Date:12/22/25)",
-            "Driver Build: a0053eb399, I31b05c049d, 1766398679\nDate: 12/22/25\nCompiler Version: E031.45.02.25\nDriver Branch:",
-            conf(1, 3, 6, 0)
-        ),
-        adreno(
-            "Adreno (TM) 830", 0x44050001L, 512, 800, 64, vk(1, 3, 284),
-            "OpenGL ES 3.2 V@0800.64.7 (GIT@f61dec9117, I68b0a64d7e, 1774510019) (Date:03/26/26)",
-            "Driver Build: f61dec9117, I68b0a64d7e, 1774510019\nDate: 03/26/26\nCompiler Version: E031.47.18.56\nDriver Branch:",
-            conf(1, 3, 8, 0)
-        ),
-        adreno(
-            "Adreno (TM) 840", 0x44050A31L, 512, 842, 19, vk(1, 4, 295),
-            "OpenGL ES 3.2 V@0842.19.13 (GIT@089d643e2a, Icecd8f0534, 1782882597) (Date:07/01/26)",
-            "Driver Build: 089d643e2a, Icecd8f0534, 1782882597\nDate: 07/01/26\nCompiler Version: E031.50.19.32\nDriver Branch:",
-            conf(1, 4, 1, 0)
-        ),
-
-        // ---- Samsung Xclipse (Exynos pairing) ----
-        xclipse("920", 0x73A0L, "1.3.279", "24.1.293", "35f6eab5b214", "24.0.545", vk(24, 0, 545), "1fc295b0d2"),
-        xclipse("940", 0x2600200L, "1.3.279", "24.1.307", "86f99cfe6317", "24.0.534", vk(24, 0, 534), "1900168dcb"),
-        xclipse("950", 0x3600200L, "1.3.279", "24.1.293", "35f6eab5b214", "24.0.542", vk(24, 0, 542), "b02432ec77"),
-        xclipse(
-            "960", 0x4600200L, "1.4.304", "25.6.3", "cbd4f9cf1088",
-            "25.2.39", vk(25, 2, 39), "ee686460f4", spal = true,
-            conformanceV = conf(1, 4, 1, 1)
-        ),
-        xclipse("530", 0x1300100L, "1.3.279", "24.1.306", "6c522b193c69", "24.0.539", vk(24, 0, 539), "bd45943d20"),
-        xclipse("540", 0x2300100L, "1.3.279", "24.1.305", "e94bc7a33c77", "24.0.560", vk(24, 0, 560), "34bb549c57"),
-        xclipse(
-            "550", 0x3300100L, "1.4.304", "25.1.127", "7c9893305eb5",
-            "25.4.7", vk(25, 4, 7), "702e7fd271", spal = true,
-            conformanceV = conf(1, 4, 1, 1)
-        )
+        mali("Mali-G52 MC2", 0x74021000L, MALI_INFO_G52, descriptorIndexing = false,
+             gpuCores = 2, l2CacheKb = 64, gpuArch = "Bifrost"),
+        mali("Mali-G57 MC2", 0x90930010L, gpuCores = 2, l2CacheKb = 64, gpuArch = "Valhall"),
+        mali("Mali-G68", 0x92041010L, gpuCores = 6, l2CacheKb = 128, gpuArch = "Valhall"),
+        mali("Mali-G68 MP2", 0x92041010L, gpuCores = 2, l2CacheKb = 64, gpuArch = "Valhall"),
+        mali("Mali-G68 MP5", 0x92041010L, gpuCores = 5, l2CacheKb = 128, gpuArch = "Valhall"),
+        mali("Mali-G76 MP12", 0x72110000L, MALI_INFO_R38_EAC0, gpuCores = 12,
+             l2CacheKb = 512, gpuArch = "Bifrost"),
+        mali("Mali-G77 MP11", 0x90800011L, MALI_INFO_G77, gpuCores = 11,
+             l2CacheKb = 512, gpuArch = "Valhall"),
+        mali("Mali-G78 MP14", 0x92020000L, MALI_INFO_G78, gpuCores = 14,
+             l2CacheKb = 512, gpuArch = "Valhall"),
+        adreno("Adreno (TM) 610", 0x6010000L, 512, 502, 39, vk(1, 1, 128),
+               "OpenGL ES 3.2 V@0502.39.1 (GIT@a22bdbeed1, I9e7c613add, 1749016775) (Date:06/04/25)",
+               "Driver Build: a22bdbeed1, I9e7c613add, 1749016775\nDate: 06/04/25\nCompiler Version: EV031.36.08.35\nDriver Branch:",
+               conf(1, 2, 7, 2), descriptorIndexing = false, sparseBinding = false,
+               gpuCores = 1, l2CacheKb = 64),
+        adreno("Adreno (TM) 619", 0x6010901L, 512, 762, 43, vk(1, 3, 128),
+               "OpenGL ES 3.2 V@0762.43 (GIT@3e46547c6d, I05d4d500aa, 1763457967) (Date:11/18/25)",
+               "Driver Build: 3e46547c6d, I05d4d500aa, 1763457967\nDate: 11/18/25\nCompiler Version: E031.45.02.26\nDriver Branch:",
+               conf(1, 3, 6, 0), sparseBinding = false, gpuCores = 1, l2CacheKb = 128),
+        adreno("Adreno (TM) 640", 0x6040001L, 512, 502, 0, vk(1, 1, 128),
+               "OpenGL ES 3.2 V@0502.0 (GIT@3dad7f8ed7, I593c16c433, 1633080534) (Date:10/01/21)",
+               "Driver Build: 3dad7f8ed7, I593c16c433, 1633080534\nDate: 10/01/21\nCompiler Version: EV031.32.02.02\nDriver Branch:",
+               conf(1, 2, 0, 1), sparseBinding = false, gpuCores = 1, l2CacheKb = 256),
+        adreno("Adreno (TM) 650", 0x6050002L, 512, 819, 2, vk(1, 3, 295),
+               "OpenGL ES 3.2 V@0819.2 (GIT@651341e91d, I8d46b3bbb7, 1754290135) (Date:08/04/25)",
+               "Driver Build: 651341e91d, I8d46b3bbb7, 1754290135\nDate: 08/04/25\nCompiler Version: E031.50.02.00\nDriver Branch:",
+               conf(1, 4, 0, 0), sparseBinding = false, gpuCores = 2, l2CacheKb = 512),
+        adreno("Adreno (TM) 660", 0x6060001L, 512, 530, 0, vk(1, 1, 128),
+               "OpenGL ES 3.2 V@0530.0 (GIT@a1cf8ab5e3, I428bf45773, 1699535026) (Date:11/09/23)",
+               "Driver Build: a1cf8ab5e3, I428bf45773, 1699535026\nDate: 11/09/23\nCompiler Version: EV031.35.01.12\nDriver Branch:",
+               conf(1, 2, 0, 1), sparseBinding = false, gpuCores = 2, l2CacheKb = 512),
+        adreno("Adreno (TM) 642L", 0x6030500L, 512, 863, 1, vk(1, 3, 295),
+               "OpenGL ES 3.2 V@0863.1 (GIT@ffdf890711, I896ce78af2, 1766558511) (Date:12/24/25)",
+               "Driver Build: ffdf890711, I896ce78af2, 1766558511\nDate: 12/24/25\nCompiler Version: E031.50.36.00\nDriver Branch:",
+               conf(1, 4, 1, 0), sparseBinding = false, gpuCores = 2, l2CacheKb = 256),
+        adreno("Adreno (TM) 730", 0x7030001L, 512, 615, 98, vk(1, 1, 128),
+               "OpenGL ES 3.2 V@0615.98 (GIT@0c393b63cf, I94e2bd5684, 1746191168) (Date:05/02/25)",
+               "Driver Build: 0c393b63cf, I94e2bd5684, 1746191168\nDate: 05/02/25\nCompiler Version: EV031.36.08.33\nDriver Branch:",
+               conf(1, 2, 7, 2), gpuCores = 2, l2CacheKb = 1024),
+        adreno("Adreno (TM) 740", 0x43050A01L, 512, 676, 1, vk(1, 3, 128),
+               "OpenGL ES 3.2 V@0676.1 (GIT@bad34dcf83, I1064ae0a1f, 1764326394) (Date:11/28/25)",
+               "Driver Build: bad34dcf83, I1064ae0a1f, 1764326394\nDate: 11/28/25\nCompiler Version: E031.41.03.64\nDriver Branch:",
+               conf(1, 3, 1, 0), gpuCores = 3, l2CacheKb = 1024),
+        adreno("Adreno (TM) 750", 0x43051401L, 512, 762, 1, vk(1, 3, 128),
+               "OpenGL ES 3.2 V@0762.1 (GIT@a0053eb399, I31b05c049d, 1766398679) (Date:12/22/25)",
+               "Driver Build: a0053eb399, I31b05c049d, 1766398679\nDate: 12/22/25\nCompiler Version: E031.45.02.25\nDriver Branch:",
+               conf(1, 3, 6, 0), gpuCores = 3, l2CacheKb = 1024),
+        adreno("Adreno (TM) 830", 0x44050001L, 512, 800, 64, vk(1, 3, 284),
+               "OpenGL ES 3.2 V@0800.64.7 (GIT@f61dec9117, I68b0a64d7e, 1774510019) (Date:03/26/26)",
+               "Driver Build: f61dec9117, I68b0a64d7e, 1774510019\nDate: 03/26/26\nCompiler Version: E031.47.18.56\nDriver Branch:",
+               conf(1, 3, 8, 0), gpuCores = 4, l2CacheKb = 2048),
+        adreno("Adreno (TM) 840", 0x44050A31L, 512, 842, 19, vk(1, 4, 295),
+               "OpenGL ES 3.2 V@0842.19.13 (GIT@089d643e2a, Icecd8f0534, 1782882597) (Date:07/01/26)",
+               "Driver Build: 089d643e2a, Icecd8f0534, 1782882597\nDate: 07/01/26\nCompiler Version: E031.50.19.32\nDriver Branch:",
+               conf(1, 4, 1, 0), gpuCores = 4, l2CacheKb = 2048),
+        xclipse("920", 0x73A0L, "1.3.279", "24.1.293", "35f6eab5b214", "24.0.545",
+                vk(24, 0, 545), "1fc295b0d2", gpuCores = 4, l2CacheKb = 512),
+        xclipse("940", 0x2600200L, "1.3.279", "24.1.307", "86f99cfe6317", "24.0.534",
+                vk(24, 0, 534), "1900168dcb", gpuCores = 6, l2CacheKb = 1024),
+        xclipse("950", 0x3600200L, "1.3.279", "24.1.293", "35f6eab5b214", "24.0.542",
+                vk(24, 0, 542), "b02432ec77", gpuCores = 6, l2CacheKb = 1024),
+        xclipse("960", 0x4600200L, "1.4.304", "25.6.3", "cbd4f9cf1088", "25.2.39",
+                vk(25, 2, 39), "ee686460f4", spal = true, conformanceV = conf(1, 4, 1, 1),
+                gpuCores = 8, l2CacheKb = 2048),
+        xclipse("530", 0x1300100L, "1.3.279", "24.1.306", "6c522b193c69", "24.0.539",
+                vk(24, 0, 539), "bd45943d20", gpuCores = 4, l2CacheKb = 512),
+        xclipse("540", 0x2300100L, "1.3.279", "24.1.305", "e94bc7a33c77", "24.0.560",
+                vk(24, 0, 560), "34bb549c57", gpuCores = 4, l2CacheKb = 512),
+        xclipse("550", 0x3300100L, "1.4.304", "25.1.127", "7c9893305eb5", "25.4.7",
+                vk(25, 4, 7), "702e7fd271", spal = true, conformanceV = conf(1, 4, 1, 1),
+                gpuCores = 6, l2CacheKb = 1024)
     )
 
     fun cpu(display: String?): Cpu = CPUS.firstOrNull { it.display == display } ?: CPUS[0]

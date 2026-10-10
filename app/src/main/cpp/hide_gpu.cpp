@@ -1,19 +1,8 @@
 // CPU model / GPU (OpenGL) spoof for the scoped process.
 //
-// CPU: the model identity is delivered to hide_fs.cpp (/proc/cpuinfo view,
-// cpufreq min/max mirrors, subprocess exec redirect) and hide_props.cpp
-// (ro.soc.* properties); the Kotlin side patches the Java Build.SOC_* /
-// HARDWARE / BOARD fields.
-// GPU: glGetString(GL_VENDOR / GL_RENDERER / GL_VERSION) is replaced for
-// native OpenGL readers through this hook; the Java GLES classes are covered
-// from Kotlin, and hide_vulkan.cpp covers the Vulkan identity. GL_EXTENSIONS
-// keeps its real value so feature detection still works.
-//
-// The GL / Vulkan hooks are installed only when the GPU spoof is enabled at
-// process start (configuration takes effect when a scoped app restarts).
-//
-// Config values are written once, early, from the module thread; the hot paths
-// read plain flags/arrays (same style as hide_props.cpp).
+// v2.4.5: GPU now carries core count, L2 cache and architecture so that
+// DevCheck's Mali probe (which reads gpuinfo / core_mask / sysfs) sees a
+// coherent device instead of only a name string.
 
 #include "pas.h"
 
@@ -33,14 +22,11 @@ static char g_cpu_display[192] = {0};
 static char g_cpu_mfr[64] = {0};
 static char g_cpu_model[64] = {0};
 static char g_cpu_part[16] = {0};
-// v2.4.0: CPU implementer for /proc/cpuinfo (0x41 ARM, 0x51 Qualcomm Oryon).
 static char g_cpu_implementer[8] = {0};
 static char g_cpu_info_model[96] = {0};
 static char g_cpu_features[256] = {0};
 static char g_cpu_hwline[256] = {0};
-// v2.4.0: platform value for Build.HARDWARE / ro.hardware surfaces.
 static char g_cpu_hardware[64] = {0};
-// v2.4.2: cluster layout string ("4+4", "1+3+4"...) for sysfs mirrors.
 static char g_cpu_clusters[32] = {0};
 static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
@@ -50,8 +36,6 @@ static volatile bool g_gpu_chain_on = true;
 static volatile bool g_gpu_vulkan_on = true;
 static char g_gpu_vendor[64] = {0};
 static char g_gpu_renderer[192] = {0};
-// v2.4.0: raw Vulkan deviceName (distinct from the GL_RENDERER string:
-// Xclipse GL shows the ANGLE wrapper while Vulkan shows the plain name).
 static char g_gpu_vk_device_name[192] = {0};
 static char g_gpu_gl_version[192] = {0};
 static volatile unsigned long long g_gpu_vendor_id = 0;
@@ -60,6 +44,10 @@ static volatile unsigned long long g_gpu_driver_version = 0;
 static volatile unsigned long long g_gpu_api_version = 0;
 static char g_gpu_driver_name[192] = {0};
 static char g_gpu_driver_info[256] = {0};
+// v2.4.5: physical characteristics DevCheck probes for Mali GPUs.
+static volatile int g_gpu_cores = 1;
+static volatile int g_gpu_l2_cache_kb = 64;
+static char g_gpu_arch[32] = {0};
 
 static void CopyStr(char* dst, size_t cap, const char* src) {
     snprintf(dst, cap, "%s", src ? src : "");
@@ -91,9 +79,6 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
         (int)g_cpu_max_khz);
 }
 
-// v2.4.3: cluster layout arrives through its own call (isolated from the
-// identity path). Same core info in every cluster - no per-cluster parts or
-// clocks; the mirrors only change the sysfs grouping view.
 void SetCpuClusters(bool cpuOn, const char* clusters) {
     if (clusters != nullptr && clusters[0] != '\0') {
         CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), clusters);
@@ -107,12 +92,11 @@ void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const ch
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
                   const char* driverName, const char* driverInfo,
-                  const char* vkDeviceName) {
+                  const char* vkDeviceName, int gpuCores, int l2CacheKb,
+                  const char* gpuArch) {
     g_gpu_on = false;
     CopyStr(g_gpu_vendor, sizeof(g_gpu_vendor), vendor);
     CopyStr(g_gpu_renderer, sizeof(g_gpu_renderer), renderer);
-    // v2.4.0: fall back to the renderer string when no distinct Vulkan name
-    // is delivered (back-compat with an older config path).
     if (vkDeviceName != nullptr && vkDeviceName[0] != '\0') {
         CopyStr(g_gpu_vk_device_name, sizeof(g_gpu_vk_device_name), vkDeviceName);
     } else {
@@ -125,71 +109,37 @@ void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const ch
     g_gpu_device_id = deviceId;
     g_gpu_driver_version = driverVersion;
     g_gpu_api_version = apiVersion;
+    g_gpu_cores = gpuCores > 0 ? gpuCores : 1;
+    g_gpu_l2_cache_kb = l2CacheKb > 0 ? l2CacheKb : 64;
+    CopyStr(g_gpu_arch, sizeof(g_gpu_arch), gpuArch);
     g_gpu_on = gpuOn && g_gpu_renderer[0] != '\0';
-    Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx", (int)g_gpu_on,
-        g_gpu_renderer, g_gpu_vendor_id, g_gpu_device_id);
+    Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx cores=%d l2=%dkB arch=%s",
+        (int)g_gpu_on, g_gpu_renderer, g_gpu_vendor_id, g_gpu_device_id, g_gpu_cores,
+        g_gpu_l2_cache_kb, g_gpu_arch);
 }
 
 bool CpuSpoofActive() {
     return g_cpu_on;
 }
 
-std::string CpuSpoofDisplay() {
-    return std::string(g_cpu_display);
-}
+std::string CpuSpoofDisplay() { return std::string(g_cpu_display); }
+std::string CpuSpoofManufacturer() { return std::string(g_cpu_mfr); }
+std::string CpuSpoofModel() { return std::string(g_cpu_model); }
+std::string CpuSpoofPart() { return std::string(g_cpu_part); }
+std::string CpuSpoofImplementer() { return std::string(g_cpu_implementer[0] != '\0' ? g_cpu_implementer : "0x41"); }
+std::string CpuSpoofHardware() { return std::string(g_cpu_hardware[0] != '\0' ? g_cpu_hardware : g_cpu_hwline); }
+std::string CpuSpoofCpuinfoModel() { return std::string(g_cpu_info_model); }
+std::string CpuSpoofFeatures() { return std::string(g_cpu_features); }
+std::string CpuSpoofHwLine() { return std::string(g_cpu_hwline); }
+int CpuSpoofMinKHz() { return g_cpu_min_khz; }
+int CpuSpoofMaxKHz() { return g_cpu_max_khz; }
 
-std::string CpuSpoofManufacturer() {
-    return std::string(g_cpu_mfr);
-}
-
-std::string CpuSpoofModel() {
-    return std::string(g_cpu_model);
-}
-
-std::string CpuSpoofPart() {
-    return std::string(g_cpu_part);
-}
-
-std::string CpuSpoofImplementer() {
-    return std::string(g_cpu_implementer[0] != '\0' ? g_cpu_implementer : "0x41");
-}
-
-std::string CpuSpoofHardware() {
-    return std::string(g_cpu_hardware[0] != '\0' ? g_cpu_hardware : g_cpu_hwline);
-}
-
-std::string CpuSpoofCpuinfoModel() {
-    return std::string(g_cpu_info_model);
-}
-
-std::string CpuSpoofFeatures() {
-    return std::string(g_cpu_features);
-}
-
-std::string CpuSpoofHwLine() {
-    return std::string(g_cpu_hwline);
-}
-
-int CpuSpoofMinKHz() {
-    return g_cpu_min_khz;
-}
-
-int CpuSpoofMaxKHz() {
-    return g_cpu_max_khz;
-}
-
-// v2.4.2: cluster layout for the sysfs topology mirrors ("4+4" etc).
 const char* CpuSpoofClusters() {
     return g_cpu_clusters[0] != '\0' ? g_cpu_clusters : "4+4";
 }
 
-bool GpuSpoofActive() {
-    return g_gpu_on;
-}
-
-bool VulkanSpoofActive() {
-    return g_gpu_vulkan_on;
-}
+bool GpuSpoofActive() { return g_gpu_on; }
+bool VulkanSpoofActive() { return g_gpu_vulkan_on; }
 
 void SetGpuOptions(bool chain, bool vulkan) {
     g_gpu_chain_on = chain;
@@ -197,72 +147,30 @@ void SetGpuOptions(bool chain, bool vulkan) {
     Log("native: gpu options chain=%d vulkan=%d", (int)chain, (int)vulkan);
 }
 
-std::string GpuSpoofVendor() {
-    return std::string(g_gpu_vendor);
-}
+std::string GpuSpoofVendor() { return std::string(g_gpu_vendor); }
+std::string GpuSpoofRenderer() { return std::string(g_gpu_renderer); }
+std::string GpuSpoofVkDeviceName() { return std::string(g_gpu_vk_device_name[0] != '\0' ? g_gpu_vk_device_name : g_gpu_renderer); }
+std::string GpuSpoofGlVersion() { return std::string(g_gpu_gl_version); }
+unsigned long long GpuSpoofVendorId() { return g_gpu_vendor_id; }
+unsigned long long GpuSpoofDeviceId() { return g_gpu_device_id; }
+unsigned long long GpuSpoofDriverVersion() { return g_gpu_driver_version; }
+unsigned long long GpuSpoofApiVersion() { return g_gpu_api_version; }
+std::string GpuSpoofDriverName() { return std::string(g_gpu_driver_name); }
+std::string GpuSpoofDriverInfo() { return std::string(g_gpu_driver_info); }
 
-std::string GpuSpoofRenderer() {
-    return std::string(g_gpu_renderer);
-}
-
-std::string GpuSpoofVkDeviceName() {
-    return std::string(g_gpu_vk_device_name[0] != '\0' ? g_gpu_vk_device_name : g_gpu_renderer);
-}
-
-std::string GpuSpoofGlVersion() {
-    return std::string(g_gpu_gl_version);
-}
-
-unsigned long long GpuSpoofVendorId() {
-    return g_gpu_vendor_id;
-}
-
-unsigned long long GpuSpoofDeviceId() {
-    return g_gpu_device_id;
-}
-
-unsigned long long GpuSpoofDriverVersion() {
-    return g_gpu_driver_version;
-}
-
-unsigned long long GpuSpoofApiVersion() {
-    return g_gpu_api_version;
-}
-
-std::string GpuSpoofDriverName() {
-    return std::string(g_gpu_driver_name);
-}
-
-std::string GpuSpoofDriverInfo() {
-    return std::string(g_gpu_driver_info);
-}
-
-// ---------------------------------------------------------------------------
-// OpenGL glGetString hook (native callers)
-// ---------------------------------------------------------------------------
-
-// GL_VENDOR = 0x1F00, GL_RENDERER = 0x1F01, GL_VERSION = 0x1F02
-// GL identity entry points are covered on every path ANGLE-style consumers
-// use: direct PLT calls (bytehook), eglGetProcAddress resolution and dlsym
-// resolution. Resolver results are bytehook-free representatives because
-// those pointers are called directly (outside bytehook frames).
+// v2.4.5: physical characteristics for the DevCheck Mali probe.
+int GpuSpoofCores() { return g_gpu_cores; }
+int GpuSpoofL2CacheKb() { return g_gpu_l2_cache_kb; }
+std::string GpuSpoofArch() { return std::string(g_gpu_arch[0] != '\0' ? g_gpu_arch : "Bifrost"); }
 
 typedef void* (*PasEglGpaFn)(const char*);
 typedef const unsigned char* (*PasGlGetStringFn)(unsigned int);
 typedef const unsigned char* (*PasGlGetStringiFn)(unsigned int, unsigned int);
 
-// Per-driver chain slots: a process can host several GL stacks at once
-// (native driver via hwui, ANGLE/SwiftShader inside WebView renderers).
-// The chain used to keep ONE real pointer per symbol, so a second dlsym
-// resolution overwrote the first driver's entry point - the next GL call
-// then ran foreign code and the sandboxed renderer died. Every resolution
-// now gets its own slot and dispatches back to exactly the driver it came
-// from. When the table is full the caller receives the untouched real
-// pointer (unspoofed but safe).
 #define PAS_GL_SLOTS 8
 
 struct GlChainSlot {
-    void* key;  // real symbol address this slot was created from
+    void* key;
     PasGlGetStringFn get_string;
     PasGlGetStringiFn get_stringi;
     PasEglGpaFn get_proc_addr;
@@ -273,9 +181,6 @@ static pthread_mutex_t g_gl_slot_mtx = PTHREAD_MUTEX_INITIALIZER;
 static volatile unsigned g_gl_chain_logged = 0;
 static volatile int g_gl_diag = 0;
 
-// Recon-gated GL diagnosis: records which GL/EGL entry points actually flow
-// through the module inside this process (capped; driven by the GUI "Recon
-// logging" toggle). This is how we see what Chrome's ANGLE really calls.
 void GpuDiag(const char* tag, const char* detail) {
     if (!ReconEnabled()) return;
     int n = __sync_fetch_and_add(&g_gl_diag, 1);
@@ -302,17 +207,10 @@ static void GlChainLog(const char* name, const char* how) {
     Log("native: gl loader-chain %s: %s", how, name);
 }
 
-// Maps the identity names to the spoofed strings; false => not handled here.
 static bool SpoofGlName(unsigned name, const unsigned char** out) {
     if (!g_gpu_on) return false;
-    if (name == 0x1F00) {
-        *out = (const unsigned char*)g_gpu_vendor;
-        return true;
-    }
-    if (name == 0x1F01) {
-        *out = (const unsigned char*)g_gpu_renderer;
-        return true;
-    }
+    if (name == 0x1F00) { *out = (const unsigned char*)g_gpu_vendor; return true; }
+    if (name == 0x1F01) { *out = (const unsigned char*)g_gpu_renderer; return true; }
     if (name == 0x1F02 && g_gpu_gl_version[0] != '\0') {
         *out = (const unsigned char*)g_gpu_gl_version;
         return true;
@@ -355,15 +253,12 @@ static const unsigned char* RepGlGetStringiN(int slot, unsigned int name, unsign
 
 static void* RepEglGetProcAddressN(int slot, const char* name);
 
-// Returns the slot index for this real pointer, creating one when needed.
-// -1 = table full (caller falls back to the untouched real pointer).
 static int GlChainSlotFor(void* key, PasGlGetStringFn gs, PasGlGetStringiFn gsi,
                           PasEglGpaFn gpa) {
     if (key == nullptr) return -1;
     pthread_mutex_lock(&g_gl_slot_mtx);
     for (int i = 0; i < PAS_GL_SLOTS; i++) {
         if (g_gl_slots[i].key == key) {
-            // Refresh the per-symbol fields in case only part was set before.
             if (gs != nullptr) g_gl_slots[i].get_string = gs;
             if (gsi != nullptr) g_gl_slots[i].get_stringi = gsi;
             if (gpa != nullptr) g_gl_slots[i].get_proc_addr = gpa;
@@ -385,9 +280,6 @@ static int GlChainSlotFor(void* key, PasGlGetStringFn gs, PasGlGetStringiFn gsi,
     return -1;
 }
 
-// One distinct function per slot: a handed-out pointer must stay stable and
-// dispatch to its own driver, so the wrappers cannot share a single body
-// that reads a mutable "current" global.
 #define PAS_GL_SLOT_FN(IDX)                                                          \
     static const unsigned char* RepGlGetString_##IDX(unsigned int name) {            \
         return RepGlGetStringN(IDX, name);                                           \
@@ -537,39 +429,23 @@ static void LogGpuHookActivation(const char* sym, int status, const char* caller
 
 static void OnGpuHooked(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                         const char* sym_name, void* new_func, void* prev_func, void* arg) {
-    (void)stub;
-    (void)sym_name;
-    (void)new_func;
-    (void)prev_func;
-    (void)arg;
+    (void)stub; (void)sym_name; (void)new_func; (void)prev_func; (void)arg;
     LogGpuHookActivation("glGetString", status_code, caller_path_name);
 }
 
 static void OnGpuHookedGsi(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                            const char* sym_name, void* new_func, void* prev_func, void* arg) {
-    (void)stub;
-    (void)sym_name;
-    (void)new_func;
-    (void)prev_func;
-    (void)arg;
+    (void)stub; (void)sym_name; (void)new_func; (void)prev_func; (void)arg;
     LogGpuHookActivation("glGetStringi", status_code, caller_path_name);
 }
 
 static void OnGpuHookedEgl(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                            const char* sym_name, void* new_func, void* prev_func, void* arg) {
-    (void)stub;
-    (void)sym_name;
-    (void)new_func;
-    (void)prev_func;
-    (void)arg;
+    (void)stub; (void)sym_name; (void)new_func; (void)prev_func; (void)arg;
     LogGpuHookActivation("eglGetProcAddress", status_code, caller_path_name);
 }
 
 void InstallGpuHooks() {
-    // Same caller filter as the rest of the module: never patch PLT/GOT of
-    // ARM-translated application libraries. The owner regexes stay broad so
-    // the emulator's driver naming variants (libGLESv2_*.so, libEGL_*.so)
-    // match as well.
     bytehook_stub_t stub = bytehook_hook_partial(CallerAllowHooks, nullptr, "libGLES",
                                                  "glGetString", (void*)MyGlGetString,
                                                  OnGpuHooked, nullptr);
@@ -618,9 +494,6 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
                       hwLine.c_str(), impl.c_str(), hw.c_str());
 }
 
-// v2.4.3: cluster layout in its own JNI entry point - isolated from the
-// identity config so a signature mismatch can never scramble the working
-// cpuinfo / Build / props path again.
 extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpuClusters(JNIEnv* env, jobject thiz,
                                                          jboolean cpuOn, jstring cpuClusters) {
@@ -637,7 +510,9 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
                                                          jlong vendorId, jlong deviceId,
                                                          jlong driverVersion, jlong apiVersion,
                                                          jstring driverName, jstring driverInfo,
-                                                         jstring vkDeviceName) {
+                                                         jstring vkDeviceName,
+                                                         jint gpuCores, jint l2CacheKb,
+                                                         jstring gpuArch) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -652,14 +527,14 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
     std::string dName = toStr(driverName);
     std::string dInfo = toStr(driverInfo);
     std::string vkName = toStr(vkDeviceName);
+    std::string arch = toStr(gpuArch);
     pas::SetGpuConfig(gpuOn == JNI_TRUE, vendor.c_str(), renderer.c_str(), glVersion.c_str(),
                       (unsigned long long)vendorId, (unsigned long long)deviceId,
                       (unsigned long long)driverVersion, (unsigned long long)apiVersion,
-                      dName.c_str(), dInfo.c_str(), vkName.c_str());
+                      dName.c_str(), dInfo.c_str(), vkName.c_str(),
+                      (int)gpuCores, (int)l2CacheKb, arch.c_str());
 }
 
-// v2.4.0: per-GPU Vulkan profile (conformance version + feature flags)
-// delivered before the config gate, same pattern as nativeSetRecon.
 extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuProfile(JNIEnv* env, jobject thiz,
                                                         jboolean gpuOn,
@@ -670,8 +545,6 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuProfile(JNIEnv* env, jobject thi
                                                         jboolean sparseBinding) {
     (void)env;
     (void)thiz;
-    // Profile values only matter when the GPU spoof is on; delivering the
-    // reference defaults otherwise keeps hide_vulkan's previous behavior.
     if (gpuOn != JNI_TRUE) {
         pas::SetGpuProfile(1, 3, 1, 0, 0, false, false);
         return;
@@ -688,4 +561,3 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuOptions(JNIEnv* env, jobject thi
     (void)thiz;
     pas::SetGpuOptions(chain == JNI_TRUE, vulkan == JNI_TRUE);
 }
-

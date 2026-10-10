@@ -32,26 +32,20 @@ namespace pas {
 void Log(const char* fmt, ...);
 
 void HookLibcSym(const char* sym, void* proxy);
-// Same as HookLibcSym but with an explicit owner-ELF regex and a stub result
-// so callers can log/verify activation ("dlsym" needs the owner probe:
-// modern bionic serves dlsym through libdl.so's forwarding stub).
 void* HookChainStub(const char* owner_regex, const char* sym, void* proxy);
 
 bool IsHiddenIfaceName(const char* name);
 bool IsHiddenPathFast(const char* path);
 bool IsHiddenPath(const char* path);
 
-// Hidden interface name cache (rebuilt from the real interface list).
 void RefreshHiddenNames(bool force);
 bool LineContainsHiddenName(const char* line);
 bool LineContainsProxyPortToken(const char* line);
 bool IsHiddenIndex(unsigned int ifindex);
 
-// copy registry shared by getifaddrs / if_nameindex filtering
 bool RegisterCopy(void* head);
 bool UnregisterCopy(void* head);
 
-// hook installation (called from native_init)
 void InstallIfaceHooks();
 void InstallFsHooks();
 void InstallNetHooks();
@@ -60,22 +54,22 @@ void StartInitWorker();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled);
 
-// CPU model / GPU (OpenGL + Vulkan) spoof (hide_gpu.cpp, hide_vulkan.cpp)
-// v2.4.3: SetCpuConfig restored to the exact v2.4.1 signature (identity
-// only); cluster layout arrives through the separate SetCpuClusters call so
-// it can never scramble the working identity path positionally.
+// CPU model / GPU (OpenGL + Vulkan) spoof
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
                   int maxKHz, const char* hwLine, const char* implementer,
                   const char* hardware);
 void SetCpuClusters(bool cpuOn, const char* clusters);
+
+// v2.4.5: GPU now carries core count / L2 cache / architecture.
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
-                  const char* driverName, const char* driverInfo, const char* vkDeviceName);
-// v2.4.0: per-GPU Vulkan profile (conformance version + feature flags).
+                  const char* driverName, const char* driverInfo, const char* vkDeviceName,
+                  int gpuCores, int l2CacheKb, const char* gpuArch);
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
                    int driverId, bool descriptorIndexing, bool sparseBinding);
+
 bool CpuSpoofActive();
 std::string CpuSpoofDisplay();
 std::string CpuSpoofManufacturer();
@@ -83,13 +77,13 @@ std::string CpuSpoofModel();
 std::string CpuSpoofPart();
 std::string CpuSpoofImplementer();
 std::string CpuSpoofHardware();
-// v2.4.2: cluster layout ("4+4", "1+3+4"...) for the sysfs topology mirrors.
 const char* CpuSpoofClusters();
 std::string CpuSpoofCpuinfoModel();
 std::string CpuSpoofFeatures();
 std::string CpuSpoofHwLine();
 int CpuSpoofMinKHz();
 int CpuSpoofMaxKHz();
+
 bool GpuSpoofActive();
 std::string GpuSpoofVendor();
 std::string GpuSpoofRenderer();
@@ -101,12 +95,16 @@ unsigned long long GpuSpoofDriverVersion();
 unsigned long long GpuSpoofApiVersion();
 std::string GpuSpoofDriverName();
 std::string GpuSpoofDriverInfo();
+
+// v2.4.5: physical GPU characteristics exposed to DevCheck-style readers.
+int GpuSpoofCores();
+int GpuSpoofL2CacheKb();
+std::string GpuSpoofArch();
+
 void InstallGpuHooks();
 void InstallVulkanHooks();
 void InstallCpuDeepHooks();
 
-// recon diagnostics (hide_fs.cpp): suspicious-probe logging, enabled from the
-// module GUI; used to map a target app's detection surface.
 void SetRecon(bool on);
 bool ReconEnabled();
 int WebRtcMode();
@@ -124,57 +122,26 @@ void SetGpuOptions(bool chain, bool vulkan);
 void ReconNote(const char* op, const char* detail, long res);
 void InstallReconHooks();
 
-// GL resolver-chain substitution (hide_gpu.cpp), used by the dlsym wrapper in
-// hide_vulkan.cpp. Returns the bytehook-free representative for GL entry
-// points resolved dynamically, or nullptr when not handled.
 void* GpuChainResolveDlsym(const char* symbol, void* real);
-// Recon-gated GL/Vulkan resolver tracing (hide_gpu.cpp): logs which entry
-// points actually flow through the module while "Recon logging" is on.
 void GpuDiag(const char* tag, const char* detail);
 
-// Caller filter shared with the GPU hook installer (defined in pas.cpp).
 bool CallerAllowHooks(const char* caller_path_name, void* arg);
 void InstallIoctlHooks();
 void InstallPropSpoofHooks();
 bool SpoofActive();
 bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, size_t cap);
 
-// Native TLS verification bypass (hide_ssl.cpp): SSL_set_verify /
-// SSL_CTX_set_verify / *_custom_verify forced to SSL_VERIFY_NONE, plus
-// X509_verify_cert / X509_STORE_CTX_get_error / SSL_get_verify_result forced
-// to success. ByteHook engine; only reaches libraries that export the
-// symbols. Installed only when the native addon is enabled.
 void InstallSslHooks();
 void SetSslUnpin(bool on);
 bool SslUnpinActive();
 
-// ARM64 inline-hook SSL unpinning (hook_ssl_arm64.cpp): ShadowHook 1.0.10
-// engine, reaches statically-linked BoringSSL in translated ARM64 libraries
-// where the symbol table is empty. Same feature as hide_ssl.cpp, different
-// hook mechanism. Compiled to a no-op on non-ARM64 ABIs.
 void InstallSslArm64Hooks();
 void SetSslArm64(bool on);
 bool SslArm64Active();
 
-// --- v2.3.9: raw-syscall netlink tracking ---
-//
-// Anti-tamper tools that bypass libc and issue the socket/recv syscalls
-// directly evade the bytehook-based netlink filter (hide_netlink.cpp hooks
-// libc's socket/recv/recvfrom/recvmsg). This pair of functions lets the raw
-// syscall handler in hide_fs.cpp observe and filter the same traffic:
-//
-//   TrackNetlinkFd    - registers a netlink fd created via
-//                       syscall(SYS_socket, AF_NETLINK, ..., protocol) so
-//                       subsequent reads on it get filtered.
-//   FilterNetlinkRecv - filters a received buffer from a tracked fd. Returns
-//                       the new length, or `len` unchanged when the fd is
-//                       not a tracked netlink socket.
 void TrackNetlinkFd(int fd, int protocol);
 ssize_t FilterNetlinkRecv(int fd, void* buf, ssize_t len);
 
-// Hook-installation gate: the worker waits briefly for the Kotlin side to
-// deliver the config so it can either skip all hook installation (native
-// addon disabled) or skip just the extended groups (compatibility mode).
 void SignalSpoofConfigReady(bool compatMode, bool nativeEnabled);
 bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut, bool* nativeOut);
 

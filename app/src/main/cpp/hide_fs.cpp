@@ -26,21 +26,11 @@ namespace pas {
 #define MFD_CLOEXEC 0x0001U
 #endif
 
-// ---------------------------------------------------------------------------
-// watched files: /proc/net/* whose content must be filtered.
-// Filtering is done by materializing a filtered copy in a memfd at open()
-// time - no read/pread/lseek/dup/close interception is needed at all.
-//
-// The kernel accepts several aliases for the same files; scanners use them to
-// dodge naive filters. We treat them all as watched:
-//   /proc/net/X  /proc/self/net/X  /proc/thread-self/net/X  /proc/<pid>/net/X
-// ---------------------------------------------------------------------------
-
 enum class WatchedFile {
     None,
-    Tcp,   // tcp / tcp6
-    Udp,   // udp / udp6
-    Misc,  // dev / route / if_inet6 / ipv6_route / arp
+    Tcp,
+    Udp,
+    Misc,
 };
 
 static WatchedFile ResolveWatchedFile(const char* path) {
@@ -59,7 +49,6 @@ static WatchedFile ResolveWatchedFile(const char* path) {
         rest += 12;
         if (strncmp(rest, kNet, sizeof(kNet) - 1) == 0) netPart = rest + sizeof(kNet) - 1;
     } else {
-        // /proc/<pid>/net/...
         const char* slash = strchr(rest, '/');
         if (slash && slash > rest && strncmp(slash + 1, kNet, sizeof(kNet) - 1) == 0) {
             bool digits = true;
@@ -82,13 +71,6 @@ static WatchedFile ResolveWatchedFile(const char* path) {
     }
     return WatchedFile::None;
 }
-
-// ---------------------------------------------------------------------------
-// Special files: a tiny allow/deny layer used together with the content
-// filters. /proc/net/fib_trie is denied with ENOENT (the checker's own code
-// treats that as "not available on this kernel"); /sys/fs/selinux/enforce is
-// served as "1\n" so the process sees an enforcing kernel.
-// ---------------------------------------------------------------------------
 
 enum class SpecialAction { None, NotFound, EnforceOne, RpFilterOne };
 
@@ -136,10 +118,6 @@ static int CreateMemfdWith(const char* data, size_t len, int flags) {
     syscall(SYS_lseek, mfd, 0, SEEK_SET);
     return mfd;
 }
-
-// ---------------------------------------------------------------------------
-// recon logging
-// ---------------------------------------------------------------------------
 
 static volatile bool g_recon = false;
 static volatile int g_recon_emitted = 0;
@@ -287,7 +265,6 @@ static void RewritePropsContent(const std::string& raw, std::string* out) {
 
 static bool ReadWholeFile(const char* path, std::string* out);
 
-// /proc/cpuinfo rewrite
 static bool CpuinfoKeyMatch(const char* line, const char* key) {
     size_t kl = strlen(key);
     if (strncmp(line, key, kl) != 0) return false;
@@ -398,35 +375,8 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
     }
 }
 
-// ---------------------------------------------------------------------------
-// v2.4.4: cpufreq + CPU topology mirrors
-//
-// DevCheck-style readers build their cluster view from sysfs. On the emulator
-// every CPU sits in its own cluster; these mirrors reconstruct the intended
-// layout from the catalog's cluster string ("4+4", "1+3+4", ...).
-//
-// Covered paths (all read-only):
-//   cpuN/cpufreq/{cpuinfo_min_freq,cpuinfo_max_freq,scaling_min_freq,scaling_max_freq}
-//   cpuN/cpufreq/{affected_cpus,related_cpus}
-//   cpufreq/policyN/{cpuinfo_min_freq,cpuinfo_max_freq}
-//   cpufreq/policyN/{affected_cpus,related_cpus}
-//   cpuN/affected_cpus, cpuN/related_cpus
-//   cpuN/topology/core_id
-//   cpuN/topology/cluster_id
-//   cpuN/topology/physical_package_id
-//   cpuN/topology/{core_cpus,thread_siblings,cluster_cpus}       (bitmask)
-//   cpuN/topology/{core_cpus_list,thread_siblings_list,cluster_cpus_list}
-//   cpuN/topology/{package_cpus,core_siblings,die_cpus}          (bitmask)
-//   cpuN/topology/{package_cpus_list,core_siblings_list,die_cpus_list}
-//
-// Both the bitmask form ("0f") and the list form ("0-3") are answered: apps
-// disagree on which one they read, and if they disagree with each other the
-// cluster view is discarded and every core ends up shown on its own.
-// ---------------------------------------------------------------------------
-
 #define PAS_CPU_MAX_CORES 16
 
-// Parses "4+4" / "1+3+4" into per-core cluster membership. Returns core count.
 static int CpuClusterMap(int* coreCluster, int* coreIndexInCluster) {
     const char* s = CpuSpoofClusters();
     int total = 0;
@@ -457,7 +407,6 @@ static int CpuClusterMap(int* coreCluster, int* coreIndexInCluster) {
     return total;
 }
 
-// Formats a cluster's CPU members as "a" / "a-b".
 static void CpuClusterList(int c, const int* coreCluster, int total, char* out, size_t cap) {
     int first = -1, last = -1;
     for (int i = 0; i < total; i++) {
@@ -475,25 +424,22 @@ static void CpuClusterList(int c, const int* coreCluster, int total, char* out, 
     }
 }
 
-// Formats a cluster's CPU members as a kernel-style hex bitmask ("0f", "f0").
 static void CpuClusterBitmask(int c, const int* coreCluster, int total, char* out, size_t cap) {
     unsigned long long mask = 0;
     for (int i = 0; i < total && i < 64; i++) {
         if (coreCluster[i] == c) mask |= (1ULL << i);
     }
-    int width = (total + 3) / 4;   // kernel pads to ceil(nr_cpus/4) hex digits
+    int width = (total + 3) / 4;
     if (width < 1) width = 1;
     snprintf(out, cap, "%0*llx\n", width, mask);
 }
 
-// Formats the "all CPUs in this package" list.
 static void CpuAllList(int total, char* out, size_t cap) {
     if (total <= 0) { snprintf(out, cap, "\n"); return; }
     if (total == 1) { snprintf(out, cap, "0\n"); return; }
     snprintf(out, cap, "0-%d\n", total - 1);
 }
 
-// Formats the "all CPUs in this package" bitmask.
 static void CpuAllBitmask(int total, char* out, size_t cap) {
     unsigned long long mask = 0;
     for (int i = 0; i < total && i < 64; i++) mask |= (1ULL << i);
@@ -502,13 +448,10 @@ static void CpuAllBitmask(int total, char* out, size_t cap) {
     snprintf(out, cap, "%0*llx\n", width, mask);
 }
 
-// cpufreq min/max mirrors. Answers both cpuN/cpufreq/<leaf> and
-// cpufreq/policyN/<leaf>.
 static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
     if (CpuSpoofMinKHz() <= 0 || CpuSpoofMaxKHz() <= 0) return false;
     static const char kRoot[] = "/sys/devices/system/cpu/";
     if (strncmp(path, kRoot, sizeof(kRoot) - 1) != 0) return false;
-    // Must pass through a cpufreq/ component somewhere.
     const char* cpufreq = strstr(path, "cpufreq/");
     if (cpufreq == nullptr) return false;
     const char* slash = strrchr(path, '/');
@@ -536,7 +479,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
 
     static const char kCpuRoot[] = "/sys/devices/system/cpu/";
 
-    // --- cpufreq/policyN/{affected,related}_cpus ----------------------------
     {
         static const char kPolicy[] = "/sys/devices/system/cpu/cpufreq/policy";
         if (strncmp(path, kPolicy, sizeof(kPolicy) - 1) == 0) {
@@ -554,7 +496,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
             if (strcmp(leaf, "affected_cpus") != 0 && strcmp(leaf, "related_cpus") != 0) {
                 return false;
             }
-            // Policy index N is the first CPU of its cluster on real devices.
             int cluster = 0;
             if (pol >= 0 && pol < total) cluster = coreCluster[pol];
             CpuClusterList(cluster, coreCluster, total, out, cap);
@@ -562,7 +503,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
         }
     }
 
-    // --- cpuN/... -----------------------------------------------------------
     if (strncmp(path, kCpuRoot, sizeof(kCpuRoot) - 1) != 0) return false;
     const char* p = path + sizeof(kCpuRoot) - 1;
     int core = 0;
@@ -577,13 +517,11 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
     const char* rel = p + 1;
     const int c = coreCluster[core];
 
-    // cpuN/{affected,related}_cpus (older kernels)
     if (strcmp(rel, "affected_cpus") == 0 || strcmp(rel, "related_cpus") == 0) {
         CpuClusterList(c, coreCluster, total, out, cap);
         return true;
     }
 
-    // cpuN/cpufreq/{affected,related}_cpus
     if (strncmp(rel, "cpufreq/", 8) == 0) {
         const char* leaf = rel + 8;
         if (strcmp(leaf, "affected_cpus") == 0 || strcmp(leaf, "related_cpus") == 0) {
@@ -593,7 +531,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
         return false;
     }
 
-    // cpuN/topology/*
     if (strncmp(rel, "topology/", 9) != 0) return false;
     const char* leaf = rel + 9;
     if (*leaf == '\0' || strchr(leaf, '/') != nullptr) return false;
@@ -607,13 +544,13 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
         return true;
     }
     if (strcmp(leaf, "physical_package_id") == 0) {
-        // ARM SoCs are a single package; v2.4.3 returned cluster_id here,
-        // which leaked a nonzero value for the higher clusters.
         snprintf(out, cap, "0\n");
         return true;
     }
 
-    // Cluster-scoped descriptors.
+    // v2.4.5: Linux 6.x exposes cluster_cpus / cluster_cpus_list as the true
+    // cluster-membership nodes. Without these DevCheck falls back to per-core
+    // grouping when core_siblings reports all cores as siblings.
     if (strcmp(leaf, "core_cpus_list") == 0 ||
         strcmp(leaf, "thread_siblings_list") == 0 ||
         strcmp(leaf, "cluster_cpus_list") == 0) {
@@ -627,7 +564,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
         return true;
     }
 
-    // Package-scoped descriptors (every CPU in the SoC).
     if (strcmp(leaf, "package_cpus_list") == 0 ||
         strcmp(leaf, "core_siblings_list") == 0 ||
         strcmp(leaf, "die_cpus_list") == 0) {
@@ -644,8 +580,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
     return false;
 }
 
-// Consolidated sysfs spoof for the raw-syscall open/openat path: returns a
-// fresh memfd with the spoofed value, or -1 when the path is not handled.
 static long ServeSysfsSpoofFd(const char* path, int flags) {
     if (!CpuSpoofActive() || path == nullptr) return -1;
     if (strcmp(path, "/proc/cpuinfo") == 0) {
@@ -665,7 +599,6 @@ static long ServeSysfsSpoofFd(const char* path, int flags) {
     return -1;
 }
 
-// Returns true when the call was fully handled by the special layer.
 static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
     SpecialAction sp = ResolveSpecial(path);
     if (sp == SpecialAction::None) {
@@ -1162,10 +1095,6 @@ int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     return BYTEHOOK_CALL_PREV(HideFStatAt, dirfd, path, buf, flags);
 }
 
-// ---------------------------------------------------------------------------
-// CPU: subprocess readers
-// ---------------------------------------------------------------------------
-
 static std::string g_fake_cpuinfo_path;
 static bool g_fake_cpuinfo_probed = false;
 
@@ -1365,7 +1294,6 @@ static int MyPosixSpawnP(pid_t* pid, const char* file, const void* fileActions, 
     return BYTEHOOK_CALL_PREV(MyPosixSpawnP, pid, file, fileActions, attr, argv, envp);
 }
 
-// Direct syscall() readers.
 static long MySyscall(long number, ...) {
     BYTEHOOK_STACK_SCOPE();
     va_list ap;
@@ -1396,7 +1324,6 @@ static long MySyscall(long number, ...) {
     }
 #endif
 #ifdef __NR_openat
-    // v2.4.4: cpuinfo + cpufreq + topology via raw syscall openat.
     if (CpuSpoofActive() && number == __NR_openat) {
         const char* cpath = (const char*)a1;
         if (cpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY) {
@@ -1413,7 +1340,6 @@ static long MySyscall(long number, ...) {
             return -1;
         }
     }
-    // v2.4.4: same for the plain open() syscall.
     if (CpuSpoofActive() && number == __NR_open) {
         const char* cpath = (const char*)a0;
         if (cpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY) {
@@ -1669,5 +1595,5 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_pas_spoof_SpoofCore_nativeSetWebrtcMode(JNIEnv* env, jobject thiz, jint mode) {
     (void)env;
     (void)thiz;
-    pas::SetWebRtcMode((int)mode);   // ← capital R, matches pas.h
+    pas::SetWebRtcMode((int)mode);
 }

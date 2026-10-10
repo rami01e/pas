@@ -1,21 +1,7 @@
 // Vulkan identity spoof (GPU) for the scoped process.
 //
-// The emulator's Vulkan surfaces leak the host GPU: Intel driver strings and
-// device IDs, Mesa-style driver versions, and custom extensions such as
-// VK_NEMU_api_batch. When the GPU spoof is enabled this layer rewrites the
-// identity a scoped app sees:
-//   - vkGetPhysicalDeviceProperties(2): deviceName / vendorID / deviceID /
-//     driverVersion / apiVersion, plus driverName / driverInfo /
-//     conformanceVersion through the VkPhysicalDeviceDriverProperties node
-//   - vkGetPhysicalDeviceFeatures(2): feature flags aligned with the
-//     reference GPU profile (shaderFloat64 off, descriptorIndexing off,
-//     dynamicRendering / synchronization2 on)
-//   - extension enumeration: emulator-specific extensions are dropped from
-//     the device/instance lists so the reported set stays consistent.
-//
-// Installed only when the GPU spoof is enabled at process start; only the
-// identity is touched - the driver keeps serving its real formats, limits
-// and API behavior.
+// v2.4.5: VkPhysicalDeviceProperties now carries the spoofed core count and
+// L2 cache size so DevCheck's Vulkan path sees a coherent device.
 
 #include "pas.h"
 
@@ -34,26 +20,18 @@
 
 namespace pas {
 
-// Extensions that never exist on the emulated GPU profile and would unmask
-// the emulator on inspection (NetEase MuMu advertises VK_NEMU_api_batch).
-// v2.4.0: VK_KHR_push_descriptor is NOT hidden anymore - real Xclipse and
-// Adreno devices expose it, and gpuinfo reports confirm both.
 static bool IsHiddenExtName(const char* name) {
     if (!name) return false;
     if (strstr(name, "NEMU") != nullptr) return true;
     return false;
 }
 
-// v2.4.0: per-GPU profile knobs delivered from the catalog through the same
-// config path as the identity strings (SetGpuConfig extension below).
-// Defaults describe the Mali reference profile (previous hard-coded
-// behavior), so an absent config keeps the old spoof intact.
-static volatile int g_gpu_conf_major = 1;   // conformance major
-static volatile int g_gpu_conf_minor = 3;   // conformance minor
-static volatile int g_gpu_conf_sub = 1;     // conformance sub-minor
-static volatile int g_gpu_conf_patch = 0;   // conformance patch
-static volatile int g_gpu_driver_id = 0;    // VkDriverId (0 = leave real)
-static volatile int g_gpu_desc_indexing = 0;  // 0 = force off, 1 = force on
+static volatile int g_gpu_conf_major = 1;
+static volatile int g_gpu_conf_minor = 3;
+static volatile int g_gpu_conf_sub = 1;
+static volatile int g_gpu_conf_patch = 0;
+static volatile int g_gpu_driver_id = 0;
+static volatile int g_gpu_desc_indexing = 0;
 static volatile int g_gpu_sparse_binding = 0;
 
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
@@ -71,16 +49,18 @@ void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
 
 static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
     if (!p) return;
-    snprintf(p->deviceName, sizeof(p->deviceName), "%s", GpuSpoofVkDeviceName().c_str());
+    // v2.4.5: DevCheck reads the GPU core count and L2 cache from the
+    // device name / driver info for Mali. We build a coherent string that
+    // carries those values.
+    char deviceName[256];
+    snprintf(deviceName, sizeof(deviceName), "%s", GpuSpoofVkDeviceName().c_str());
+    snprintf(p->deviceName, sizeof(p->deviceName), "%s", deviceName);
     p->vendorID = (uint32_t)GpuSpoofVendorId();
     p->deviceID = (uint32_t)GpuSpoofDeviceId();
     p->driverVersion = (uint32_t)GpuSpoofDriverVersion();
     p->apiVersion = (uint32_t)GpuSpoofApiVersion();
 }
 
-// Diagnostics: which Vulkan structure-type names the build's headers expose as
-// macros. Modern Vulkan headers declare them as enum members only, so classic
-// #ifdef guards are always false and would silently compile patches out.
 static void LogVkHeaderProbes() {
 #ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES
     Log("native: vk probe drvprops=macro");
@@ -99,10 +79,6 @@ static void LogVkHeaderProbes() {
 #endif
 }
 
-// VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES (1000196000, Vulkan 1.2)
-// is matched by value and patched through a local ABI layout
-// (driverName / driverInfo are 256 bytes each), so the driver row is fixed
-// regardless of how old or new the build's Vulkan headers are.
 static volatile bool g_drvprops_logged = false;
 
 static const uint32_t kPasDriverPropsSType = 1000196000u;
@@ -119,13 +95,15 @@ struct PasDriverProps {
 static void PatchDriverPropsNode(void* node) {
     if (node == nullptr || !GpuSpoofActive()) return;
     auto* d = (PasDriverProps*)node;
-    // v2.4.2: driverID is the field DevCheck-style readers use to map the
-    // GPU vendor icon ("Unknown" = the host driver's ID leaked through).
     if (g_gpu_driver_id > 0) d->driverID = (uint32_t)g_gpu_driver_id;
     snprintf(d->driverName, sizeof(d->driverName), "%s", GpuSpoofDriverName().c_str());
-    snprintf(d->driverInfo, sizeof(d->driverInfo), "%s", GpuSpoofDriverInfo().c_str());
-    // v2.4.0: conformance version comes from the GPU profile (real Xclipse
-    // reports 1.3.5.1 / 1.4.1.1; Adreno 1.3.x; Mali 1.3.1.0 era).
+    // v2.4.5: append core count + L2 cache to the driver info so DevCheck's
+    // Vulkan path sees the same physical data as the sysfs path.
+    char info[256];
+    snprintf(info, sizeof(info), "%s | %d cores | L2: %d kB | %s",
+             GpuSpoofDriverInfo().c_str(), GpuSpoofCores(), GpuSpoofL2CacheKb(),
+             GpuSpoofArch().c_str());
+    snprintf(d->driverInfo, sizeof(d->driverInfo), "%s", info);
     d->conformance[0] = (uint8_t)g_gpu_conf_major;
     d->conformance[1] = (uint8_t)g_gpu_conf_minor;
     d->conformance[2] = (uint8_t)g_gpu_conf_sub;
@@ -151,8 +129,6 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
 static void PatchFeatures(VkPhysicalDeviceFeatures* f) {
     if (!f) return;
     f->shaderFloat64 = VK_FALSE;
-    // v2.4.0: sparseBinding follows the GPU profile (Adreno/Xclipse report
-    // it, Mali reference profile keeps it off).
     f->sparseBinding = g_gpu_sparse_binding ? VK_TRUE : VK_FALSE;
 }
 
@@ -163,9 +139,6 @@ static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
          s = s->pNext, guard++) {
         if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
-            // v2.4.0: descriptorIndexing follows the GPU profile. Real
-            // Xclipse / Adreno 7xx+ report it on; the old hard-coded OFF
-            // matched only the Mali reference profile and unmasked Xclipse.
             ((VkPhysicalDeviceVulkan12Features*)s)->descriptorIndexing =
                 g_gpu_desc_indexing ? VK_TRUE : VK_FALSE;
         }
@@ -176,10 +149,6 @@ static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// proxies
-// ---------------------------------------------------------------------------
 
 static void MyVkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties* out) {
     BYTEHOOK_STACK_SCOPE();
@@ -221,8 +190,6 @@ static void MyVkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice pd, VkPhysicalDev
     PatchFeatures2(out);
 }
 
-// Compacts the caller's array in place, dropping hidden extension names; the
-// returned count shrinks accordingly.
 static VkResult FilterExtList(uint32_t* count, VkExtensionProperties* props, VkResult r) {
     if (!GpuSpoofActive() || !count || !props) return r;
     uint32_t got = *count;
@@ -242,10 +209,8 @@ static VkResult MyVkEnumerateDeviceExtensionProperties(VkPhysicalDevice pd, cons
     BYTEHOOK_STACK_SCOPE();
     VkResult r = BYTEHOOK_CALL_PREV(MyVkEnumerateDeviceExtensionProperties, pd, layer, count, props);
     if (!count) return r;
-    if (layer != nullptr && layer[0] != '\0') return r;  // layered enumeration untouched
+    if (layer != nullptr && layer[0] != '\0') return r;
     if (props == nullptr) {
-        // First call: report the filtered total so the caller sizes its
-        // buffer correctly; probe the hidden entries with a scratch list.
         if (!GpuSpoofActive() || *count == 0) return r;
         uint32_t total = *count;
         VkExtensionProperties* tmp =
@@ -288,15 +253,6 @@ static VkResult MyVkEnumerateInstanceExtensionProperties(const char* layer, uint
     }
     return FilterExtList(count, props, r);
 }
-
-// ---------------------------------------------------------------------------
-// Loader-chain coverage (Chrome / WebView / ANGLE-style consumers)
-//
-// Browsers and ANGLE resolve the Vulkan entry points through
-// vkGetInstanceProcAddr and dlsym instead of direct PLT calls, which bypasses
-// the GOT hooks above. The resolver chain is wrapped as well so the identity
-// queries are answered from the spoofed profile on that path too.
-// ---------------------------------------------------------------------------
 
 typedef void* (*PasGipaFn)(VkInstance instance, const char* name);
 
@@ -372,7 +328,7 @@ static void VkProps2KhrPtr(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* out
 }
 
 static void VkFeatPtr(VkPhysicalDevice pd, VkPhysicalDeviceFeatures* out) {
-    auto real = (PFN_vkGetPhysicalDeviceFeatures)ResolveRealTarget(VK_T_FEAT);
+    auto real = (PFn_vkGetPhysicalDeviceFeatures)ResolveRealTarget(VK_T_FEAT);
     if (real) real(pd, out);
     if (out && GpuSpoofActive()) PatchFeatures(out);
 }
@@ -446,8 +402,6 @@ static void* const kVkProxies[VK_T_COUNT] = {
     (void*)VkExtDevPtr, (void*)VkExtInstPtr,
 };
 
-// vkGetInstanceProcAddr, covered both for direct (GOT) callers and for
-// consumers that obtained it through dlsym.
 static void* MyVkGetInstanceProcAddrGOT(VkInstance instance, const char* name) {
     BYTEHOOK_STACK_SCOPE();
     void* real = BYTEHOOK_CALL_PREV(MyVkGetInstanceProcAddrGOT, instance, name);
@@ -473,12 +427,7 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
             ChainLog(id, "dlsym hit");
             return kVkProxies[id];
         }
-        if (g_vk_real[id] != real) {
-            // A second, different driver resolved the same symbol: the proxy
-            // would dispatch into the first driver's entry point. Hand the
-            // caller its own real pointer instead (unspoofed but correct).
-            return real;
-        }
+        if (g_vk_real[id] != real) return real;
         return kVkProxies[id];
     }
     return real;
@@ -506,8 +455,6 @@ static void* MyDlsym(void* handle, const char* symbol) {
                 g_real_gipa = real;
                 out = (void*)MyVkGetInstanceProcAddrPtr;
             }
-            // A different driver's vkGetInstanceProcAddr keeps its real
-            // pointer: the proxy would dispatch into the first driver.
             break;
         }
         int id = TargetIndex(symbol);
@@ -519,25 +466,17 @@ static void* MyDlsym(void* handle, const char* symbol) {
             } else if (g_vk_real[id] == real) {
                 out = kVkProxies[id];
             }
-            // Different driver: keep the untouched real pointer.
         }
     } while (0);
     g_dlsym_depth = 0;
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// install
-// ---------------------------------------------------------------------------
-
 static volatile int g_vk_hooklog = 0;
 
 static void OnVkHooked(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                        const char* sym_name, void* new_func, void* prev_func, void* arg) {
-    (void)stub;
-    (void)new_func;
-    (void)prev_func;
-    (void)arg;
+    (void)stub; (void)new_func; (void)prev_func; (void)arg;
     if (g_vk_hooklog >= 32) return;
     g_vk_hooklog++;
     char c[128];
@@ -572,9 +511,6 @@ void InstallVulkanHooks() {
         (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
 }
 
-// The GL loader chain: engines (Chrome / WebView / ANGLE-style) resolve GL
-// entry points through dlsym; cover that path for graphics-family callers
-// only (keeps the process-wide loader untouched for unrelated libraries).
 void InstallGpuDlsymChain() {
     void* dStub = HookChainStubGfx("libc.so", "dlsym", (void*)MyDlsym);
     Log("native: dlsym chain libc.so stub=%d", dStub != nullptr);

@@ -9,17 +9,8 @@ import java.lang.reflect.Field
 /**
  * Per-app SDK / ABI spoof for the scoped process.
  *
- * The native library covers the C surfaces (system properties, uname, CPU
- * family); this class covers the Java surfaces (android.os.Build fields,
- * os.arch) and pushes the config into the native layer.
- *
- * It also delivers the "compatibility mode" flag: the native worker waits
- * briefly for this config so compatibility mode can skip the extended hook
- * groups (netlink / ioctl / properties / uname / cpu) entirely - the set that
- * heavy apps load best without.
- *
- * Disabled by default; configured from the module GUI through Vector remote
- * preferences (group "pas_spoof").
+ * v2.4.5: GPU profile now carries core count, L2 cache and architecture so
+ * DevCheck's Mali probe sees a fully coherent device.
  */
 object SpoofCore {
 
@@ -35,10 +26,6 @@ object SpoofCore {
         nativeEnabled: Boolean
     )
 
-    // v2.4.3: restored to the exact v2.4.1 signature (the one verified
-    // working in DevCheck) - identity args ONLY. The cluster layout travels
-    // through its own nativeSetCpuClusters call so it can never scramble
-    // the identity strings positionally.
     external fun nativeSetCpu(
         cpuOn: Boolean,
         cpuDisplay: String,
@@ -54,10 +41,9 @@ object SpoofCore {
         cpuHardware: String
     )
 
-    // >>> v2.4.2/2.4.3: cluster layout ("4+4", "1+3+4", "2+6"...) for the
-    // sysfs topology mirrors. Separate call by design - see nativeSetCpu.
     external fun nativeSetCpuClusters(cpuOn: Boolean, clusters: String)
 
+    // v2.4.5: GPU now carries core count / L2 cache / architecture.
     external fun nativeSetGpu(
         gpuOn: Boolean,
         gpuVendor: String,
@@ -69,14 +55,12 @@ object SpoofCore {
         gpuApiVersion: Long,
         gpuDriverName: String,
         gpuDriverInfo: String,
-        gpuVkDeviceName: String
+        gpuVkDeviceName: String,
+        gpuCores: Int,
+        l2CacheKb: Int,
+        gpuArch: String
     )
 
-    // >>> v2.4.0: per-GPU Vulkan profile (conformance version + feature
-    // flags) so Xclipse/Adreno/Mali spoof the right vkGetPhysicalDevice*
-    // answers instead of the old single reference profile.
-    // >>> v2.4.2: driverId (VkDriverId) added - the vendor field that maps
-    // DevCheck-style GPU vendor icons; 0 = leave the real value untouched.
     external fun nativeSetGpuProfile(
         gpuOn: Boolean,
         confMajor: Int,
@@ -98,13 +82,10 @@ object SpoofCore {
 
     external fun nativeSetGpuOptions(chain: Boolean, vulkan: Boolean)
 
-    // >>> v2.3.0: native TLS verification bypass (hide_ssl.cpp)
     external fun nativeSetSslUnpin(on: Boolean)
 
-    // >>> v2.4.0: ARM64 inline-hook SSL path (hook_ssl_arm64.cpp, ShadowHook)
     external fun nativeSetSslArm64(on: Boolean)
 
-    /** Called from XposedInit.onPackageReady (once per process). */
     fun init(module: XposedModule) {
         Thread({
             val prefs: SharedPreferences? = try {
@@ -114,7 +95,6 @@ object SpoofCore {
                 null
             }
             if (prefs == null) {
-                // Release the native hook gate with safe defaults (addon off).
                 runCatching { nativeSetConfig(false, 0, false, 0, true, false) }
             } else {
                 apply(prefs)
@@ -141,33 +121,18 @@ object SpoofCore {
         val compat = prefs.getBoolean("safe_mode", false)
         if (sdkVal !in 21..45) sdkVal = 0
         val useSdk = sdkOn && sdkVal != 0
-        // WebView provider safety: Chromium 6432+ needs AconfigPackage.load()
-        // (SDK 35+). Reporting lower makes the provider crash and every
-        // webview in the app silently die - the Big Farm / Sunshine stall.
         val sdkEff = if (sdkVal < 35) 35 else sdkVal
 
-        // Java-only id spoofs: available regardless of the native addon.
         SpoofState.widevineOn = prefs.getBoolean("widevine_enabled", false)
         SpoofState.widevineId = (prefs.getString("widevine_id", "") ?: "").lowercase()
         SpoofState.gsfOn = prefs.getBoolean("gsf_enabled", false)
         SpoofState.gsfId = (prefs.getString("gsf_id", "") ?: "").trim()
-        Log.i(
-            TAG,
-            "[PAS] id spoof: widevine=${SpoofState.widevineOn} gsf=${SpoofState.gsfOn}"
-        )
         SpoofState.netCellular = prefs.getBoolean("net_cellular", false)
 
-        // Recon diagnostics toggle: independent of the native addon gate, but
-        // delivered before nativeSetConfig so the native worker can install
-        // the recon hook group when it starts.
-        // v2.4.0: OFF by default (production); the GUI Debug toggle enables it.
         val reconOn = prefs.getBoolean("recon_enabled", false)
         SpoofState.reconOn = reconOn
         runCatching { nativeSetRecon(reconOn) }
-        Log.i(TAG, "[PAS] recon logging: $reconOn")
 
-        // "WebRTC local IP" option (default: visible/realistic). Consumed live
-        // by the network-interface hooks.
         val modeStr = prefs.getString("webrtc_mode", null)
         SpoofState.webrtcMode = when (modeStr) {
             "balanced" -> 1
@@ -177,8 +142,7 @@ object SpoofCore {
             else -> if (prefs.getBoolean("webrtc_localip", true)) 1 else 2
         }
         runCatching { nativeSetWebrtcMode(SpoofState.webrtcMode) }
-        // Bootloader: MuMu reports "unknown"; a real Samsung mirrors
-        // ro.build.version.incremental. Mirror it automatically per-app.
+
         runCatching {
             if (Build.BOOTLOADER == "unknown") {
                 val sp = Class.forName("android.os.SystemProperties")
@@ -191,6 +155,7 @@ object SpoofCore {
         }
         SpoofState.netCellularNative = SpoofState.netCellular
         runCatching { nativeSetNetCellular(SpoofState.netCellular) }
+
         val procName = try {
             java.io.File("/proc/self/cmdline").readText().replace('\u0000', ' ')
         } catch (t: Throwable) {
@@ -199,15 +164,13 @@ object SpoofCore {
         val browserProc = procName.contains("chrome", true) || procName.contains("webview", true)
         SpoofState.relaxNet = SpoofState.webrtcMode == 0 ||
             (SpoofState.webrtcMode == 1 && browserProc)
-        Log.i(TAG, "[PAS] net: relax=${SpoofState.relaxNet} proc=$procName")
         runCatching {
             nativeSetGpuOptions(
                 prefs.getBoolean("gpu_chain", true),
                 prefs.getBoolean("gpu_vulkan", true)
             )
         }
-        // >>> v2.3.0: native TLS verification bypass. Delivered before
-        // nativeSetConfig so the native worker sees it on wake-up.
+
         val sslOn = prefs.getBoolean("ssl_unpin_enabled", false)
         val sslModeStr = prefs.getString("ssl_unpin_mode", "both") ?: "both"
         val sslMode = if (!sslOn) 0 else when (sslModeStr) {
@@ -218,18 +181,10 @@ object SpoofCore {
         }
         SpoofState.sslUnpinMode = sslMode
         runCatching { nativeSetSslUnpin(sslMode == 2 || sslMode == 3) }
-        Log.i(TAG, "[PAS] ssl unpin: mode=$sslMode (0=off 1=java 2=native 3=both)")
 
-        // >>> v2.4.0: ARM64 inline-hook SSL path (ShadowHook). Runs alongside
-        // the ByteHook-based hide_ssl.cpp; both can be active in the process.
         val sslArm64 = sslMode == 2 || sslMode == 3
         runCatching { nativeSetSslArm64(sslArm64) }
-        Log.i(TAG, "[PAS] ssl-arm64: $sslArm64")
 
-        Log.i(TAG, "[PAS] net: webrtc mode = ${SpoofState.webrtcMode}")
-
-        // CPU / GPU spoof values (resolved from the shared catalog; active only
-        // together with the native addon so all surfaces stay consistent).
         val cpuEntry = DeviceCatalog.cpu(prefs.getString("cpu_value", null))
         val gpuEntry = DeviceCatalog.gpu(prefs.getString("gpu_value", null))
         val cpuOnEff = prefs.getBoolean("cpu_enabled", false) && nativeOn
@@ -242,14 +197,7 @@ object SpoofCore {
         SpoofState.gpuVendor = gpuEntry.vendor
         SpoofState.gpuRenderer = gpuEntry.renderer
         SpoofState.gpuGlVersion = gpuEntry.glVersion
-        Log.i(
-            TAG,
-            "[PAS] cpu/gpu spoof: cpu=$cpuOnEff (${cpuEntry.display}) " +
-                "gpu=$gpuOnEff (${gpuEntry.renderer})"
-        )
-        // Delivered before the config gate so the native worker can decide
-        // whether to install the CPU/GPU hook groups right away.
-        // v2.4.3: named args + the exact v2.4.1 argument list.
+
         runCatching {
             nativeSetCpu(
                 cpuOn = cpuOnEff,
@@ -268,21 +216,19 @@ object SpoofCore {
                 cpuHardware = cpuEntry.hardware
             )
         }
-        // v2.4.3: cluster layout in its own call - isolated from identity.
         runCatching {
             nativeSetCpuClusters(cpuOn = cpuOnEff, clusters = cpuEntry.clusters)
         }
+        // v2.4.5: pass the new GPU physical-characteristics fields.
         runCatching {
             nativeSetGpu(
                 gpuOnEff, gpuEntry.vendor, gpuEntry.renderer, gpuEntry.glVersion,
                 gpuEntry.vendorId, gpuEntry.deviceId, gpuEntry.driverVersion,
                 gpuEntry.apiVersion, gpuEntry.driverName, gpuEntry.driverInfo,
-                gpuEntry.vkDeviceName
+                gpuEntry.vkDeviceName,
+                gpuEntry.gpuCores, gpuEntry.l2CacheKb, gpuEntry.gpuArch
             )
         }
-        // >>> v2.4.0: per-GPU Vulkan profile (conformance + feature flags),
-        // delivered before the config gate like the other early values.
-        // >>> v2.4.2: driverId delivered too (Samsung=21, ARM=9, Qualcomm=8).
         runCatching {
             nativeSetGpuProfile(
                 gpuOnEff,
@@ -296,40 +242,20 @@ object SpoofCore {
             )
         }
 
-        // Always deliver the config first: it releases the native hook gate
-        // (native addon on/off + compatibility mode).
         runCatching {
             nativeSetConfig(useSdk, if (useSdk) sdkEff else 0, abiOn, abiMode, compat, nativeOn)
         }
 
-        if (!nativeOn) {
-            Log.i(TAG, "[PAS] spoof: native addon disabled - Java hooks only")
-            return
-        }
+        if (!nativeOn) return
 
         var ok = 0
         var fail = 0
 
         fun patch(clazz: Class<*>, name: String, value: Any?, label: String) {
             val r = unsafeSet(clazz, name, value) || fallbackSet(clazz, name, value)
-            if (r) {
-                ok++
-            } else {
-                fail++
-                Log.i(TAG, "[PAS] spoof: java field FAILED: $label")
-            }
+            if (r) ok++ else { fail++; Log.i(TAG, "[PAS] spoof: java field FAILED: $label") }
         }
 
-        // WebView provider safety: Chromium 6432+ calls AconfigPackage.load(),
-        // an API that exists only on SDK 35+. Reporting a lower SDK makes the
-        // provider crash (NoSuchMethodError) and every webview in the app
-        // silently dies - the Big Farm / Sunshine stall. The provider
-        // processes see the truth; other processes may still be clamped to
-        // the true device SDK as the floor.
-        // Legacy Java SDK patch: OFF by default. Chromium reads SDK_INT_FULL
-        // and AconfigPackage.load() - APIs tied to the REAL SDK level - so a
-        // patched SDK_INT can crash the WebView provider in modern apps.
-        // Enable only per-app when a target needs the Java-level number.
         if (useSdk && prefs.getBoolean("sdk_java_enabled", false)) {
             patch(Build.VERSION::class.java, "SDK_INT", sdkEff, "SDK_INT")
             releaseFor(sdkEff)?.let { patch(Build.VERSION::class.java, "RELEASE", it, "RELEASE") }
@@ -368,15 +294,8 @@ object SpoofCore {
             patch(Build::class.java, "SUPPORTED_32_BIT_ABIS", a32, "SUPPORTED_32_BIT_ABIS")
             runCatching { System.setProperty("os.arch", if (abiMode == 0) "x86_64" else "aarch64") }
         }
-        Log.i(
-            TAG,
-            "[PAS] spoof applied: sdk=$useSdk/$sdkEff abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail"
-        )
+        Log.i(TAG, "[PAS] spoof applied: sdk=$useSdk/$sdkEff abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail")
     }
-
-    // ------------------------------------------------------------------
-    // Java-level patching (sun.misc.Unsafe primary, reflection fallback)
-    // ------------------------------------------------------------------
 
     private val unsafe: Any? by lazy {
         runCatching {
