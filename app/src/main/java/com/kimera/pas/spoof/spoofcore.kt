@@ -6,6 +6,13 @@ import android.util.Log
 import io.github.libxposed.api.XposedModule
 import java.lang.reflect.Field
 
+/**
+ * Per-app SDK / ABI spoof for the scoped process.
+ *
+ * v2.4.9: nativeSetGpu now carries the EGL/Vulkan hardware hint strings
+ * (ro.hardware.egl / ro.hardware.vulkan) that the GL loader and DevCheck
+ * read to pick the GPU vendor icon. Values come from the GPU catalog.
+ */
 object SpoofCore {
 
     private const val TAG = "PerAppSpoofer"
@@ -37,7 +44,7 @@ object SpoofCore {
 
     external fun nativeSetCpuClusters(cpuOn: Boolean, clusters: String)
 
-    // v2.4.7: GPU now carries min/max clock range (kHz).
+    // v2.4.9: two new trailing parameters (eglHardware, vulkanHardware).
     external fun nativeSetGpu(
         gpuOn: Boolean,
         gpuVendor: String,
@@ -54,7 +61,9 @@ object SpoofCore {
         l2CacheKb: Int,
         gpuArch: String,
         gpuMinFreqKHz: Int,
-        gpuMaxFreqKHz: Int
+        gpuMaxFreqKHz: Int,
+        eglHardware: String,
+        vulkanHardware: String
     )
 
     external fun nativeSetGpuProfile(
@@ -215,7 +224,7 @@ object SpoofCore {
         runCatching {
             nativeSetCpuClusters(cpuOn = cpuOnEff, clusters = cpuEntry.clusters)
         }
-        // v2.4.7: pass the min/max GPU clock range.
+        // v2.4.9: pass the EGL/Vulkan hardware hint strings.
         runCatching {
             nativeSetGpu(
                 gpuOnEff, gpuEntry.vendor, gpuEntry.renderer, gpuEntry.glVersion,
@@ -223,7 +232,8 @@ object SpoofCore {
                 gpuEntry.apiVersion, gpuEntry.driverName, gpuEntry.driverInfo,
                 gpuEntry.vkDeviceName,
                 gpuEntry.gpuCores, gpuEntry.l2CacheKb, gpuEntry.gpuArch,
-                gpuEntry.gpuMinFreqKHz, gpuEntry.gpuMaxFreqKHz
+                gpuEntry.gpuMinFreqKHz, gpuEntry.gpuMaxFreqKHz,
+                gpuEntry.eglHardware, gpuEntry.vulkanHardware
             )
         }
         runCatching {

@@ -3,11 +3,19 @@ package com.kimera.pas.spoof
 /**
  * Shared CPU / GPU model catalogs.
  *
- * v2.4.8: Xclipse driverId changed from 21 (VK_DRIVER_ID_SAMSUNG_PROPRIETARY,
- * unknown to DevCheck's enum mapping) to 1 (VK_DRIVER_ID_AMD_PROPRIETARY) so
- * DevCheck resolves the Vulkan Vendor row. Architecturally accurate - Xclipse
- * is licensed AMD RDNA. Real Exynos devices report driverID=21 but DevCheck
- * (as of the tested version) has no mapping for that enum member.
+ * v2.4.8: Xclipse driverId temporarily changed (reverted in v2.4.9).
+ *
+ * v2.4.9: Gpu data class now carries `eglHardware` and `vulkanHardware` -
+ * the driver hint strings that the Android GL loader and DevCheck-style
+ * tools read from ro.hardware.egl / ro.hardware.vulkan. Values reflect
+ * real Samsung firmware per GPU family:
+ *   - Mali   -> "mali"
+ *   - Adreno -> "adreno"
+ *   - Xclipse-> "samsung"
+ *
+ * Xclipse vendorId stays 0x144D (Samsung Electronics). driverId stays 21
+ * (VK_DRIVER_ID_SAMSUNG_PROPRIETARY) - the correct enum member for real
+ * Xclipse devices.
  */
 object DeviceCatalog {
 
@@ -65,7 +73,10 @@ object DeviceCatalog {
         val l2CacheKb: Int = 64,
         val gpuArch: String = "Bifrost",
         val gpuMinFreqKHz: Int = 200000,
-        val gpuMaxFreqKHz: Int = 1000000
+        val gpuMaxFreqKHz: Int = 1000000,
+        // v2.4.9: driver hint for ro.hardware.egl / ro.hardware.vulkan.
+        val eglHardware: String = "mali",
+        val vulkanHardware: String = "mali"
     )
 
     private fun vk(major: Int, minor: Int, patch: Int): Long =
@@ -387,7 +398,9 @@ object DeviceCatalog {
         l2CacheKb = l2CacheKb,
         gpuArch = gpuArch,
         gpuMinFreqKHz = minKHz,
-        gpuMaxFreqKHz = maxKHz
+        gpuMaxFreqKHz = maxKHz,
+        eglHardware = "mali",
+        vulkanHardware = "mali"
     )
 
     private fun adreno(
@@ -426,14 +439,11 @@ object DeviceCatalog {
         l2CacheKb = l2CacheKb,
         gpuArch = "Adreno",
         gpuMinFreqKHz = minKHz,
-        gpuMaxFreqKHz = maxKHz
+        gpuMaxFreqKHz = maxKHz,
+        eglHardware = "adreno",
+        vulkanHardware = "adreno"
     )
 
-    // v2.4.8: Xclipse driverId now 1 (AMD_PROPRIETARY) instead of 21
-    // (SAMSUNG_PROPRIETARY) so DevCheck's enum-to-vendor table resolves.
-    // Everything else (vendorId 0x144D, name "Samsung Xclipse NNN") stays
-    // consistent with real devices - only the driverID field, which is the
-    // API-facing "who wrote this driver" hint, is remapped.
     private fun xclipse(
         num: String,
         deviceId: Long,
@@ -462,14 +472,16 @@ object DeviceCatalog {
         driverInfo = "${if (spal) "SPAL " else ""}Driver version: $vkDrvText, git hash: $vkGit",
         glVersion = "OpenGL ES 3.2 Driver version: $glDrv git hash: $glGit",
         conformance = conformanceV,
-        driverId = 1,  // v2.4.8: AMD_PROPRIETARY (Xclipse is licensed RDNA)
+        driverId = 21,
         descriptorIndexing = true,
         sparseBinding = true,
         gpuCores = gpuCores,
         l2CacheKb = l2CacheKb,
         gpuArch = "RDNA",
         gpuMinFreqKHz = minKHz,
-        gpuMaxFreqKHz = maxKHz
+        gpuMaxFreqKHz = maxKHz,
+        eglHardware = "samsung",
+        vulkanHardware = "samsung"
     )
 
     val GPUS = listOf(

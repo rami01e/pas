@@ -56,13 +56,15 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
                   const char* hardware);
 void SetCpuClusters(bool cpuOn, const char* clusters);
 
-// v2.4.7: GPU config carries min/max clock range for the sysfs mirrors.
+// v2.4.9: GPU config now also carries the EGL/Vulkan driver hint strings
+// (ro.hardware.egl / ro.hardware.vulkan equivalents) for the property mirrors.
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
                   const char* driverName, const char* driverInfo, const char* vkDeviceName,
                   int gpuCores, int l2CacheKb, const char* gpuArch,
-                  int gpuMinFreqKHz, int gpuMaxFreqKHz);
+                  int gpuMinFreqKHz, int gpuMaxFreqKHz,
+                  const char* eglHardware, const char* vulkanHardware);
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
                    int driverId, bool descriptorIndexing, bool sparseBinding);
 
@@ -95,9 +97,11 @@ std::string GpuSpoofDriverInfo();
 int GpuSpoofCores();
 int GpuSpoofL2CacheKb();
 std::string GpuSpoofArch();
-// v2.4.7: physical clock range (kHz) for the sysfs mirrors.
 int GpuSpoofMinFreqKHz();
 int GpuSpoofMaxFreqKHz();
+// v2.4.9: driver hint values for ro.hardware.egl / ro.hardware.vulkan.
+std::string GpuSpoofEglHardware();
+std::string GpuSpoofVulkanHardware();
 
 void InstallGpuHooks();
 void InstallVulkanHooks();

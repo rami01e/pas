@@ -1,7 +1,9 @@
 // CPU model / GPU (OpenGL) spoof for the scoped process.
 //
-// v2.4.7: GPU now carries a min/max clock range (kHz). The GL/Vulkan
-// identity is unchanged.
+// v2.4.9: eglQueryString(EGL_VENDOR) is now hooked alongside glGetString so
+// that tools reading the EGL-layer vendor string (separate from GL_VENDOR on
+// every Android GL stack) resolve the spoofed GPU. The ro.hardware.egl and
+// ro.hardware.vulkan driver hints are carried in the config as well.
 
 #include "pas.h"
 
@@ -46,9 +48,11 @@ static char g_gpu_driver_info[256] = {0};
 static volatile int g_gpu_cores = 1;
 static volatile int g_gpu_l2_cache_kb = 64;
 static char g_gpu_arch[32] = {0};
-// v2.4.7: GPU clock range for the sysfs mirrors.
 static volatile int g_gpu_min_freq_khz = 200000;
 static volatile int g_gpu_max_freq_khz = 1000000;
+// v2.4.9: EGL/Vulkan driver hint strings for ro.hardware.egl / ro.hardware.vulkan.
+static char g_gpu_egl_hardware[32] = {0};
+static char g_gpu_vulkan_hardware[32] = {0};
 
 static void CopyStr(char* dst, size_t cap, const char* src) {
     snprintf(dst, cap, "%s", src ? src : "");
@@ -94,7 +98,8 @@ void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const ch
                   unsigned long long driverVersion, unsigned long long apiVersion,
                   const char* driverName, const char* driverInfo,
                   const char* vkDeviceName, int gpuCores, int l2CacheKb,
-                  const char* gpuArch, int gpuMinFreqKHz, int gpuMaxFreqKHz) {
+                  const char* gpuArch, int gpuMinFreqKHz, int gpuMaxFreqKHz,
+                  const char* eglHardware, const char* vulkanHardware) {
     g_gpu_on = false;
     CopyStr(g_gpu_vendor, sizeof(g_gpu_vendor), vendor);
     CopyStr(g_gpu_renderer, sizeof(g_gpu_renderer), renderer);
@@ -115,10 +120,14 @@ void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const ch
     CopyStr(g_gpu_arch, sizeof(g_gpu_arch), gpuArch);
     if (gpuMinFreqKHz > 0) g_gpu_min_freq_khz = gpuMinFreqKHz;
     if (gpuMaxFreqKHz > 0) g_gpu_max_freq_khz = gpuMaxFreqKHz;
+    // v2.4.9: driver hint strings (default to empty - property hook falls back).
+    CopyStr(g_gpu_egl_hardware, sizeof(g_gpu_egl_hardware), eglHardware);
+    CopyStr(g_gpu_vulkan_hardware, sizeof(g_gpu_vulkan_hardware), vulkanHardware);
     g_gpu_on = gpuOn && g_gpu_renderer[0] != '\0';
-    Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx cores=%d l2=%dkB arch=%s khz=%d-%d",
+    Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx cores=%d l2=%dkB arch=%s khz=%d-%d egl=%s vk=%s",
         (int)g_gpu_on, g_gpu_renderer, g_gpu_vendor_id, g_gpu_device_id, g_gpu_cores,
-        g_gpu_l2_cache_kb, g_gpu_arch, (int)g_gpu_min_freq_khz, (int)g_gpu_max_freq_khz);
+        g_gpu_l2_cache_kb, g_gpu_arch, (int)g_gpu_min_freq_khz, (int)g_gpu_max_freq_khz,
+        g_gpu_egl_hardware, g_gpu_vulkan_hardware);
 }
 
 bool CpuSpoofActive() {
@@ -166,10 +175,18 @@ int GpuSpoofL2CacheKb() { return g_gpu_l2_cache_kb; }
 std::string GpuSpoofArch() { return std::string(g_gpu_arch[0] != '\0' ? g_gpu_arch : "Bifrost"); }
 int GpuSpoofMinFreqKHz() { return g_gpu_min_freq_khz; }
 int GpuSpoofMaxFreqKHz() { return g_gpu_max_freq_khz; }
+std::string GpuSpoofEglHardware() { return std::string(g_gpu_egl_hardware); }
+std::string GpuSpoofVulkanHardware() { return std::string(g_gpu_vulkan_hardware); }
+
+// ---------------------------------------------------------------------------
+// GL / EGL string substitution
+// ---------------------------------------------------------------------------
 
 typedef void* (*PasEglGpaFn)(const char*);
 typedef const unsigned char* (*PasGlGetStringFn)(unsigned int);
 typedef const unsigned char* (*PasGlGetStringiFn)(unsigned int, unsigned int);
+// eglQueryString: const char* (*)(EGLDisplay, EGLint)
+typedef const char* (*PasEglQueryStringFn)(void*, int);
 
 #define PAS_GL_SLOTS 8
 
@@ -205,7 +222,8 @@ static void DiagGlStr(const char* tag, unsigned name, int spoofed) {
 
 static void GlChainLog(const char* name, const char* how) {
     unsigned bit = (strcmp(name, "glGetString") == 0) ? 1u
-                   : (strcmp(name, "glGetStringi") == 0) ? 4u : 2u;
+                   : (strcmp(name, "glGetStringi") == 0) ? 4u
+                   : (strcmp(name, "eglQueryString") == 0) ? 8u : 2u;
     if (g_gl_chain_logged & bit) return;
     g_gl_chain_logged |= bit;
     Log("native: gl loader-chain %s: %s", how, name);
@@ -222,6 +240,15 @@ static bool SpoofGlName(unsigned name, const unsigned char** out) {
     return false;
 }
 
+// EGL_VENDOR = 0x3053. Returns the vendor string only when spoofing.
+static const char* SpoofEglName(int name) {
+    if (!g_gpu_on) return nullptr;
+    if (name == 0x3053) return g_gpu_vendor;  // EGL_VENDOR
+    // EGL_VERSION (0x3054), EGL_EXTENSIONS (0x3055), EGL_CLIENT_APIS (0x308D)
+    // are left alone - they are version/capability facts, not identity.
+    return nullptr;
+}
+
 static const unsigned char* MyGlGetString(unsigned int name) {
     BYTEHOOK_STACK_SCOPE();
     const unsigned char* spoofed = nullptr;
@@ -230,6 +257,20 @@ static const unsigned char* MyGlGetString(unsigned int name) {
     if (spoof) return spoofed;
     return BYTEHOOK_CALL_PREV(MyGlGetString, name);
 }
+
+static const char* MyEglQueryString(void* dpy, int name) {
+    BYTEHOOK_STACK_SCOPE();
+    const char* spoofed = SpoofEglName(name);
+    if (spoofed != nullptr) {
+        if (name == 0x3053) GlChainLog("eglQueryString", "hook");
+        return spoofed;
+    }
+    return BYTEHOOK_CALL_PREV(MyEglQueryString, dpy, name);
+}
+
+// The libEGL loader forwards eglQueryString to a driver-specific function of
+// the same name that we cannot intercept by symbol name. The GOT-level hook
+// on libEGL itself is what DevCheck and every other Android app calls through.
 
 static const unsigned char* RepGlGetStringN(int slot, unsigned int name) {
     const unsigned char* spoofed = nullptr;
@@ -325,7 +366,7 @@ static void* const g_slot_gpa[PAS_GL_SLOTS] = {
 void* GpuChainResolveDlsym(const char* symbol, void* real) {
     if (symbol == nullptr) return nullptr;
     if (strcmp(symbol, "glGetString") == 0 || strcmp(symbol, "glGetStringi") == 0 ||
-        strcmp(symbol, "eglGetProcAddress") == 0) {
+        strcmp(symbol, "eglGetProcAddress") == 0 || strcmp(symbol, "eglQueryString") == 0) {
         GpuDiag("dlsym", symbol);
     }
     if (!g_gpu_on || !g_gpu_chain_on || real == nullptr) return nullptr;
@@ -345,6 +386,11 @@ void* GpuChainResolveDlsym(const char* symbol, void* real) {
         int slot = GlChainSlotFor(real, nullptr, nullptr, (PasEglGpaFn)real);
         if (slot < 0) return nullptr;
         return g_slot_gpa[slot];
+    }
+    if (strcmp(symbol, "eglQueryString") == 0) {
+        // dlsym-resolved eglQueryString: hand the caller our proxy directly.
+        GlChainLog("eglQueryString", "dlsym");
+        return (void*)MyEglQueryString;
     }
     return nullptr;
 }
@@ -373,6 +419,10 @@ static void* RepEglGetProcAddressN(int slot, const char* name) {
     }
     if (strcmp(name, "eglGetProcAddress") == 0 && slot >= 0 && slot < PAS_GL_SLOTS) {
         return g_slot_gpa[slot];
+    }
+    if (strcmp(name, "eglQueryString") == 0) {
+        GlChainLog("eglQueryString", "eglGetProcAddress");
+        return (void*)MyEglQueryString;
     }
     return r;
 }
@@ -418,6 +468,10 @@ static void* MyEglGetProcAddress(const char* name) {
         }
         return real;
     }
+    if (strcmp(name, "eglQueryString") == 0) {
+        GlChainLog("eglQueryString", "eglGetProcAddress");
+        return (void*)MyEglQueryString;
+    }
     return real;
 }
 
@@ -449,6 +503,12 @@ static void OnGpuHookedEgl(bytehook_stub_t stub, int status_code, const char* ca
     LogGpuHookActivation("eglGetProcAddress", status_code, caller_path_name);
 }
 
+static void OnGpuHookedEglQs(bytehook_stub_t stub, int status_code, const char* caller_path_name,
+                             const char* sym_name, void* new_func, void* prev_func, void* arg) {
+    (void)stub; (void)sym_name; (void)new_func; (void)prev_func; (void)arg;
+    LogGpuHookActivation("eglQueryString", status_code, caller_path_name);
+}
+
 void InstallGpuHooks() {
     bytehook_stub_t stub = bytehook_hook_partial(CallerAllowHooks, nullptr, "libGLES",
                                                  "glGetString", (void*)MyGlGetString,
@@ -463,6 +523,15 @@ void InstallGpuHooks() {
                                                     (void*)MyEglGetProcAddress, OnGpuHookedEgl,
                                                     nullptr);
     Log("native: gpu hook eglGetProcAddress stub=%d", stubEgl != nullptr);
+    // v2.4.9: hook the EGL-layer vendor string too. DevCheck and similar
+    // tools read eglQueryString(EGL_VENDOR) which is a separate value from
+    // GL_VENDOR on every Android GL stack, and prior to this release we
+    // never intercepted it.
+    bytehook_stub_t stubEglQs = bytehook_hook_partial(CallerAllowHooks, nullptr, "libEGL",
+                                                      "eglQueryString",
+                                                      (void*)MyEglQueryString,
+                                                      OnGpuHookedEglQs, nullptr);
+    Log("native: gpu hook eglQueryString stub=%d", stubEglQs != nullptr);
 }
 
 }  // namespace pas
@@ -517,7 +586,9 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
                                                          jstring vkDeviceName,
                                                          jint gpuCores, jint l2CacheKb,
                                                          jstring gpuArch,
-                                                         jint gpuMinFreqKHz, jint gpuMaxFreqKHz) {
+                                                         jint gpuMinFreqKHz, jint gpuMaxFreqKHz,
+                                                         jstring eglHardware,
+                                                         jstring vulkanHardware) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -533,12 +604,15 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
     std::string dInfo = toStr(driverInfo);
     std::string vkName = toStr(vkDeviceName);
     std::string arch = toStr(gpuArch);
+    std::string eglHw = toStr(eglHardware);
+    std::string vkHw = toStr(vulkanHardware);
     pas::SetGpuConfig(gpuOn == JNI_TRUE, vendor.c_str(), renderer.c_str(), glVersion.c_str(),
                       (unsigned long long)vendorId, (unsigned long long)deviceId,
                       (unsigned long long)driverVersion, (unsigned long long)apiVersion,
                       dName.c_str(), dInfo.c_str(), vkName.c_str(),
                       (int)gpuCores, (int)l2CacheKb, arch.c_str(),
-                      (int)gpuMinFreqKHz, (int)gpuMaxFreqKHz);
+                      (int)gpuMinFreqKHz, (int)gpuMaxFreqKHz,
+                      eglHw.c_str(), vkHw.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
