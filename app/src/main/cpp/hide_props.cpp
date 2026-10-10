@@ -105,6 +105,11 @@ static bool IsSpoofTarget(const char* name) {
     static const char* const kSoc[] = {
         "ro.soc.model",
         "ro.soc.manufacturer",
+        // v2.4.0: hardware family keys - real Samsung devices report the
+        // SoC platform here ("s5e9945" / "qcom" / "mt6769"), and integrity
+        // checks cross-read them against Build.HARDWARE.
+        "ro.hardware",
+        "ro.boot.hardware",
     };
     // The SDK prop is only spoofed upward-safe: values below 35 break the
     // WebView provider (see spoofcore J1 note), so the native layer falls
@@ -316,6 +321,14 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         }
         if (strcmp(name, "ro.soc.manufacturer") == 0) {
             return SetStr(out, cap, outLen, CpuSpoofManufacturer().c_str());
+        }
+        // v2.4.0: hardware family mirrors the spoofed platform so prop
+        // readers see the same value as Build.HARDWARE ("s5e9945" etc).
+        // Note: ro.vendor.qti.soc_name is intentionally NOT spoofed - real
+        // devices carry the SoC codename ("kalama"), a different value from
+        // the platform; a wrong value there is worse than the host's own.
+        if (strcmp(name, "ro.hardware") == 0 || strcmp(name, "ro.boot.hardware") == 0) {
+            return SetStr(out, cap, outLen, CpuSpoofHardware().c_str());
         }
     }
     return false;

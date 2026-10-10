@@ -63,16 +63,22 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compat
 // CPU model / GPU (OpenGL + Vulkan) spoof (hide_gpu.cpp, hide_vulkan.cpp)
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
-                  int maxKHz, const char* hwLine);
+                  int maxKHz, const char* hwLine, const char* implementer,
+                  const char* hardware);
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
-                  const char* driverName, const char* driverInfo);
+                  const char* driverName, const char* driverInfo, const char* vkDeviceName);
+// v2.4.0: per-GPU Vulkan profile (conformance version + feature flags).
+void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
+                   bool descriptorIndexing, bool sparseBinding);
 bool CpuSpoofActive();
 std::string CpuSpoofDisplay();
 std::string CpuSpoofManufacturer();
 std::string CpuSpoofModel();
 std::string CpuSpoofPart();
+std::string CpuSpoofImplementer();
+std::string CpuSpoofHardware();
 std::string CpuSpoofCpuinfoModel();
 std::string CpuSpoofFeatures();
 std::string CpuSpoofHwLine();
@@ -81,6 +87,7 @@ int CpuSpoofMaxKHz();
 bool GpuSpoofActive();
 std::string GpuSpoofVendor();
 std::string GpuSpoofRenderer();
+std::string GpuSpoofVkDeviceName();
 std::string GpuSpoofGlVersion();
 unsigned long long GpuSpoofVendorId();
 unsigned long long GpuSpoofDeviceId();

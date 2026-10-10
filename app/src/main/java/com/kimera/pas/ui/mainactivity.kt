@@ -6,11 +6,9 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.DialogInterface
-import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Canvas
-import android.net.Uri
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
@@ -251,101 +249,143 @@ class MainActivity : Activity() {
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { bottomMargin = dp(8) }
-        )
-        content.addView(
-            actionButton("Open WebGL test page", null, false) { openWebglTest() },
-            LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
             ).apply { bottomMargin = dp(12) }
         )
 
         // ---------------- SCOPE panel ----------------
+        // v2.4.0: tapping anywhere in this section (header or body) opens
+        // the scoped apps list.
         scopeChip = chipView("\u2014", cText2)
-        val (scopePanel, scopeBody) = panel("Scope", scopeChip, null)
+        val (scopePanel, scopeBody) = panel("Scope", scopeChip) { openScopeDialog() }
         addPanel(scopePanel)
+        scopeBody.isClickable = true
+        scopeBody.setOnClickListener { openScopeDialog() }
         addRow(scopeBody, true) {
             addView(
                 TextView(this@MainActivity).apply {
-                    text = "Manage scope"
+                    text = "Scoped apps"
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
                     setTextColor(cText)
                 }
             )
-            val line = LinearLayout(this@MainActivity).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-            }
-            line.addView(
+            addView(
                 TextView(this@MainActivity).apply {
-                    text = "Pick apps to include or remove"
+                    text = "Tap to manage the apps this module spoofs"
                     setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
                     typeface = Typeface.MONOSPACE
                     setTextColor(cText3)
                 },
-                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-            )
-            line.addView(micro("Manage") { openScopeDialog() })
-            addView(
-                line,
                 LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { leftMargin = dp(38); topMargin = dp(6) }
+                ).apply { topMargin = dp(6) }
             )
         }
 
-        // ---------------- NATIVE panel ----------------
-        val (spoofPanel, spoofBody) = panel("Native", null, null)
-        addPanel(spoofPanel)
-
-        sdkSw = SwitchView(this)
-        sdkValue = valueTextView()
-        valueRow(spoofBody, true, sdkSw, "SDK", sdkValue,
-            { pickSdk() }, { randomSdk() }, { clearSdk() })
+        // ---------------- HARDWARE panel (v2.4.0) ----------------
+        // CPU ABI / CPU model / GPU - the device-identity spoofs.
+        val (hwPanel, hwBody) = panel("Hardware", null, null)
+        addPanel(hwPanel)
 
         abiSw = SwitchView(this)
         abiValue = valueTextView()
-        valueRow(spoofBody, false, abiSw, "CPU ABI", abiValue,
+        valueRow(hwBody, true, abiSw, "CPU ABI", abiValue,
             { pickAbi() }, { cycleAbi() }, { clearAbi() })
 
         cpuSw = SwitchView(this)
         cpuValue = valueTextView()
-        valueRow(spoofBody, false, cpuSw, "CPU model", cpuValue,
+        valueRow(hwBody, false, cpuSw, "CPU model", cpuValue,
             { pickCpu() }, { randomCpu() }, { clearCpu() })
 
         gpuSw = SwitchView(this)
         gpuValue = valueTextView()
-        valueRow(spoofBody, false, gpuSw, "GPU", gpuValue,
+        valueRow(hwBody, false, gpuSw, "GPU", gpuValue,
             { pickGpu() }, { randomGpu() }, { clearGpu() })
 
-        // ---------------- JAVA panel ----------------
-        val (javaPanel, javaBody) = panel("Java", null, null)
-        addPanel(javaPanel)
+        // ---------------- SOFTWARE panel (v2.4.0) ----------------
+        // Widevine / GSF ID / Unpin SSL - the service-level spoofs.
+        val (swPanel, swBody) = panel("Software", null, null)
+        addPanel(swPanel)
 
         wvSw = SwitchView(this)
         wvValue = valueTextView()
-        valueRow(javaBody, true, wvSw, "Widevine", wvValue,
+        valueRow(swBody, true, wvSw, "Widevine", wvValue,
             { editWidevine() }, { wvEditVal = randomWidevine(); updateWvValue(); updateDirty() },
             { clearWidevine() })
 
         gsfSw = SwitchView(this)
         gsfValue = valueTextView()
-        valueRow(javaBody, false, gsfSw, "GSF ID", gsfValue,
+        valueRow(swBody, false, gsfSw, "GSF ID", gsfValue,
             { editGsf() }, { gsfEditVal = randomGsf(); updateGsfValue(); updateDirty() },
             { clearGsf() })
 
-        // ---------------- SSL UNPINNING panel ----------------
-        val (sslPanel, sslBody) = panel("SSL Unpinning", null, null)
-        addPanel(sslPanel)
-
         sslSw = SwitchView(this)
         sslValue = valueTextView()
-        valueRow(sslBody, true, sslSw, "Unpin SSL", sslValue,
+        valueRow(swBody, false, sslSw, "Unpin SSL", sslValue,
             { pickSslMode() }, { cycleSslMode() }, { clearSslMode() })
 
-        // ---------------- LOGS panel ----------------
+        // ---------------- ADVANCED panel (v2.4.0) ----------------
+        // SDK (formerly in Native) + the former Debug-section toggles.
+        val (advPanel, advBody) = panel("Advanced", null, null)
+        addPanel(advPanel)
+
+        sdkSw = SwitchView(this)
+        sdkValue = valueTextView()
+        valueRow(advBody, true, sdkSw, "SDK", sdkValue,
+            { pickSdk() }, { randomSdk() }, { clearSdk() })
+
+        nativeSw = SwitchView(this)
+        nativeChip = chipView("Off", cText2)
+        toggleRow(
+            advBody, false, nativeSw, "Native addon",
+            "Native hook engine \u2014 VPN-trace + device surfaces", nativeChip
+        )
+
+        vulkanSw = SwitchView(this)
+        vulkanChip = chipView("On", cCyan)
+        toggleRow(
+            advBody, false, vulkanSw, "Vulkan identity",
+            "Vulkan driver identity (physical device properties)", vulkanChip
+        )
+
+        chainSw = SwitchView(this)
+        chainChip = chipView("On", cCyan)
+        toggleRow(
+            advBody, false, chainSw, "GL dlsym chain",
+            "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
+        )
+
+        // WebRTC local IP: on = Balanced (default), off = RKN (strict).
+        webrtcSw = SwitchView(this)
+        webrtcChip = chipView("REAL", cCyan)
+        toggleRow(
+            advBody, false, webrtcSw, "WebRTC local IP",
+            "On (default): browsers see your REAL local IP - RKN-clean \u00b7 Off: strict hiding (RKN)",
+            webrtcChip
+        )
+
+        compatSw = SwitchView(this)
+        toggleRow(
+            advBody, false, compatSw, "safe mode",
+            "Skip extended hook groups (netlink / ioctl / props)", null
+        )
+
+        sdkJavaSw = SwitchView(this)
+        toggleRow(
+            advBody, false, sdkJavaSw, "SDK (Java)",
+            "Patch Build.VERSION.SDK_INT in-app (may break modern WebView apps)", null
+        )
+
+        // Net type: per-app WIFI / CELLULAR source selection.
+        netSw = SwitchView(this)
+        netValue = valueTextView()
+        valueRow(advBody, false, netSw, "Net type", netValue,
+            { pickNet() }, { cycleNet() }, { clearNet() })
+
+        // ---------------- DEBUG panel (v2.4.0) ----------------
+        // Debug log only: the debug toggle (recon logging) is OFF by default
+        // for production releases; the diagnose / reload / copy buttons and
+        // the collapsible log console stay as they were.
         logsChev = TextView(this).apply {
             text = "\u25B8"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
@@ -355,16 +395,6 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        logsTrailing.addView(
-            TextView(this).apply {
-                text = "DEBUG"
-                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
-                typeface = Typeface.DEFAULT_BOLD
-                letterSpacing = 0.08f
-                setTextColor(cText3)
-                setPadding(0, 0, dp(4), 0)
-            }
-        )
         lightSw = SwitchView(this)
         logsTrailing.addView(lightSw)
         logsTrailing.addView(microIcon("\uD83D\uDD0D\uFE0F") { runDiagnose() })
@@ -380,58 +410,10 @@ class MainActivity : Activity() {
         val (logsPanel, logsBody) = panel("Debug", logsTrailing) { toggleLogs() }
         addPanel(logsPanel)
 
-        // Debug toggles: the four former NATIVE switches plus safe mode and
-        // recon. All of them fold away with the section; the log console
-        // stays below them.
-        nativeSw = SwitchView(this)
-        nativeChip = chipView("Off", cText2)
         toggleRow(
-            logsBody, true, nativeSw, "Native addon",
-            "Native hook engine \u2014 VPN-trace + device surfaces", nativeChip
+            logsBody, true, lightSw, "Debug log",
+            "Recon diagnostics logging (per-app) \u00b7 off by default for production", null
         )
-
-        vulkanSw = SwitchView(this)
-        vulkanChip = chipView("On", cCyan)
-        toggleRow(
-            logsBody, false, vulkanSw, "Vulkan identity",
-            "Vulkan driver identity (physical device properties)", vulkanChip
-        )
-
-        chainSw = SwitchView(this)
-        chainChip = chipView("On", cCyan)
-        toggleRow(
-            logsBody, false, chainSw, "GL dlsym chain",
-            "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
-        )
-
-        // WebRTC local IP: on = Balanced (default), off = RKN (strict).
-        webrtcSw = SwitchView(this)
-        webrtcChip = chipView("REAL", cCyan)
-        toggleRow(
-            logsBody, false, webrtcSw, "WebRTC local IP",
-            "On (default): browsers see your REAL local IP - RKN-clean \u00b7 Off: strict hiding (RKN)",
-            webrtcChip
-        )
-
-        compatSw = SwitchView(this)
-        toggleRow(
-            logsBody, false, compatSw, "safe mode",
-            "Skip extended hook groups (netlink / ioctl / props)", null
-        )
-
-        sdkJavaSw = SwitchView(this)
-        toggleRow(
-            logsBody, false, sdkJavaSw, "SDK (Java)",
-            "Patch Build.VERSION.SDK_INT in-app (may break modern WebView apps)", null
-        )
-
-
-        // Net type: per-app WIFI / CELLULAR source selection.
-        netSw = SwitchView(this)
-        netValue = valueTextView()
-        valueRow(logsBody, false, netSw, "Net type", netValue,
-            { pickNet() }, { cycleNet() }, { clearNet() })
-
 
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
@@ -997,7 +979,7 @@ class MainActivity : Activity() {
     private fun pickGpu() {
         pick(
             "GPU",
-            DeviceCatalog.GPUS.map { "${it.vendor} ${it.renderer}" }.toTypedArray(),
+            DeviceCatalog.GPUS.map { "${it.vendor} ${it.label}" }.toTypedArray(),
             gpuSel
         ) { idx ->
             gpuSel = idx
@@ -1123,7 +1105,7 @@ class MainActivity : Activity() {
 
     private fun updateGpuValue() {
         val g = DeviceCatalog.GPUS.getOrElse(gpuSel) { DeviceCatalog.GPUS[0] }
-        gpuValue.text = "${g.vendor} ${g.renderer}"
+        gpuValue.text = "${g.vendor} ${g.label}"
     }
 
     private fun updateWvValue() {
@@ -1268,7 +1250,8 @@ class MainActivity : Activity() {
         val sp = SpoofSettings.load(this)
         suppressDirty = true
         nativeSw.checked = sp.getBoolean("native_enabled", true)
-        lightSw.checked = sp.getBoolean("recon_enabled", true)
+        // v2.4.0: debug (recon) logging OFF by default for production.
+        lightSw.checked = sp.getBoolean("recon_enabled", false)
         compatSw.checked = sp.getBoolean("safe_mode", false)
         sdkJavaSw.checked = sp.getBoolean("sdk_java_enabled", false)
         sdkSw.checked = sp.getBoolean("sdk_enabled", false)
@@ -1388,7 +1371,7 @@ class MainActivity : Activity() {
             "net_cellular" to sp.getBoolean("net_cellular", false),
             "sdk_java_enabled" to sp.getBoolean("sdk_java_enabled", false),
 
-            "recon_enabled" to sp.getBoolean("recon_enabled", true),
+            "recon_enabled" to sp.getBoolean("recon_enabled", false),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
             "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
         )
@@ -1712,83 +1695,6 @@ class MainActivity : Activity() {
                 }
             }
             .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun openWebglTest() {
-        val url = "https://browserleaks.com/webgl"
-        AlertDialog.Builder(this)
-            .setTitle("WebGL test page")
-            .setItems(
-                arrayOf(
-                    "Open in WebView test app",
-                    "Preview with system WebView (here)",
-                    "Open with\u2026 (chooser)"
-                )
-            ) { _, which ->
-                when (which) {
-                    0 -> openInWebViewApp(url)
-                    1 -> previewInWebView(url)
-                    else -> chooserOpen(url)
-                }
-            }
-            .setNegativeButton("Cancel", null)
-            .show()
-    }
-
-    private fun chooserOpen(url: String) {
-        try {
-            startActivity(
-                Intent.createChooser(Intent(Intent.ACTION_VIEW, Uri.parse(url)), "Open WebGL test")
-            )
-        } catch (t: Throwable) {
-            toast("No app available to open the link")
-        }
-    }
-
-    private fun openInWebViewApp(url: String) {
-        val test = "com.snc.test.webview2"
-        val direct = Intent(Intent.ACTION_VIEW, Uri.parse(url)).setPackage(test)
-        if (packageManager.queryIntentActivities(direct, 0).isNotEmpty()) {
-            try {
-                startActivity(direct)
-                return
-            } catch (t: Throwable) {
-                // fall through
-            }
-        }
-        val launch = packageManager.getLaunchIntentForPackage(test)
-        if (launch != null) {
-            launch.action = Intent.ACTION_VIEW
-            launch.data = Uri.parse(url)
-            launch.putExtra("url", url)
-            launch.putExtra("URL", url)
-            try {
-                startActivity(launch)
-                toast("If it didn't load, paste: $url")
-                return
-            } catch (t: Throwable) {
-                // fall through
-            }
-        }
-        toast("WebView test app not found")
-    }
-
-    private fun previewInWebView(url: String) {
-        val web = android.webkit.WebView(this)
-        web.settings.javaScriptEnabled = true
-        web.loadUrl(url)
-        val box = FrameLayout(this).apply { setPadding(dp(8), dp(8), dp(8), 0) }
-        box.addView(
-            web,
-            FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                dp(420)
-            )
-        )
-        AlertDialog.Builder(this)
-            .setView(box)
-            .setPositiveButton("Close", null)
             .show()
     }
 

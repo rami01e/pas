@@ -46,6 +46,7 @@ object SpoofCore {
         cpuMinKHz: Int,
         cpuMaxKHz: Int,
         cpuHwLine: String,
+        cpuImplementer: String,
         cpuHardware: String
     )
 
@@ -59,7 +60,21 @@ object SpoofCore {
         gpuDriverVersion: Long,
         gpuApiVersion: Long,
         gpuDriverName: String,
-        gpuDriverInfo: String
+        gpuDriverInfo: String,
+        gpuVkDeviceName: String
+    )
+
+    // >>> v2.4.0: per-GPU Vulkan profile (conformance version + feature
+    // flags) so Xclipse/Adreno/Mali spoof the right vkGetPhysicalDevice*
+    // answers instead of the old single reference profile.
+    external fun nativeSetGpuProfile(
+        gpuOn: Boolean,
+        confMajor: Int,
+        confMinor: Int,
+        confSub: Int,
+        confPatch: Int,
+        descriptorIndexing: Boolean,
+        sparseBinding: Boolean
     )
 
     external fun nativeSetRecon(reconOn: Boolean)
@@ -134,7 +149,8 @@ object SpoofCore {
         // Recon diagnostics toggle: independent of the native addon gate, but
         // delivered before nativeSetConfig so the native worker can install
         // the recon hook group when it starts.
-        val reconOn = prefs.getBoolean("recon_enabled", true)
+        // v2.4.0: OFF by default (production); the GUI Debug toggle enables it.
+        val reconOn = prefs.getBoolean("recon_enabled", false)
         SpoofState.reconOn = reconOn
         runCatching { nativeSetRecon(reconOn) }
         Log.i(TAG, "[PAS] recon logging: $reconOn")
@@ -230,6 +246,7 @@ object SpoofCore {
                 cpuEntry.hardwareLine.ifEmpty {
                     "${cpuEntry.hardware} (Samsung board based on ${cpuEntry.socModel})"
                 },
+                cpuEntry.implementer,
                 cpuEntry.hardware
             )
         }
@@ -237,7 +254,21 @@ object SpoofCore {
             nativeSetGpu(
                 gpuOnEff, gpuEntry.vendor, gpuEntry.renderer, gpuEntry.glVersion,
                 gpuEntry.vendorId, gpuEntry.deviceId, gpuEntry.driverVersion,
-                gpuEntry.apiVersion, gpuEntry.driverName, gpuEntry.driverInfo
+                gpuEntry.apiVersion, gpuEntry.driverName, gpuEntry.driverInfo,
+                gpuEntry.vkDeviceName
+            )
+        }
+        // >>> v2.4.0: per-GPU Vulkan profile (conformance + feature flags),
+        // delivered before the config gate like the other early values.
+        runCatching {
+            nativeSetGpuProfile(
+                gpuOnEff,
+                (gpuEntry.conformance shr 24) and 0xFF,
+                (gpuEntry.conformance shr 16) and 0xFF,
+                (gpuEntry.conformance shr 8) and 0xFF,
+                gpuEntry.conformance and 0xFF,
+                gpuEntry.descriptorIndexing,
+                gpuEntry.sparseBinding
             )
         }
 

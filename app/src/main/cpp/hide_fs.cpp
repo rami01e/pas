@@ -317,6 +317,9 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
     const std::string model = CpuSpoofCpuinfoModel();
     const std::string features = CpuSpoofFeatures();
     const std::string part = CpuSpoofPart();
+    // v2.4.0: implementer follows the catalog (0x41 ARM, 0x51 Qualcomm
+    // Oryon) so Snapdragon 8 Elite profiles print their real implementer.
+    const std::string implementer = CpuSpoofImplementer();
     // Keep everything before the first per-core block as is.
     size_t first = std::string::npos;
     {
@@ -376,7 +379,9 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
         out->append("Features\t: ");
         out->append(features);
         out->push_back('\n');
-        out->append("CPU implementer\t: 0x41\n");
+        out->append("CPU implementer\t: ");
+        out->append(implementer);
+        out->push_back('\n');
         out->append("CPU architecture\t: 8\n");
         out->append("CPU variant\t: 0x0\n");
         out->append("CPU part\t: ");

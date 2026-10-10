@@ -33,9 +33,13 @@ static char g_cpu_display[192] = {0};
 static char g_cpu_mfr[64] = {0};
 static char g_cpu_model[64] = {0};
 static char g_cpu_part[16] = {0};
+// v2.4.0: CPU implementer for /proc/cpuinfo (0x41 ARM, 0x51 Qualcomm Oryon).
+static char g_cpu_implementer[8] = {0};
 static char g_cpu_info_model[96] = {0};
 static char g_cpu_features[256] = {0};
 static char g_cpu_hwline[256] = {0};
+// v2.4.0: platform value for Build.HARDWARE / ro.hardware surfaces.
+static char g_cpu_hardware[64] = {0};
 static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
 
@@ -44,6 +48,9 @@ static volatile bool g_gpu_chain_on = true;
 static volatile bool g_gpu_vulkan_on = true;
 static char g_gpu_vendor[64] = {0};
 static char g_gpu_renderer[192] = {0};
+// v2.4.0: raw Vulkan deviceName (distinct from the GL_RENDERER string:
+// Xclipse GL shows the ANGLE wrapper while Vulkan shows the plain name).
+static char g_gpu_vk_device_name[192] = {0};
 static char g_gpu_gl_version[192] = {0};
 static volatile unsigned long long g_gpu_vendor_id = 0;
 static volatile unsigned long long g_gpu_device_id = 0;
@@ -58,29 +65,45 @@ static void CopyStr(char* dst, size_t cap, const char* src) {
 
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
-                  int maxKHz, const char* hwLine) {
+                  int maxKHz, const char* hwLine, const char* implementer,
+                  const char* hardware) {
     g_cpu_on = false;
     CopyStr(g_cpu_display, sizeof(g_cpu_display), display);
     CopyStr(g_cpu_mfr, sizeof(g_cpu_mfr), mfr);
     CopyStr(g_cpu_model, sizeof(g_cpu_model), model);
     CopyStr(g_cpu_part, sizeof(g_cpu_part), part);
+    if (implementer != nullptr && implementer[0] != '\0') {
+        CopyStr(g_cpu_implementer, sizeof(g_cpu_implementer), implementer);
+    } else {
+        CopyStr(g_cpu_implementer, sizeof(g_cpu_implementer), "0x41");
+    }
     CopyStr(g_cpu_info_model, sizeof(g_cpu_info_model), cpuInfoModel);
     CopyStr(g_cpu_features, sizeof(g_cpu_features), features);
     CopyStr(g_cpu_hwline, sizeof(g_cpu_hwline), hwLine);
+    CopyStr(g_cpu_hardware, sizeof(g_cpu_hardware), hardware);
     g_cpu_min_khz = minKHz;
     g_cpu_max_khz = maxKHz;
     g_cpu_on = cpuOn && g_cpu_display[0] != '\0';
-    Log("native: cpu config on=%d display=%s part=%s khz=%d-%d", (int)g_cpu_on, g_cpu_display,
-        g_cpu_part, (int)g_cpu_min_khz, (int)g_cpu_max_khz);
+    Log("native: cpu config on=%d display=%s part=%s impl=%s hw=%s khz=%d-%d", (int)g_cpu_on,
+        g_cpu_display, g_cpu_part, g_cpu_implementer, g_cpu_hardware, (int)g_cpu_min_khz,
+        (int)g_cpu_max_khz);
 }
 
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
-                  const char* driverName, const char* driverInfo) {
+                  const char* driverName, const char* driverInfo,
+                  const char* vkDeviceName) {
     g_gpu_on = false;
     CopyStr(g_gpu_vendor, sizeof(g_gpu_vendor), vendor);
     CopyStr(g_gpu_renderer, sizeof(g_gpu_renderer), renderer);
+    // v2.4.0: fall back to the renderer string when no distinct Vulkan name
+    // is delivered (back-compat with an older config path).
+    if (vkDeviceName != nullptr && vkDeviceName[0] != '\0') {
+        CopyStr(g_gpu_vk_device_name, sizeof(g_gpu_vk_device_name), vkDeviceName);
+    } else {
+        CopyStr(g_gpu_vk_device_name, sizeof(g_gpu_vk_device_name), renderer);
+    }
     CopyStr(g_gpu_gl_version, sizeof(g_gpu_gl_version), glVersion);
     CopyStr(g_gpu_driver_name, sizeof(g_gpu_driver_name), driverName);
     CopyStr(g_gpu_driver_info, sizeof(g_gpu_driver_info), driverInfo);
@@ -111,6 +134,14 @@ std::string CpuSpoofModel() {
 
 std::string CpuSpoofPart() {
     return std::string(g_cpu_part);
+}
+
+std::string CpuSpoofImplementer() {
+    return std::string(g_cpu_implementer[0] != '\0' ? g_cpu_implementer : "0x41");
+}
+
+std::string CpuSpoofHardware() {
+    return std::string(g_cpu_hardware[0] != '\0' ? g_cpu_hardware : g_cpu_hwline);
 }
 
 std::string CpuSpoofCpuinfoModel() {
@@ -153,6 +184,10 @@ std::string GpuSpoofVendor() {
 
 std::string GpuSpoofRenderer() {
     return std::string(g_gpu_renderer);
+}
+
+std::string GpuSpoofVkDeviceName() {
+    return std::string(g_gpu_vk_device_name[0] != '\0' ? g_gpu_vk_device_name : g_gpu_renderer);
 }
 
 std::string GpuSpoofGlVersion() {
@@ -539,7 +574,9 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
                                                          jstring cpuMfr, jstring cpuModel,
                                                          jstring cpuPart, jstring cpuInfoModel,
                                                          jstring cpuFeatures, jint minKhz,
-                                                         jint maxKhz, jstring cpuHwLine) {
+                                                         jint maxKhz, jstring cpuHwLine,
+                                                         jstring cpuImplementer,
+                                                         jstring cpuHardware) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -555,9 +592,11 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
     std::string infoModel = toStr(cpuInfoModel);
     std::string features = toStr(cpuFeatures);
     std::string hwLine = toStr(cpuHwLine);
+    std::string impl = toStr(cpuImplementer);
+    std::string hw = toStr(cpuHardware);
     pas::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
                       infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz,
-                      hwLine.c_str());
+                      hwLine.c_str(), impl.c_str(), hw.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -566,7 +605,8 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
                                                          jstring gpuRenderer, jstring gpuGlVersion,
                                                          jlong vendorId, jlong deviceId,
                                                          jlong driverVersion, jlong apiVersion,
-                                                         jstring driverName, jstring driverInfo) {
+                                                         jstring driverName, jstring driverInfo,
+                                                         jstring vkDeviceName) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -580,10 +620,32 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
     std::string glVersion = toStr(gpuGlVersion);
     std::string dName = toStr(driverName);
     std::string dInfo = toStr(driverInfo);
+    std::string vkName = toStr(vkDeviceName);
     pas::SetGpuConfig(gpuOn == JNI_TRUE, vendor.c_str(), renderer.c_str(), glVersion.c_str(),
                       (unsigned long long)vendorId, (unsigned long long)deviceId,
                       (unsigned long long)driverVersion, (unsigned long long)apiVersion,
-                      dName.c_str(), dInfo.c_str());
+                      dName.c_str(), dInfo.c_str(), vkName.c_str());
+}
+
+// v2.4.0: per-GPU Vulkan profile (conformance version + feature flags)
+// delivered before the config gate, same pattern as nativeSetRecon.
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuProfile(JNIEnv* env, jobject thiz,
+                                                        jboolean gpuOn,
+                                                        jint confMajor, jint confMinor,
+                                                        jint confSub, jint confPatch,
+                                                        jboolean descriptorIndexing,
+                                                        jboolean sparseBinding) {
+    (void)env;
+    (void)thiz;
+    // Profile values only matter when the GPU spoof is on; delivering the
+    // reference defaults otherwise keeps hide_vulkan's previous behavior.
+    if (gpuOn != JNI_TRUE) {
+        pas::SetGpuProfile(1, 3, 1, 0, false, false);
+        return;
+    }
+    pas::SetGpuProfile((int)confMajor, (int)confMinor, (int)confSub, (int)confPatch,
+                       descriptorIndexing == JNI_TRUE, sparseBinding == JNI_TRUE);
 }
 
 extern "C" JNIEXPORT void JNICALL

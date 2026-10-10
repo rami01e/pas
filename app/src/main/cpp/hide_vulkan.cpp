@@ -36,16 +36,40 @@ namespace pas {
 
 // Extensions that never exist on the emulated GPU profile and would unmask
 // the emulator on inspection (NetEase MuMu advertises VK_NEMU_api_batch).
+// v2.4.0: VK_KHR_push_descriptor is NOT hidden anymore - real Xclipse and
+// Adreno devices expose it, and gpuinfo reports confirm both.
 static bool IsHiddenExtName(const char* name) {
     if (!name) return false;
     if (strstr(name, "NEMU") != nullptr) return true;
-    if (strcmp(name, "VK_KHR_push_descriptor") == 0) return true;
     return false;
+}
+
+// v2.4.0: per-GPU profile knobs delivered from the catalog through the same
+// config path as the identity strings (SetGpuConfig extension below).
+// Defaults describe the Mali reference profile (previous hard-coded
+// behavior), so an absent config keeps the old spoof intact.
+static volatile int g_gpu_conf_major = 1;   // conformance major
+static volatile int g_gpu_conf_minor = 3;   // conformance minor
+static volatile int g_gpu_conf_sub = 1;     // conformance sub-minor
+static volatile int g_gpu_conf_patch = 0;   // conformance patch
+static volatile int g_gpu_desc_indexing = 0;  // 0 = force off, 1 = force on
+static volatile int g_gpu_sparse_binding = 0;
+
+void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
+                   bool descriptorIndexing, bool sparseBinding) {
+    g_gpu_conf_major = confMajor;
+    g_gpu_conf_minor = confMinor;
+    g_gpu_conf_sub = confSub;
+    g_gpu_conf_patch = confPatch;
+    g_gpu_desc_indexing = descriptorIndexing ? 1 : 0;
+    g_gpu_sparse_binding = sparseBinding ? 1 : 0;
+    Log("native: gpu profile conf=%d.%d.%d.%d descIdx=%d sparse=%d", confMajor,
+        confMinor, confSub, confPatch, (int)descriptorIndexing, (int)sparseBinding);
 }
 
 static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
     if (!p) return;
-    snprintf(p->deviceName, sizeof(p->deviceName), "%s", GpuSpoofRenderer().c_str());
+    snprintf(p->deviceName, sizeof(p->deviceName), "%s", GpuSpoofVkDeviceName().c_str());
     p->vendorID = (uint32_t)GpuSpoofVendorId();
     p->deviceID = (uint32_t)GpuSpoofDeviceId();
     p->driverVersion = (uint32_t)GpuSpoofDriverVersion();
@@ -95,10 +119,12 @@ static void PatchDriverPropsNode(void* node) {
     auto* d = (PasDriverProps*)node;
     snprintf(d->driverName, sizeof(d->driverName), "%s", GpuSpoofDriverName().c_str());
     snprintf(d->driverInfo, sizeof(d->driverInfo), "%s", GpuSpoofDriverInfo().c_str());
-    d->conformance[0] = 1;
-    d->conformance[1] = 3;
-    d->conformance[2] = 1;
-    d->conformance[3] = 0;
+    // v2.4.0: conformance version comes from the GPU profile (real Xclipse
+    // reports 1.3.5.1 / 1.4.1.1; Adreno 1.3.x; Mali 1.3.1.0 era).
+    d->conformance[0] = (uint8_t)g_gpu_conf_major;
+    d->conformance[1] = (uint8_t)g_gpu_conf_minor;
+    d->conformance[2] = (uint8_t)g_gpu_conf_sub;
+    d->conformance[3] = (uint8_t)g_gpu_conf_patch;
     if (!g_drvprops_logged) {
         g_drvprops_logged = true;
         Log("native: vulkan driverprops patched");
@@ -120,6 +146,9 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
 static void PatchFeatures(VkPhysicalDeviceFeatures* f) {
     if (!f) return;
     f->shaderFloat64 = VK_FALSE;
+    // v2.4.0: sparseBinding follows the GPU profile (Adreno/Xclipse report
+    // it, Mali reference profile keeps it off).
+    f->sparseBinding = g_gpu_sparse_binding ? VK_TRUE : VK_FALSE;
 }
 
 static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
@@ -129,7 +158,11 @@ static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
          s = s->pNext, guard++) {
         if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES) {
-            ((VkPhysicalDeviceVulkan12Features*)s)->descriptorIndexing = VK_FALSE;
+            // v2.4.0: descriptorIndexing follows the GPU profile. Real
+            // Xclipse / Adreno 7xx+ report it on; the old hard-coded OFF
+            // matched only the Mali reference profile and unmasked Xclipse.
+            ((VkPhysicalDeviceVulkan12Features*)s)->descriptorIndexing =
+                g_gpu_desc_indexing ? VK_TRUE : VK_FALSE;
         }
         if (s->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES) {
             auto* f13 = (VkPhysicalDeviceVulkan13Features*)s;
