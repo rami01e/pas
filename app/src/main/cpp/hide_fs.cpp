@@ -1669,5 +1669,5 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_pas_spoof_SpoofCore_nativeSetWebrtcMode(JNIEnv* env, jobject thiz, jint mode) {
     (void)env;
     (void)thiz;
-    pas::SetWebrtcMode((int)mode);
+    pas::SetWebRtcMode((int)mode);   // ← capital R, matches pas.h
 }
