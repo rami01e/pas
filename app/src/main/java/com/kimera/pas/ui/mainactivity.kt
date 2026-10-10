@@ -41,11 +41,9 @@ import java.security.SecureRandom
 /**
  * Module GUI (v2.0.0 revamp) - "mission control" console.
  *
- * Compact telemetry layout: panel sections (Spoof / Network / Scope /
- * Diagnostics / Logs), label rows with monospace value readouts, custom
- * square-knob switches, state chips, floating Apply/Clear bar (dirty only)
- * and a terminal-style log console. All feature semantics are unchanged from
- * the previous GUI; SDK / CPU / GPU values open pick-from-list dialogs.
+ * v2.5.1: scope viewer dialog gained an inline refresh button (\u21BB) that
+ * reloads the scope list from the framework without closing the dialog.
+ * Search bar behaviour unchanged.
  */
 class MainActivity : Activity() {
 
@@ -118,7 +116,6 @@ class MainActivity : Activity() {
     private lateinit var netValue: TextView
     private var netCellularSel = false
     private lateinit var sdkJavaSw: SwitchView
-
 
     private lateinit var scopeChip: TextView
 
@@ -253,8 +250,6 @@ class MainActivity : Activity() {
         )
 
         // ---------------- SCOPE panel ----------------
-        // v2.4.0: tapping anywhere in this section (header or body) opens
-        // the scoped apps list.
         scopeChip = chipView("\u2014", cText2)
         val (scopePanel, scopeBody) = panel("Scope", scopeChip) { openScopeDialog() }
         addPanel(scopePanel)
@@ -282,8 +277,7 @@ class MainActivity : Activity() {
             )
         }
 
-        // ---------------- HARDWARE panel (v2.4.0) ----------------
-        // CPU ABI / CPU model / GPU - the device-identity spoofs.
+        // ---------------- HARDWARE panel ----------------
         val (hwPanel, hwBody) = panel("Hardware", null, null)
         addPanel(hwPanel)
 
@@ -302,8 +296,7 @@ class MainActivity : Activity() {
         valueRow(hwBody, false, gpuSw, "GPU", gpuValue,
             { pickGpu() }, { randomGpu() }, { clearGpu() })
 
-        // ---------------- SOFTWARE panel (v2.4.0) ----------------
-        // Widevine / GSF ID / Unpin SSL - the service-level spoofs.
+        // ---------------- SOFTWARE panel ----------------
         val (swPanel, swBody) = panel("Software", null, null)
         addPanel(swPanel)
 
@@ -324,8 +317,7 @@ class MainActivity : Activity() {
         valueRow(swBody, false, sslSw, "Unpin SSL", sslValue,
             { pickSslMode() }, { cycleSslMode() }, { clearSslMode() })
 
-        // ---------------- ADVANCED panel (v2.4.0) ----------------
-        // SDK (formerly in Native) + the former Debug-section toggles.
+        // ---------------- ADVANCED panel ----------------
         val (advPanel, advBody) = panel("Advanced", null, null)
         addPanel(advPanel)
 
@@ -355,7 +347,6 @@ class MainActivity : Activity() {
             "GL symbol substitution for engines resolving through dlsym / eglGetProcAddress", chainChip
         )
 
-        // WebRTC local IP: on = Balanced (default), off = RKN (strict).
         webrtcSw = SwitchView(this)
         webrtcChip = chipView("REAL", cCyan)
         toggleRow(
@@ -376,17 +367,12 @@ class MainActivity : Activity() {
             "Patch Build.VERSION.SDK_INT in-app (may break modern WebView apps)", null
         )
 
-        // Net type: per-app WIFI / CELLULAR source selection.
         netSw = SwitchView(this)
         netValue = valueTextView()
         valueRow(advBody, false, netSw, "Net type", netValue,
             { pickNet() }, { cycleNet() }, { clearNet() })
 
-        // ---------------- DEBUG panel (v2.4.0) ----------------
-        // Debug log only: the debug toggle (recon logging, OFF by default
-        // for production) stays in the section header next to the diagnose /
-        // reload / copy buttons - same arrangement as 2.3.10, and the body
-        // now contains only the collapsible log console.
+        // ---------------- DEBUG panel ----------------
         logsChev = TextView(this).apply {
             text = "\u25B8"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
@@ -729,7 +715,6 @@ class MainActivity : Activity() {
         return btn
     }
 
-    /** Panel = header (with optional trailing view / click) + body container. */
     private fun panel(
         title: String,
         trailing: View?,
@@ -805,11 +790,6 @@ class MainActivity : Activity() {
         )
     }
 
-    /**
-     * v2.4.1: defensive re-parent guard. A view reused in two rows throws
-     * "child already has a parent" and kills the activity at startup; this
-     * guard detaches the old parent first so the last writer wins instead.
-     */
     private fun detachIfNeeded(v: View) {
         val p = v.parent as? ViewGroup ?: return
         p.removeView(v)
@@ -1085,7 +1065,6 @@ class MainActivity : Activity() {
             }
         }
         if (!defaultAdded) {
-            // System SDK outside the catalog range - keep it selectable.
             sdkValues.add(currentSdk)
             sdkLabels.add("SDK $currentSdk (DEFAULT)")
         }
@@ -1219,7 +1198,6 @@ class MainActivity : Activity() {
         updateDirty()
     }
 
-
     // ------------------------------------------------------------------
     // SSL unpinning mode helpers
     // ------------------------------------------------------------------
@@ -1271,7 +1249,6 @@ class MainActivity : Activity() {
         val sp = SpoofSettings.load(this)
         suppressDirty = true
         nativeSw.checked = sp.getBoolean("native_enabled", true)
-        // v2.4.0: debug (recon) logging OFF by default for production.
         lightSw.checked = sp.getBoolean("recon_enabled", false)
         compatSw.checked = sp.getBoolean("safe_mode", false)
         sdkJavaSw.checked = sp.getBoolean("sdk_java_enabled", false)
@@ -1347,7 +1324,6 @@ class MainActivity : Activity() {
             2 -> "native"
             else -> "both"
         },
-
         "webrtc_mode" to when (webrtcModeSel) {
             0 -> "balanced"
             1 -> "java"
@@ -1391,7 +1367,6 @@ class MainActivity : Activity() {
             "webrtc_localip" to sp.getBoolean("webrtc_localip", true),
             "net_cellular" to sp.getBoolean("net_cellular", false),
             "sdk_java_enabled" to sp.getBoolean("sdk_java_enabled", false),
-
             "recon_enabled" to sp.getBoolean("recon_enabled", false),
             "gpu_chain" to sp.getBoolean("gpu_chain", true),
             "gpu_vulkan" to sp.getBoolean("gpu_vulkan", true)
@@ -1462,7 +1437,6 @@ class MainActivity : Activity() {
     }
 
     private fun saveSpoof() {
-        // Auto-fill ids when a row is enabled with an empty field.
         if (wvSw.checked && wvEditVal.isBlank()) wvEditVal = randomWidevine()
         if (gsfSw.checked && gsfEditVal.isBlank()) gsfEditVal = randomGsf()
 
@@ -1483,7 +1457,7 @@ class MainActivity : Activity() {
         updateGsfValue()
 
         val err = SpoofSettings.save(this, currentMap())
-        SpoofSettings.ensureListener(this) // apply & reconnect
+        SpoofSettings.ensureListener(this)
         toast(err ?: "Saved \u2713 - takes effect when the scoped app restarts")
         appliedChip.visibility = View.VISIBLE
         ui.removeCallbacks(hideApplied)
@@ -1545,14 +1519,14 @@ class MainActivity : Activity() {
     }
 
     /**
-     * v2.4.10: scope viewer with an inline search bar. Filtering happens on
-     * every keystroke (case-insensitive substring match on the package name).
-     * Tapping a row opens the confirm-remove dialog; on success the search
-     * dialog is closed and reopened so its title count and list reflect the
-     * framework-side change.
+     * v2.5.1: scope viewer with an inline search bar and a manual refresh
+     * button. Refresh reloads the scope from the framework and updates the
+     * list in place; successful removals refresh the same way instead of
+     * closing and reopening the dialog, so the search text and scroll
+     * position are preserved.
      */
     private fun showScopeListDialog() {
-        val scope = SpoofSettings.scopePackages() ?: return
+        var scope = SpoofSettings.scopePackages() ?: return
         if (scope.isEmpty()) return
 
         val search = EditText(this).apply {
@@ -1597,6 +1571,8 @@ class MainActivity : Activity() {
         }
         listView.adapter = adapter
 
+        var dialogRef: AlertDialog? = null
+
         fun refilter(q: String) {
             filtered.clear()
             val qq = q.trim().lowercase()
@@ -1609,6 +1585,36 @@ class MainActivity : Activity() {
             }
             adapter.notifyDataSetChanged()
         }
+
+        fun reloadScope(showToast: Boolean) {
+            val fresh = SpoofSettings.scopePackages()
+            if (fresh == null) {
+                if (showToast) toast("Refresh failed: service not connected")
+                return
+            }
+            scope = fresh
+            refilter(search.text?.toString() ?: "")
+            dialogRef?.setTitle("Module scope (${fresh.size})")
+            if (showToast) toast("Refreshed (${fresh.size} apps)")
+        }
+
+        val refreshBtn = TextView(this).apply {
+            text = "\u21BB"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            setTextColor(cText2)
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            isClickable = true
+            isFocusable = true
+            setOnClickListener { reloadScope(true) }
+            setOnTouchListener { v, e ->
+                when (e.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> v.alpha = 0.6f
+                    MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.alpha = 1f
+                }
+                false
+            }
+        }
+
         refilter("")
         search.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -1618,9 +1624,25 @@ class MainActivity : Activity() {
             }
         })
 
+        val searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        searchRow.addView(
+            search,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
+        searchRow.addView(
+            refreshBtn,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         box.addView(
-            search,
+            searchRow,
             LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
@@ -1637,6 +1659,7 @@ class MainActivity : Activity() {
             .setPositiveButton("Add apps\u2026") { _, _ -> openAddAppsDialog() }
             .setNegativeButton("Close", null)
             .create()
+        dialogRef = dialog
 
         listView.setOnItemClickListener { _, _, position, _ ->
             val pkg = filtered.getOrNull(position) ?: return@setOnItemClickListener
@@ -1647,14 +1670,10 @@ class MainActivity : Activity() {
                     Thread {
                         val ok = SpoofSettings.removeScope(listOf(pkg))
                         runOnUiThread {
-                            toast(if (ok) "Removed from scope: $pkg" else "Remove failed")
+                            toast(if (ok) "Removed: $pkg" else "Remove failed")
                             refreshScopeChip()
                             if (ok) {
-                                dialog.dismiss()
-                                // Give the framework a beat to persist the new
-                                // scope before we re-query it for the reopened
-                                // dialog.
-                                ui.postDelayed({ showScopeListDialog() }, 250)
+                                ui.postDelayed({ reloadScope(false) }, 250)
                             }
                         }
                     }.start()
@@ -1693,7 +1712,6 @@ class MainActivity : Activity() {
                     list.add(AppEntry(label, p, system))
                 }
             } catch (t: Throwable) {
-                // keep whatever we managed to collect
             }
             list.sortWith(compareBy({ it.system }, { it.label.lowercase() }))
             runOnUiThread {
@@ -1921,8 +1939,6 @@ class MainActivity : Activity() {
         }.start()
     }
 
-    /** One-tap diagnosis of a stalling app: thread wait-states, ANR dir,
-     *  crash buffer and the game's own logcat tail, captured in one go. */
     private fun runDiagnose() {
         if (busy) return
         busy = true
@@ -1932,16 +1948,12 @@ class MainActivity : Activity() {
         Thread {
             val sb = StringBuilder()
             try {
-                // Target = the most recently started user app in the scope
-                // (u0_a*, excludes system/media/google processes).
                 val psAll = runSu("ps -A -o PID,USER,NAME,TIME 2>/dev/null") ?: ""
                 val excluded = setOf("com.kimera.pas")
                 val candidates = psAll.lineSequence()
                     .map { it.trim().split(Regex("\\s+")) }
                     .filter { it.size >= 3 && it[1].startsWith("u0_a") && !it[2].startsWith("com.google") && !it[2].startsWith("com.android") && it[2] !in excluded && !it[2].endsWith(".webview") && !it[2].contains(":") }
                     .toList()
-                // Prefer the scoped game with an active perf profile: newest
-                // non-module user app wins; fall back to any newest user app.
                 val pkg = candidates.filter { it.size >= 3 && it[2] !in excluded }
                     .maxByOrNull { it[0].toIntOrNull() ?: 0 }
                     ?.getOrNull(2) ?: ""
@@ -1995,10 +2007,6 @@ class MainActivity : Activity() {
                         sb.append("\n\n=== newest tombstone ($f) head ===\n").append(head ?: "(unreadable)")
                     }
                 }
-                // Frida: server status, auto-start, and TLS-trace attach.
-                // The trace script is ALWAYS (re)injected for the target app:
-                // the injection is idempotent (one on('submit') hook) so a
-                // repeated attach cannot multiply log lines.
                 val fridaBin = runSu("ls -l /data/local/tmp/frida-server* 2>/dev/null")
                 var fridaProc = runSu("ps -A 2>/dev/null | grep -a frida-server")
                 sb.append("\n\n=== frida (x86_64) ===\n")
@@ -2006,8 +2014,6 @@ class MainActivity : Activity() {
                     .append("process: ").append(fridaProc?.trim() ?: "not running").append("\n")
                 val wasRunning = !fridaProc.isNullOrBlank() && !fridaProc.contains("exit code") && fridaProc.contains("frida-server")
                 if (!fridaBin.isNullOrBlank() && !wasRunning) {
-                    // nohup + log file so a crash reason is visible here
-                    // instead of a silent daemon death.
                     runSu("chmod 755 /data/local/tmp/frida-server; nohup /data/local/tmp/frida-server -D > " + fridaLog.absolutePath + " 2>&1 &")
                     Thread.sleep(2000)
                     fridaProc = runSu("ps -A 2>/dev/null | grep -a frida-server")
@@ -2019,10 +2025,7 @@ class MainActivity : Activity() {
                         if (!flog.isNullOrBlank()) sb.append("frida.log: ").append(flog).append("\n")
                     }
                 }
-                // TLS verdict tracing now runs in-process via HookSslUnpin
-                // (frida-inject is not shipped in the frida-server package).
                 sb.append("tls-trace: in-process (Recon ON = verdicts in game log)\n")
-                // Socket table of the target: loopback + remote endpoints (connection stalls show here)
                 if (pid.isNotEmpty()) {
                     val sock = runSu("cat /proc/$pid/net/tcp 2>/dev/null | head -30; cat /proc/$pid/net/tcp6 2>/dev/null | head -30")
                     val v6Only = sock != null && sock.contains("FFFF0000") && !sock.contains("\n  0: 3")
