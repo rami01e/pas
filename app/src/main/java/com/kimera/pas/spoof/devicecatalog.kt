@@ -453,6 +453,8 @@ object DeviceCatalog {
     )
 
     val GPUS = listOf(
+        mali("Mali-G52", 0x72120000L, MALI_INFO_G52, descriptorIndexing = false,
+             gpuCores = 2, l2CacheKb = 64, gpuArch = "Bifrost"),
         mali("Mali-G52 MC2", 0x74021000L, MALI_INFO_G52, descriptorIndexing = false,
              gpuCores = 2, l2CacheKb = 64, gpuArch = "Bifrost"),
         mali("Mali-G57 MC2", 0x90930010L, gpuCores = 2, l2CacheKb = 64, gpuArch = "Valhall"),
