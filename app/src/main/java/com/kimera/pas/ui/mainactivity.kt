@@ -383,9 +383,10 @@ class MainActivity : Activity() {
             { pickNet() }, { cycleNet() }, { clearNet() })
 
         // ---------------- DEBUG panel (v2.4.0) ----------------
-        // Debug log only: the debug toggle (recon logging) is OFF by default
-        // for production releases; the diagnose / reload / copy buttons and
-        // the collapsible log console stay as they were.
+        // Debug log only: the debug toggle (recon logging, OFF by default
+        // for production) stays in the section header next to the diagnose /
+        // reload / copy buttons - same arrangement as 2.3.10, and the body
+        // now contains only the collapsible log console.
         logsChev = TextView(this).apply {
             text = "\u25B8"
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
@@ -395,6 +396,16 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
+        logsTrailing.addView(
+            TextView(this).apply {
+                text = "DEBUG"
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 9.5f)
+                typeface = Typeface.DEFAULT_BOLD
+                letterSpacing = 0.08f
+                setTextColor(cText3)
+                setPadding(0, 0, dp(4), 0)
+            }
+        )
         lightSw = SwitchView(this)
         logsTrailing.addView(lightSw)
         logsTrailing.addView(microIcon("\uD83D\uDD0D\uFE0F") { runDiagnose() })
@@ -409,11 +420,6 @@ class MainActivity : Activity() {
         )
         val (logsPanel, logsBody) = panel("Debug", logsTrailing) { toggleLogs() }
         addPanel(logsPanel)
-
-        toggleRow(
-            logsBody, true, lightSw, "Debug log",
-            "Recon diagnostics logging (per-app) \u00b7 off by default for production", null
-        )
 
         logsContainer = logsBody.apply { visibility = View.GONE }
         logsStatus = TextView(this).apply {
