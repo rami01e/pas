@@ -101,10 +101,6 @@ static SpecialAction ResolveSpecial(const char* path) {
     if (strcmp(path, "/sys/fs/selinux/enforce") == 0) {
         return SpecialAction::EnforceOne;
     }
-    // rp_filter: the userspace tunnel disables reverse-path filtering
-    // (writes 0 to /proc/sys/net/ipv4/conf/*/rp_filter so it can route
-    // through the proxy peer). A clean Android device runs 1 (strict) or
-    // 2 (loose). Serve 1 on read so the sysctl does not stand out.
     {
         static const char kPre[] = "/proc/sys/net/ipv4/conf/";
         static const char kSuf[] = "/rp_filter";
@@ -142,10 +138,7 @@ static int CreateMemfdWith(const char* data, size_t len, int flags) {
 }
 
 // ---------------------------------------------------------------------------
-// recon logging (diagnostics): when enabled (module GUI toggle), suspicious
-// probes made by the scoped app are written to the module log so its detection
-// surface can be mapped. Pure logging - no behavior changes; hard-capped so a
-// probing loop cannot flood the log.
+// recon logging
 // ---------------------------------------------------------------------------
 
 static volatile bool g_recon = false;
@@ -174,10 +167,8 @@ static const char* const kReconTokens[] = {
     "zygisk-module", "ro.boot", "ro.hardware", "topology", "related_cpus",
     "affected_cpus", "core_id", "cluster", "devicetree", "compatible", "serial",
     "board", "platform", "vendor_id", "bogomips", "physical_package",
-    // TLS surfaces: makes the next Diagnose capture show whether Big Farm
-    // touches the mitmproxy chain from Java, native, or bundled-SSL paths.
     "libssl", "libcrypto", "boring", "conscrypt", "cacerts",
-    ".pem", ".crt", ".cer", "pinning", "truststore", "truststore",
+    ".pem", ".crt", ".cer", "pinning", "truststore",
 };
 
 static bool ReconHit(const char* s) {
@@ -243,9 +234,6 @@ static void ReconExec(char* const argv[], const char* path) {
     ReconNote("exec", buf, 0);
 }
 
-// Raw build.prop-style files that integrity checkers read directly. When the
-// SDK/ABI spoof is active these are served with the spoof keys rewritten, so
-// the file view matches the hooked properties.
 static bool IsPropsFile(const char* path) {
     if (!path) return false;
     static const char* const kProps[] = {
@@ -279,7 +267,6 @@ static void RewritePropsContent(const std::string& raw, std::string* out) {
                 if (kl < sizeof(key)) {
                     memcpy(key, p, kl);
                     key[kl] = '\0';
-                    // trim trailing spaces on key
                     while (kl > 0 && (key[kl - 1] == ' ' || key[kl - 1] == '\t')) key[--kl] = '\0';
                     char repl[128];
                     if (SpoofRewritePropsLine(key, eq + 1, repl, sizeof(repl))) {
@@ -300,10 +287,7 @@ static void RewritePropsContent(const std::string& raw, std::string* out) {
 
 static bool ReadWholeFile(const char* path, std::string* out);
 
-// /proc/cpuinfo rewrite: each per-core block is rebuilt in the kernel's ARM
-// style for the selected CPU (model string, BogoMIPS, ARM feature list and
-// CPU implementer/architecture/variant/part/revision), so hardware-info
-// readers see a coherent ARM device instead of the host's x86 traces.
+// /proc/cpuinfo rewrite
 static bool CpuinfoKeyMatch(const char* line, const char* key) {
     size_t kl = strlen(key);
     if (strncmp(line, key, kl) != 0) return false;
@@ -317,10 +301,7 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
     const std::string model = CpuSpoofCpuinfoModel();
     const std::string features = CpuSpoofFeatures();
     const std::string part = CpuSpoofPart();
-    // v2.4.0: implementer follows the catalog (0x41 ARM, 0x51 Qualcomm
-    // Oryon) so Snapdragon 8 Elite profiles print their real implementer.
     const std::string implementer = CpuSpoofImplementer();
-    // Keep everything before the first per-core block as is.
     size_t first = std::string::npos;
     {
         size_t p = 0;
@@ -345,8 +326,6 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
         e = (e == std::string::npos) ? raw.size() : e + 1;
         std::string line(raw, p, e - p);
         if (!CpuinfoKeyMatch(line.c_str(), "processor")) {
-            // Hardware/Revision/Serial rows are replaced by the authentic
-            // ARM tail appended after the per-core blocks.
             if (CpuinfoKeyMatch(line.c_str(), "Hardware") ||
                 CpuinfoKeyMatch(line.c_str(), "Revision") ||
                 CpuinfoKeyMatch(line.c_str(), "Serial")) {
@@ -357,7 +336,6 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
             p = e;
             continue;
         }
-        // Extract the core number after the colon.
         std::string num;
         {
             const char* c = line.c_str();
@@ -388,8 +366,6 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
         out->append(part);
         out->push_back('\n');
         out->append("CPU revision\t: 1\n");
-        // Skip the rest of the block up to the following blank line or the
-        // next core header.
         p = e;
         while (p < raw.size()) {
             size_t e2 = raw.find('\n', p);
@@ -411,9 +387,6 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
             p = e2;
         }
     }
-    // Authentic ARM tail rows (Samsung-style Hardware string + revision and
-    // serial placeholders), so hardware-info readers that inspect the tail
-    // section stay consistent with the spoofed model too.
     const std::string hwLine = CpuSpoofHwLine();
     if (CpuSpoofActive() && !hwLine.empty()) {
         out->push_back('\n');
@@ -425,39 +398,30 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
     }
 }
 
-// cpufreq min/max mirrors: served with the selected CPU's clock range so
-// frequency rows match the spoofed model (kHz values, same format as sysfs).
-static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
-    if (CpuSpoofMinKHz() <= 0 || CpuSpoofMaxKHz() <= 0) return false;
-    if (strncmp(path, "/sys/devices/system/cpu/", 24) != 0) return false;
-    const char* p = strstr(path, "/cpufreq/");
-    if (!p) return false;
-    const char* leaf = p + 9;
-    if (*leaf == '\0' || strchr(leaf, '/') != nullptr) return false;
-    int v;
-    if (strcmp(leaf, "cpuinfo_min_freq") == 0 || strcmp(leaf, "scaling_min_freq") == 0) {
-        v = CpuSpoofMinKHz();
-    } else if (strcmp(leaf, "cpuinfo_max_freq") == 0 || strcmp(leaf, "scaling_max_freq") == 0) {
-        v = CpuSpoofMaxKHz();
-    } else {
-        return false;
-    }
-    snprintf(out, cap, "%d\n", v);
-    return true;
-}
-
 // ---------------------------------------------------------------------------
-// v2.4.2: cpufreq policy / topology mirrors.
+// v2.4.4: cpufreq + CPU topology mirrors
 //
-// DevCheck-style readers build their core-cluster view from sysfs:
-//   cpuN/affected_cpus, cpuN/related_cpus      -> "0-3" (policy members)
-//   cpuN/topology/core_id                      -> core index within cluster
-//   cpuN/topology/cluster_id                   -> cluster number
-//   cpuN/topology/physical_package_id          -> cluster number (SoC)
-//   cpuN/topology/thread_siblings_list         -> "0-3"
-//   cpuN/topology/core_cpus_list               -> "0-3"
-// The emulator exposes one flat 8-core group; these mirrors reconstruct the
-// real SoC layout from the catalog's cluster string ("4+4", "1+3+4"...).
+// DevCheck-style readers build their cluster view from sysfs. On the emulator
+// every CPU sits in its own cluster; these mirrors reconstruct the intended
+// layout from the catalog's cluster string ("4+4", "1+3+4", ...).
+//
+// Covered paths (all read-only):
+//   cpuN/cpufreq/{cpuinfo_min_freq,cpuinfo_max_freq,scaling_min_freq,scaling_max_freq}
+//   cpuN/cpufreq/{affected_cpus,related_cpus}
+//   cpufreq/policyN/{cpuinfo_min_freq,cpuinfo_max_freq}
+//   cpufreq/policyN/{affected_cpus,related_cpus}
+//   cpuN/affected_cpus, cpuN/related_cpus
+//   cpuN/topology/core_id
+//   cpuN/topology/cluster_id
+//   cpuN/topology/physical_package_id
+//   cpuN/topology/{core_cpus,thread_siblings,cluster_cpus}       (bitmask)
+//   cpuN/topology/{core_cpus_list,thread_siblings_list,cluster_cpus_list}
+//   cpuN/topology/{package_cpus,core_siblings,die_cpus}          (bitmask)
+//   cpuN/topology/{package_cpus_list,core_siblings_list,die_cpus_list}
+//
+// Both the bitmask form ("0f") and the list form ("0-3") are answered: apps
+// disagree on which one they read, and if they disagree with each other the
+// cluster view is discarded and every core ends up shown on its own.
 // ---------------------------------------------------------------------------
 
 #define PAS_CPU_MAX_CORES 16
@@ -493,7 +457,7 @@ static int CpuClusterMap(int* coreCluster, int* coreIndexInCluster) {
     return total;
 }
 
-// Formats a cpu list for cluster c as "a" or "a-b".
+// Formats a cluster's CPU members as "a" / "a-b".
 static void CpuClusterList(int c, const int* coreCluster, int total, char* out, size_t cap) {
     int first = -1, last = -1;
     for (int i = 0; i < total; i++) {
@@ -503,7 +467,7 @@ static void CpuClusterList(int c, const int* coreCluster, int total, char* out, 
         }
     }
     if (first < 0) {
-        snprintf(out, cap, "0\n");
+        snprintf(out, cap, "\n");
     } else if (first == last) {
         snprintf(out, cap, "%d\n", first);
     } else {
@@ -511,11 +475,96 @@ static void CpuClusterList(int c, const int* coreCluster, int total, char* out, 
     }
 }
 
+// Formats a cluster's CPU members as a kernel-style hex bitmask ("0f", "f0").
+static void CpuClusterBitmask(int c, const int* coreCluster, int total, char* out, size_t cap) {
+    unsigned long long mask = 0;
+    for (int i = 0; i < total && i < 64; i++) {
+        if (coreCluster[i] == c) mask |= (1ULL << i);
+    }
+    int width = (total + 3) / 4;   // kernel pads to ceil(nr_cpus/4) hex digits
+    if (width < 1) width = 1;
+    snprintf(out, cap, "%0*llx\n", width, mask);
+}
+
+// Formats the "all CPUs in this package" list.
+static void CpuAllList(int total, char* out, size_t cap) {
+    if (total <= 0) { snprintf(out, cap, "\n"); return; }
+    if (total == 1) { snprintf(out, cap, "0\n"); return; }
+    snprintf(out, cap, "0-%d\n", total - 1);
+}
+
+// Formats the "all CPUs in this package" bitmask.
+static void CpuAllBitmask(int total, char* out, size_t cap) {
+    unsigned long long mask = 0;
+    for (int i = 0; i < total && i < 64; i++) mask |= (1ULL << i);
+    int width = (total + 3) / 4;
+    if (width < 1) width = 1;
+    snprintf(out, cap, "%0*llx\n", width, mask);
+}
+
+// cpufreq min/max mirrors. Answers both cpuN/cpufreq/<leaf> and
+// cpufreq/policyN/<leaf>.
+static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
+    if (CpuSpoofMinKHz() <= 0 || CpuSpoofMaxKHz() <= 0) return false;
+    static const char kRoot[] = "/sys/devices/system/cpu/";
+    if (strncmp(path, kRoot, sizeof(kRoot) - 1) != 0) return false;
+    // Must pass through a cpufreq/ component somewhere.
+    const char* cpufreq = strstr(path, "cpufreq/");
+    if (cpufreq == nullptr) return false;
+    const char* slash = strrchr(path, '/');
+    if (!slash || slash[1] == '\0') return false;
+    const char* leaf = slash + 1;
+    int v;
+    if (strcmp(leaf, "cpuinfo_min_freq") == 0 || strcmp(leaf, "scaling_min_freq") == 0) {
+        v = CpuSpoofMinKHz();
+    } else if (strcmp(leaf, "cpuinfo_max_freq") == 0 || strcmp(leaf, "scaling_max_freq") == 0) {
+        v = CpuSpoofMaxKHz();
+    } else {
+        return false;
+    }
+    snprintf(out, cap, "%d\n", v);
+    return true;
+}
+
 static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
     if (!CpuSpoofActive()) return false;
-    static const char* const kCpuRoot = "/sys/devices/system/cpu/cpu";
-    if (strncmp(path, kCpuRoot, strlen(kCpuRoot)) != 0) return false;
-    const char* p = path + strlen(kCpuRoot);
+
+    int coreCluster[PAS_CPU_MAX_CORES];
+    int coreIdx[PAS_CPU_MAX_CORES];
+    int total = CpuClusterMap(coreCluster, coreIdx);
+    if (total <= 0) return false;
+
+    static const char kCpuRoot[] = "/sys/devices/system/cpu/";
+
+    // --- cpufreq/policyN/{affected,related}_cpus ----------------------------
+    {
+        static const char kPolicy[] = "/sys/devices/system/cpu/cpufreq/policy";
+        if (strncmp(path, kPolicy, sizeof(kPolicy) - 1) == 0) {
+            const char* p = path + sizeof(kPolicy) - 1;
+            int pol = 0;
+            bool hasPol = false;
+            while (*p >= '0' && *p <= '9') {
+                pol = pol * 10 + (*p - '0');
+                p++;
+                hasPol = true;
+            }
+            if (!hasPol || *p != '/') return false;
+            const char* leaf = p + 1;
+            if (*leaf == '\0' || strchr(leaf, '/') != nullptr) return false;
+            if (strcmp(leaf, "affected_cpus") != 0 && strcmp(leaf, "related_cpus") != 0) {
+                return false;
+            }
+            // Policy index N is the first CPU of its cluster on real devices.
+            int cluster = 0;
+            if (pol >= 0 && pol < total) cluster = coreCluster[pol];
+            CpuClusterList(cluster, coreCluster, total, out, cap);
+            return true;
+        }
+    }
+
+    // --- cpuN/... -----------------------------------------------------------
+    if (strncmp(path, kCpuRoot, sizeof(kCpuRoot) - 1) != 0) return false;
+    const char* p = path + sizeof(kCpuRoot) - 1;
     int core = 0;
     bool hasCore = false;
     while (*p >= '0' && *p <= '9') {
@@ -524,48 +573,105 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
         hasCore = true;
     }
     if (!hasCore || *p != '/') return false;
+    if (core < 0 || core >= total) return false;
     const char* rel = p + 1;
+    const int c = coreCluster[core];
 
-    int coreCluster[PAS_CPU_MAX_CORES];
-    int coreIdx[PAS_CPU_MAX_CORES];
-    int total = CpuClusterMap(coreCluster, coreIdx);
-    if (total <= 0 || core < 0 || core >= total) return false;
-
+    // cpuN/{affected,related}_cpus (older kernels)
     if (strcmp(rel, "affected_cpus") == 0 || strcmp(rel, "related_cpus") == 0) {
-        CpuClusterList(coreCluster[core], coreCluster, total, out, cap);
+        CpuClusterList(c, coreCluster, total, out, cap);
         return true;
     }
-    if (strncmp(rel, "topology/", 9) == 0) {
-        const char* leaf = rel + 9;
-        if (strcmp(leaf, "core_id") == 0) {
-            snprintf(out, cap, "%d\n", coreIdx[core]);
+
+    // cpuN/cpufreq/{affected,related}_cpus
+    if (strncmp(rel, "cpufreq/", 8) == 0) {
+        const char* leaf = rel + 8;
+        if (strcmp(leaf, "affected_cpus") == 0 || strcmp(leaf, "related_cpus") == 0) {
+            CpuClusterList(c, coreCluster, total, out, cap);
             return true;
         }
-        if (strcmp(leaf, "cluster_id") == 0 ||
-            strcmp(leaf, "physical_package_id") == 0) {
-            snprintf(out, cap, "%d\n", coreCluster[core]);
-            return true;
-        }
-        if (strcmp(leaf, "thread_siblings_list") == 0 ||
-            strcmp(leaf, "core_cpus_list") == 0) {
-            CpuClusterList(coreCluster[core], coreCluster, total, out, cap);
-            return true;
-        }
+        return false;
     }
+
+    // cpuN/topology/*
+    if (strncmp(rel, "topology/", 9) != 0) return false;
+    const char* leaf = rel + 9;
+    if (*leaf == '\0' || strchr(leaf, '/') != nullptr) return false;
+
+    if (strcmp(leaf, "core_id") == 0) {
+        snprintf(out, cap, "%d\n", coreIdx[core]);
+        return true;
+    }
+    if (strcmp(leaf, "cluster_id") == 0) {
+        snprintf(out, cap, "%d\n", c);
+        return true;
+    }
+    if (strcmp(leaf, "physical_package_id") == 0) {
+        // ARM SoCs are a single package; v2.4.3 returned cluster_id here,
+        // which leaked a nonzero value for the higher clusters.
+        snprintf(out, cap, "0\n");
+        return true;
+    }
+
+    // Cluster-scoped descriptors.
+    if (strcmp(leaf, "core_cpus_list") == 0 ||
+        strcmp(leaf, "thread_siblings_list") == 0 ||
+        strcmp(leaf, "cluster_cpus_list") == 0) {
+        CpuClusterList(c, coreCluster, total, out, cap);
+        return true;
+    }
+    if (strcmp(leaf, "core_cpus") == 0 ||
+        strcmp(leaf, "thread_siblings") == 0 ||
+        strcmp(leaf, "cluster_cpus") == 0) {
+        CpuClusterBitmask(c, coreCluster, total, out, cap);
+        return true;
+    }
+
+    // Package-scoped descriptors (every CPU in the SoC).
+    if (strcmp(leaf, "package_cpus_list") == 0 ||
+        strcmp(leaf, "core_siblings_list") == 0 ||
+        strcmp(leaf, "die_cpus_list") == 0) {
+        CpuAllList(total, out, cap);
+        return true;
+    }
+    if (strcmp(leaf, "package_cpus") == 0 ||
+        strcmp(leaf, "core_siblings") == 0 ||
+        strcmp(leaf, "die_cpus") == 0) {
+        CpuAllBitmask(total, out, cap);
+        return true;
+    }
+
     return false;
 }
 
+// Consolidated sysfs spoof for the raw-syscall open/openat path: returns a
+// fresh memfd with the spoofed value, or -1 when the path is not handled.
+static long ServeSysfsSpoofFd(const char* path, int flags) {
+    if (!CpuSpoofActive() || path == nullptr) return -1;
+    if (strcmp(path, "/proc/cpuinfo") == 0) {
+        std::string raw;
+        if (!ReadWholeFile(path, &raw)) return -1;
+        std::string out;
+        RewriteCpuinfoContent(raw, &out);
+        int mfd = CreateMemfdWith(out.data(), out.size(), flags);
+        if (mfd >= 0) Log("native: cpuinfo served (direct syscall)");
+        return mfd;
+    }
+    char val[64];
+    if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
+        CpuTopologySpoofValue(path, val, sizeof(val))) {
+        return CreateMemfdWith(val, strlen(val), flags);
+    }
+    return -1;
+}
+
 // Returns true when the call was fully handled by the special layer.
-// On NotFound: errno=ENOENT, *fdOut=-1. On EnforceOne: *fdOut is a memfd or -1.
 static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
     SpecialAction sp = ResolveSpecial(path);
     if (sp == SpecialAction::None) {
-        // build.prop-style files: served with the spoof keys rewritten so that
-        // anything reading the raw prop files sees the same values as the
-        // hooked properties (integrity checkers cross-check these).
         if (SpoofActive() && IsPropsFile(path) && (flags & O_ACCMODE) == O_RDONLY) {
             std::string raw;
-            if (!ReadWholeFile(path, &raw)) return false;  // real error wins
+            if (!ReadWholeFile(path, &raw)) return false;
             std::string out;
             RewritePropsContent(raw, &out);
             int mfd = CreateMemfdWith(out.data(), out.size(), flags);
@@ -573,8 +679,6 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
             *fdOut = mfd;
             return true;
         }
-        // /proc/cpuinfo: served as the ARM view of the selected CPU so
-        // hardware-info readers see a coherent ARM device.
         if (CpuSpoofActive() && strcmp(path, "/proc/cpuinfo") == 0 &&
             (flags & O_ACCMODE) == O_RDONLY) {
             std::string raw;
@@ -587,7 +691,6 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
             *fdOut = mfd;
             return true;
         }
-        // cpufreq min/max: mirrored with the selected CPU's clock range.
         if (CpuSpoofActive() && (flags & O_ACCMODE) == O_RDONLY) {
             char val[64];
             if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
@@ -611,7 +714,6 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
         *fdOut = CreateMemfdWith("1\n", 2, flags);
         return true;
     }
-    // SpecialAction::EnforceOne
     *fdOut = CreateMemfdWith("1\n", 2, flags);
     return true;
 }
@@ -661,19 +763,16 @@ static bool HexEqCI(const char* a, const char* b) {
     return *a == '\0' && *b == '\0';
 }
 
-// Mirrors the checker's "local listeners" parser: a listener row bound to a
-// loopback or wildcard address on a port >= 1024. tcp: LISTEN (0A);
-// udp: bound rows (07/0A).
 static bool IsLoopbackListenerLine(const char* line, bool tcp) {
     if (!line) return false;
     const char* p = SkipWs(line);
-    p = SkipToken(p);  // sl
+    p = SkipToken(p);
     p = SkipWs(p);
     const char* local = p;
     p = SkipToken(p);
     size_t localLen = (size_t)(p - local);
     p = SkipWs(p);
-    p = SkipToken(p);  // remote
+    p = SkipToken(p);
     p = SkipWs(p);
     const char* st = p;
     p = SkipToken(p);
@@ -715,12 +814,6 @@ static bool IsLoopbackListenerLine(const char* line, bool tcp) {
     return false;
 }
 
-// Direct token scan of a line against the hidden-interface-name rules.
-// Used when the /proc/net/dev-derived name cache cannot see an interface
-// (wgtunnel's if9 is not listed there, so the cache is empty and
-// LineContainsHiddenName finds nothing). Each whitespace-separated token
-// is tested against IsHiddenIfaceName, so route/dev/if_inet6 entries that
-// mention the tunnel by name are still caught.
 static bool LineContainsHiddenToken(const char* line) {
     if (!line) return false;
     char buf[512];
@@ -760,8 +853,6 @@ static void FilterLines(const std::string& raw, WatchedFile kind, std::string* o
     }
 }
 
-// Returns a filtered memfd, -1 for a real error, or -2 to fall through to the
-// original function.
 static int CreateFilteredFd(const char* path, int flags) {
     WatchedFile kind = ResolveWatchedFile(path);
     if (kind == WatchedFile::None) return -2;
@@ -791,10 +882,6 @@ static int CreateFilteredFd(const char* path, int flags) {
     syscall(SYS_lseek, mfd, 0, SEEK_SET);
     return mfd;
 }
-
-// ---------------------------------------------------------------------------
-// open / openat / fopen
-// ---------------------------------------------------------------------------
 
 int HideOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
@@ -996,11 +1083,6 @@ FILE* HideFopen64(const char* path, const char* mode) {
     return BYTEHOOK_CALL_PREV(HideFopen64, path, mode);
 }
 
-// ---------------------------------------------------------------------------
-// getdents64: drop VPN-named entries from every directory listing.
-// (Stateless: entry names matching VPN interface patterns are simply omitted.)
-// ---------------------------------------------------------------------------
-
 struct PasLinuxDirent64 {
     uint64_t d_ino;
     int64_t d_off;
@@ -1029,10 +1111,6 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
     }
     return (ssize_t)(out - base);
 }
-
-// ---------------------------------------------------------------------------
-// access / stat
-// ---------------------------------------------------------------------------
 
 int HideAccess(const char* path, int mode) {
     BYTEHOOK_STACK_SCOPE();
@@ -1085,13 +1163,7 @@ int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 }
 
 // ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// CPU: subprocess readers. Tools spawned via exec* / posix_spawn (for example
-// `cat /proc/cpuinfo`) would otherwise read the host file; the exec arguments
-// are rewritten to point at a pre-rendered copy so child processes observe
-// the same ARM view as the process itself. Active together with the CPU spoof
-// only, and fails safe (unmodified exec) whenever the copy cannot be written.
+// CPU: subprocess readers
 // ---------------------------------------------------------------------------
 
 static std::string g_fake_cpuinfo_path;
@@ -1293,8 +1365,7 @@ static int MyPosixSpawnP(pid_t* pid, const char* file, const void* fileActions, 
     return BYTEHOOK_CALL_PREV(MyPosixSpawnP, pid, file, fileActions, attr, argv, envp);
 }
 
-// Direct syscall() readers: open/openat of /proc/cpuinfo is answered with a
-// pre-rendered memfd (some native readers bypass the libc wrappers).
+// Direct syscall() readers.
 static long MySyscall(long number, ...) {
     BYTEHOOK_STACK_SCOPE();
     va_list ap;
@@ -1316,10 +1387,6 @@ static long MySyscall(long number, ...) {
     if (number == __NR_ptrace) ReconNote("syscall-ptrace", "ptrace", 0);
 #endif
 #ifdef __NR_openat
-    // Hidden network paths via raw syscall: houdini-translated and hardened
-    // apps call openat directly, bypassing libc. Serving EACCES there leaks
-    // the path's existence (a real device returns ENOENT - the file simply
-    // does not exist). Reject with ENOENT before the kernel ever sees it.
     if (number == __NR_openat) {
         const char* hpath = (const char*)a1;
         if (hpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY && IsHiddenPathFast(hpath)) {
@@ -1329,20 +1396,12 @@ static long MySyscall(long number, ...) {
     }
 #endif
 #ifdef __NR_openat
+    // v2.4.4: cpuinfo + cpufreq + topology via raw syscall openat.
     if (CpuSpoofActive() && number == __NR_openat) {
         const char* cpath = (const char*)a1;
-        if (cpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY &&
-            strcmp(cpath, "/proc/cpuinfo") == 0) {
-            std::string raw;
-            if (ReadWholeFile(cpath, &raw)) {
-                std::string out;
-                RewriteCpuinfoContent(raw, &out);
-                int mfd = CreateMemfdWith(out.data(), out.size(), (int)a2);
-                if (mfd >= 0) {
-                    Log("native: cpuinfo served (direct syscall)");
-                    return (long)mfd;
-                }
-            }
+        if (cpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY) {
+            long mfd = ServeSysfsSpoofFd(cpath, (int)a2);
+            if (mfd >= 0) return mfd;
         }
     }
 #endif
@@ -1354,29 +1413,15 @@ static long MySyscall(long number, ...) {
             return -1;
         }
     }
+    // v2.4.4: same for the plain open() syscall.
     if (CpuSpoofActive() && number == __NR_open) {
         const char* cpath = (const char*)a0;
-        if (cpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY &&
-            strcmp(cpath, "/proc/cpuinfo") == 0) {
-            std::string raw;
-            if (ReadWholeFile(cpath, &raw)) {
-                std::string out;
-                RewriteCpuinfoContent(raw, &out);
-                int mfd = CreateMemfdWith(out.data(), out.size(), (int)a1);
-                if (mfd >= 0) {
-                    Log("native: cpuinfo served (direct syscall)");
-                    return (long)mfd;
-                }
-            }
+        if (cpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY) {
+            long mfd = ServeSysfsSpoofFd(cpath, (int)a1);
+            if (mfd >= 0) return mfd;
         }
     }
 #endif
-    // --- v2.3.9: raw netlink syscall paths ---------------------------------
-    //
-    // Anti-tamper tools that bypass libc and issue socket()/recvmsg()/read()
-    // through syscall() directly evade the bytehook-based netlink filter in
-    // hide_netlink.cpp. The three branches below mirror that filter at the
-    // syscall layer so a hardened prober still sees a clean enumeration.
 #ifdef __NR_socket
     if (number == __NR_socket) {
         long rc = BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
@@ -1404,9 +1449,6 @@ static long MySyscall(long number, ...) {
     return BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
 }
 
-// Some shells receive their commands over a pipe (persistent shell objects,
-// libsu-style helpers): the command text passes through write(2) in this
-// process, so /proc/cpuinfo references are rewritten there as well.
 static bool BufHasCpuinfoRef(const char* p, size_t n) {
     static const char kRef[] = "/proc/cpuinfo";
     const size_t kl = sizeof(kRef) - 1;
@@ -1456,15 +1498,6 @@ static ssize_t MyWrite(int fd, const void* buf, size_t count) {
     }
     return BYTEHOOK_CALL_PREV(MyWrite, fd, buf, count);
 }
-
-// ---------------------------------------------------------------------------
-// pipe / stream cpuinfo catch: some readers (helper processes, root shells,
-// libsu-style wrappers) receive the cpuinfo text over a pipe instead of
-// opening the file in-process. Those frames pass through read(2) here, so the
-// first frame that looks like a raw host dump is swapped for the ARM view;
-// the fd keeps serving the fake afterwards (EOF when exhausted). fd reuse is
-// guarded by comparing the pipe/file inode.
-// ---------------------------------------------------------------------------
 
 #define PAS_RDC_SLOTS 16
 
@@ -1548,7 +1581,7 @@ static ssize_t MyRead(int fd, void* buf, size_t count) {
         if (idx >= 0) {
             unsigned long long ino = RdcInode(fd);
             if (ino != 0 && g_rdc[idx].ino != 0 && ino != g_rdc[idx].ino) {
-                RdcClear(idx);  // fd was reused for a different object
+                RdcClear(idx);
             } else {
                 size_t len = g_rdc_fake.size();
                 if (g_rdc[idx].pos >= len) return 0;
@@ -1582,11 +1615,6 @@ static ssize_t MyRead(int fd, void* buf, size_t count) {
     return n;
 }
 
-// ---------------------------------------------------------------------------
-// recon extras: directory listings (location probes are often done with
-// opendir) - logged, never modified.
-// ---------------------------------------------------------------------------
-
 static DIR* MyOpendir(const char* name) {
     BYTEHOOK_STACK_SCOPE();
     ReconNote("opendir", name, 0);
@@ -1597,16 +1625,6 @@ void InstallReconHooks() {
     HookLibcSym("opendir", (void*)MyOpendir);
     Log("native: recon hooks installed");
 }
-
-// ---------------------------------------------------------------------------
-// dlopen tracing (diagnostics)
-//
-// A game that stalls during loading usually waits inside its last native
-// library load (anti-tamper init, encrypted asset loader, license check).
-// While recon is on, every dlopen / android_dlopen_ext attempt is logged
-// with its flags and the returned handle, so a stall shows up as the final
-// entry in the capture. Pure logging - no behavior changes.
-// ---------------------------------------------------------------------------
 
 void InstallFsHooks() {
     HookLibcSym("open", (void*)HideOpen);
@@ -1623,12 +1641,6 @@ void InstallFsHooks() {
     HookLibcSym("stat", (void*)HideStat);
     HookLibcSym("lstat", (void*)HideLstat);
     HookLibcSym("fstatat", (void*)HideFStatAt);
-
-    // NOTE: dlopen / android_dlopen_ext are deliberately NOT hooked. The
-    // v2.0.1-v2.0.3 loader tracer correlated with EGL driver-load failures
-    // (EGL_NOT_INITIALIZED) and RenderThread crashes in games. Library
-    // loads stay visible through the open/openat recon hooks via the
-    // ".so" token instead.
 }
 
 void InstallCpuDeepHooks() {
@@ -1657,5 +1669,5 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_pas_spoof_SpoofCore_nativeSetWebrtcMode(JNIEnv* env, jobject thiz, jint mode) {
     (void)env;
     (void)thiz;
-    pas::SetWebRtcMode((int)mode);
+    pas::SetWebrtcMode((int)mode);
 }
