@@ -446,6 +446,115 @@ static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// v2.4.2: cpufreq policy / topology mirrors.
+//
+// DevCheck-style readers build their core-cluster view from sysfs:
+//   cpuN/affected_cpus, cpuN/related_cpus      -> "0-3" (policy members)
+//   cpuN/topology/core_id                      -> core index within cluster
+//   cpuN/topology/cluster_id                   -> cluster number
+//   cpuN/topology/physical_package_id          -> cluster number (SoC)
+//   cpuN/topology/thread_siblings_list         -> "0-3"
+//   cpuN/topology/core_cpus_list               -> "0-3"
+// The emulator exposes one flat 8-core group; these mirrors reconstruct the
+// real SoC layout from the catalog's cluster string ("4+4", "1+3+4"...).
+// ---------------------------------------------------------------------------
+
+#define PAS_CPU_MAX_CORES 16
+
+// Parses "4+4" / "1+3+4" into per-core cluster membership. Returns core count.
+static int CpuClusterMap(int* coreCluster, int* coreIndexInCluster) {
+    const char* s = CpuSpoofClusters();
+    int total = 0;
+    int cluster = 0;
+    int idxInCluster = 0;
+    const char* p = s;
+    while (*p != '\0' && total < PAS_CPU_MAX_CORES) {
+        if (*p >= '0' && *p <= '9') {
+            int n = 0;
+            while (*p >= '0' && *p <= '9') {
+                n = n * 10 + (*p - '0');
+                p++;
+            }
+            for (int i = 0; i < n && total < PAS_CPU_MAX_CORES; i++) {
+                coreCluster[total] = cluster;
+                coreIndexInCluster[total] = idxInCluster++;
+                total++;
+            }
+            if (*p == '+') {
+                cluster++;
+                idxInCluster = 0;
+                p++;
+            }
+        } else {
+            p++;
+        }
+    }
+    return total;
+}
+
+// Formats a cpu list for cluster c as "a" or "a-b".
+static void CpuClusterList(int c, const int* coreCluster, int total, char* out, size_t cap) {
+    int first = -1, last = -1;
+    for (int i = 0; i < total; i++) {
+        if (coreCluster[i] == c) {
+            if (first < 0) first = i;
+            last = i;
+        }
+    }
+    if (first < 0) {
+        snprintf(out, cap, "0\n");
+    } else if (first == last) {
+        snprintf(out, cap, "%d\n", first);
+    } else {
+        snprintf(out, cap, "%d-%d\n", first, last);
+    }
+}
+
+static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
+    if (!CpuSpoofActive()) return false;
+    static const char* const kCpuRoot = "/sys/devices/system/cpu/cpu";
+    if (strncmp(path, kCpuRoot, strlen(kCpuRoot)) != 0) return false;
+    const char* p = path + strlen(kCpuRoot);
+    int core = 0;
+    bool hasCore = false;
+    while (*p >= '0' && *p <= '9') {
+        core = core * 10 + (*p - '0');
+        p++;
+        hasCore = true;
+    }
+    if (!hasCore || *p != '/') return false;
+    const char* rel = p + 1;
+
+    int coreCluster[PAS_CPU_MAX_CORES];
+    int coreIdx[PAS_CPU_MAX_CORES];
+    int total = CpuClusterMap(coreCluster, coreIdx);
+    if (total <= 0 || core < 0 || core >= total) return false;
+
+    if (strcmp(rel, "affected_cpus") == 0 || strcmp(rel, "related_cpus") == 0) {
+        CpuClusterList(coreCluster[core], coreCluster, total, out, cap);
+        return true;
+    }
+    if (strncmp(rel, "topology/", 9) == 0) {
+        const char* leaf = rel + 9;
+        if (strcmp(leaf, "core_id") == 0) {
+            snprintf(out, cap, "%d\n", coreIdx[core]);
+            return true;
+        }
+        if (strcmp(leaf, "cluster_id") == 0 ||
+            strcmp(leaf, "physical_package_id") == 0) {
+            snprintf(out, cap, "%d\n", coreCluster[core]);
+            return true;
+        }
+        if (strcmp(leaf, "thread_siblings_list") == 0 ||
+            strcmp(leaf, "core_cpus_list") == 0) {
+            CpuClusterList(coreCluster[core], coreCluster, total, out, cap);
+            return true;
+        }
+    }
+    return false;
+}
+
 // Returns true when the call was fully handled by the special layer.
 // On NotFound: errno=ENOENT, *fdOut=-1. On EnforceOne: *fdOut is a memfd or -1.
 static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
@@ -480,8 +589,9 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
         }
         // cpufreq min/max: mirrored with the selected CPU's clock range.
         if (CpuSpoofActive() && (flags & O_ACCMODE) == O_RDONLY) {
-            char val[32];
-            if (CpuFreqSpoofValue(path, val, sizeof(val))) {
+            char val[64];
+            if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
+                CpuTopologySpoofValue(path, val, sizeof(val))) {
                 int mfd = CreateMemfdWith(val, strlen(val), flags);
                 if (mfd >= 0) {
                     *fdOut = mfd;

@@ -82,7 +82,14 @@ object DeviceCatalog {
          * based on EXYNOS850)"); hardware-info apps display it. Empty =>
          * a generic variation is derived in SpoofCore.apply().
          */
-        val hardwareLine: String = ""
+        val hardwareLine: String = "",
+        /**
+         * v2.4.2: cpufreq policy layout ("4+4", "1+3+4", "2+6"...) as
+         * verified from real deviceinfohw CLUSTERS rows. Served through the
+         * sysfs topology / affected_cpus mirrors so DevCheck shows real
+         * clusters (e.g. [0-3] + [4-7]) instead of MuMu's flat core group.
+         */
+        val clusters: String = "4+4"
     )
 
     data class Gpu(
@@ -109,6 +116,8 @@ object DeviceCatalog {
         val glVersion: String,
         /** Packed VK_KHR_driver_properties conformanceVersion (maj shl 24 | min shl 16 | sub shl 8 | patch). */
         val conformance: Int,
+        /** VkDriverId (VK_KHR_driver_properties): Samsung=21, ARM=9, Qualcomm=8. */
+        val driverId: Int,
         /** Real VkPhysicalDeviceVulkan12Features::descriptorIndexing. */
         val descriptorIndexing: Boolean,
         /** Real VkPhysicalDeviceFeatures::sparseBinding. */
@@ -127,99 +136,122 @@ object DeviceCatalog {
             "Samsung Exynos 850", "Samsung", "S5E3830", "0xd05",
             "0x41", "ARMv8 Processor rev 1 (v8)", FEATURES_ARM32, "exynos850",
             546000, 2002000,
-            "exynos850 (Samsung A13 EUR OPEN REV02B board based on EXYNOS850)"
+            "exynos850 (Samsung A13 EUR OPEN REV02B board based on EXYNOS850)",
+            "4+4"
         ), // Galaxy A13 (reference profile; Hardware row verified on the real device)
         Cpu(
             "Samsung Exynos 1280", "Samsung", "S5E8825", "0xd41",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8825", 300000, 2400000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8825", 300000, 2400000,
+            "1+3+4"
         ), // A33 / A53 / A25 - Mali-G68
         Cpu(
             "Samsung Exynos 1330", "Samsung", "S5E8535", "0xd41",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8535", 300000, 2400000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8535", 300000, 2400000,
+            "1+3+4"
         ), // A16 5G - Mali-G68 MP2
         Cpu(
             "Samsung Exynos 1380", "Samsung", "S5E8835", "0xd41",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8835", 300000, 2400000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8835", 300000, 2400000,
+            "1+3+4"
         ), // A35 / A54 - Mali-G68 MP5
         Cpu(
             "Samsung Exynos 1480", "Samsung", "S5E8845", "0xd41",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8845", 533000, 2750000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8845", 533000, 2750000,
+            "4+4"
         ), // A55 / A37 - Xclipse 530 (clocks verified: 533-2750)
         Cpu(
             "Samsung Exynos 1580", "Samsung", "S5E8855", "0xd81",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8855", 533000, 2910000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8855", 533000, 2910000,
+            "1+3+4"
         ), // A56 - Xclipse 540 (clocks verified: 533-2910; big core = Cortex-A720)
         Cpu(
             "Samsung Exynos 2200", "Samsung", "S5E9925", "0xd48",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9925", 400000, 2803000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9925", 400000, 2803000,
+            "1+3+4"
         ), // S22 global / S23 FE - Xclipse 920 (clocks verified: 400-2803)
         Cpu(
             "Samsung Exynos 2400", "Samsung", "S5E9945", "0xd82",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9945", 400000, 3207000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9945", 400000, 3207000,
+            "1+2+3+4"
         ), // S24 / S24+ global, S24 FE, S25 FE - Xclipse 940 (clocks verified: 400-3207)
         Cpu(
             "Samsung Exynos 2500", "Samsung", "S5E9955", "0xd85",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9955", 400000, 3303000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9955", 400000, 3303000,
+            "1+2+5+2"
         ), // Z Flip7 / Z Fold7 SE / S25 Edge - Xclipse 950 (clocks verified: 400-3303; X925 big core)
         Cpu(
             "Samsung Exynos 2600", "Samsung", "S5E9965", "0xd8c",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9965", 400000, 3801000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e9965", 400000, 3801000,
+            "1+3+6"
         ), // S26 series global - Xclipse 960 (clocks verified: 400-3801; part = C1-Ultra, approx)
         Cpu(
             "Samsung Exynos 8865", "Samsung", "S5E8865", "0xd81",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8865", 533000, 2910000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "s5e8865", 533000, 2910000,
+            "1+4+3"
         ), // A57 - Xclipse 550 (clocks verified: 533-2910)
 
         // ---- Snapdragon (US Samsung flagship / midrange) ----
         Cpu(
             "Qualcomm Snapdragon 888", "Qualcomm", "SM8350", "0xd44",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2841600
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2841600,
+            "1+3+4"
         ), // S21 FE (2022) - Adreno 660
         Cpu(
             "Qualcomm Snapdragon 8 Gen 1", "Qualcomm", "SM8450", "0xd48",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 307000, 2995000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 307000, 2995000,
+            "1+3+4"
         ), // S22 US / Tab S8 - Adreno 730 (clocks verified: 307-2995)
         Cpu(
             "Qualcomm Snapdragon 8+ Gen 1", "Qualcomm", "SM8475", "0xd48",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 3200000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 3200000,
+            "1+3+4"
         ), // Z Fold4 / Flip4 - Adreno 730
         Cpu(
             "Qualcomm Snapdragon 8 Gen 2", "Qualcomm", "SM8550", "0xd4e",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 3360000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 3360000,
+            "1+2+2+3"
         ), // S23 US / Z Fold5 - Adreno 740 (max clock fixed: 3.36 GHz)
         Cpu(
             "Qualcomm Snapdragon 8 Gen 3", "Qualcomm", "SM8650", "0xd82",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 3300000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 3300000,
+            "1+3+2+2"
         ), // S24 US / Z Fold6 - Adreno 750 (part fixed: Cortex-X4)
         Cpu(
             "Qualcomm Snapdragon 8 Elite", "Qualcomm", "SM8750", "0x001",
-            "0x51", AARCH64_MODEL, FEATURES_ARM64, "qcom", 384000, 4473000
+            "0x51", AARCH64_MODEL, FEATURES_ARM64, "qcom", 384000, 4473000,
+            "2+6"
         ), // S25 series US / Z Fold7 - Adreno 830 (Oryon: implementer 0x51 part 0x001; clocks verified 384-4473)
         Cpu(
             "Qualcomm Snapdragon 8 Elite Gen 5", "Qualcomm", "SM8850", "0x001",
-            "0x51", AARCH64_MODEL, FEATURES_ARM64, "qcom", 384000, 4742000
+            "0x51", AARCH64_MODEL, FEATURES_ARM64, "qcom", 384000, 4742000,
+            "2+6"
         ), // S26 series US - Adreno 840 (clocks verified: 384-4742; Oryon-V3 part approx)
         Cpu(
             "Qualcomm Snapdragon 778G", "Qualcomm", "SM7325", "0xd41",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2400000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2400000,
+            "1+3+4"
         ), // A73 5G / A52s - Adreno 642L
         Cpu(
             "Qualcomm Snapdragon 695", "Qualcomm", "SM6375", "0xd41",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2200000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2200000,
+            "2+6"
         ), // A23 5G - Adreno 619
         Cpu(
             "Qualcomm Snapdragon 680", "Qualcomm", "SM6225", "0xd09",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2400000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "qcom", 300000, 2400000,
+            "4+4"
         ), // A23 4G - Adreno 610
 
         // ---- MediaTek (budget A-series) ----
         Cpu(
             "MediaTek Helio G85", "MediaTek", "MT6769Z", "0xd0a",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "mt6769", 300000, 2000000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "mt6769", 300000, 2000000,
+            "2+6"
         ), // A05 - Mali-G52 MC2
         Cpu(
             "MediaTek Dimensity 6300", "MediaTek", "MT6835", "0xd0b",
-            "0x41", AARCH64_MODEL, FEATURES_ARM64, "mt6835", 300000, 2400000
+            "0x41", AARCH64_MODEL, FEATURES_ARM64, "mt6835", 300000, 2400000,
+            "2+6"
         ), // A16 5G (regional) - Mali-G57 MC2
     )
 
@@ -247,6 +279,7 @@ object DeviceCatalog {
         driverInfo = info,
         glVersion = "OpenGL ES 3.2 $info",
         conformance = conf(1, 3, 1, 0),
+        driverId = 9,
         descriptorIndexing = descriptorIndexing,
         sparseBinding = false
     )
@@ -282,6 +315,7 @@ object DeviceCatalog {
         driverInfo = info,
         glVersion = gl,
         conformance = conformance,
+        driverId = 8,
         descriptorIndexing = descriptorIndexing,
         sparseBinding = sparseBinding
     )
@@ -315,6 +349,7 @@ object DeviceCatalog {
         driverInfo = "${if (spal) "SPAL " else ""}Driver version: $vkDrvText, git hash: $vkGit",
         glVersion = "OpenGL ES 3.2 Driver version: $glDrv git hash: $glGit",
         conformance = conformanceV,
+        driverId = 21,
         descriptorIndexing = true,
         sparseBinding = true
     )

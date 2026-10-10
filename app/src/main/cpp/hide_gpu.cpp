@@ -40,6 +40,8 @@ static char g_cpu_features[256] = {0};
 static char g_cpu_hwline[256] = {0};
 // v2.4.0: platform value for Build.HARDWARE / ro.hardware surfaces.
 static char g_cpu_hardware[64] = {0};
+// v2.4.2: cluster layout string ("4+4", "1+3+4"...) for sysfs mirrors.
+static char g_cpu_clusters[32] = {0};
 static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
 
@@ -66,7 +68,7 @@ static void CopyStr(char* dst, size_t cap, const char* src) {
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
                   int maxKHz, const char* hwLine, const char* implementer,
-                  const char* hardware) {
+                  const char* hardware, const char* clusters) {
     g_cpu_on = false;
     CopyStr(g_cpu_display, sizeof(g_cpu_display), display);
     CopyStr(g_cpu_mfr, sizeof(g_cpu_mfr), mfr);
@@ -81,12 +83,23 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
     CopyStr(g_cpu_features, sizeof(g_cpu_features), features);
     CopyStr(g_cpu_hwline, sizeof(g_cpu_hwline), hwLine);
     CopyStr(g_cpu_hardware, sizeof(g_cpu_hardware), hardware);
+    // v2.4.2: cluster layout ("4+4", "1+3+4"...) for the sysfs topology
+    // mirrors; empty / invalid keeps the 4+4 default (8-core reference).
+    {
+        char tmp[32];
+        CopyStr(tmp, sizeof(tmp), clusters);
+        if (tmp[0] != '\0') {
+            CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), tmp);
+        } else {
+            CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), "4+4");
+        }
+    }
     g_cpu_min_khz = minKHz;
     g_cpu_max_khz = maxKHz;
     g_cpu_on = cpuOn && g_cpu_display[0] != '\0';
-    Log("native: cpu config on=%d display=%s part=%s impl=%s hw=%s khz=%d-%d", (int)g_cpu_on,
-        g_cpu_display, g_cpu_part, g_cpu_implementer, g_cpu_hardware, (int)g_cpu_min_khz,
-        (int)g_cpu_max_khz);
+    Log("native: cpu config on=%d display=%s part=%s impl=%s hw=%s clusters=%s khz=%d-%d",
+        (int)g_cpu_on, g_cpu_display, g_cpu_part, g_cpu_implementer, g_cpu_hardware,
+        g_cpu_clusters, (int)g_cpu_min_khz, (int)g_cpu_max_khz);
 }
 
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
@@ -162,6 +175,11 @@ int CpuSpoofMinKHz() {
 
 int CpuSpoofMaxKHz() {
     return g_cpu_max_khz;
+}
+
+// v2.4.2: cluster layout for the sysfs topology mirrors ("4+4" etc).
+const char* CpuSpoofClusters() {
+    return g_cpu_clusters[0] != '\0' ? g_cpu_clusters : "4+4";
 }
 
 bool GpuSpoofActive() {
@@ -576,7 +594,8 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
                                                          jstring cpuFeatures, jint minKhz,
                                                          jint maxKhz, jstring cpuHwLine,
                                                          jstring cpuImplementer,
-                                                         jstring cpuHardware) {
+                                                         jstring cpuHardware,
+                                                         jstring cpuClusters) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -594,9 +613,10 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
     std::string hwLine = toStr(cpuHwLine);
     std::string impl = toStr(cpuImplementer);
     std::string hw = toStr(cpuHardware);
+    std::string clu = toStr(cpuClusters);
     pas::SetCpuConfig(cpuOn == JNI_TRUE, display.c_str(), mfr.c_str(), model.c_str(), part.c_str(),
                       infoModel.c_str(), features.c_str(), (int)minKhz, (int)maxKhz,
-                      hwLine.c_str(), impl.c_str(), hw.c_str());
+                      hwLine.c_str(), impl.c_str(), hw.c_str(), clu.c_str());
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -634,6 +654,7 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuProfile(JNIEnv* env, jobject thi
                                                         jboolean gpuOn,
                                                         jint confMajor, jint confMinor,
                                                         jint confSub, jint confPatch,
+                                                        jint driverId,
                                                         jboolean descriptorIndexing,
                                                         jboolean sparseBinding) {
     (void)env;
@@ -641,11 +662,12 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuProfile(JNIEnv* env, jobject thi
     // Profile values only matter when the GPU spoof is on; delivering the
     // reference defaults otherwise keeps hide_vulkan's previous behavior.
     if (gpuOn != JNI_TRUE) {
-        pas::SetGpuProfile(1, 3, 1, 0, false, false);
+        pas::SetGpuProfile(1, 3, 1, 0, 0, false, false);
         return;
     }
     pas::SetGpuProfile((int)confMajor, (int)confMinor, (int)confSub, (int)confPatch,
-                       descriptorIndexing == JNI_TRUE, sparseBinding == JNI_TRUE);
+                       (int)driverId, descriptorIndexing == JNI_TRUE,
+                       sparseBinding == JNI_TRUE);
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -655,4 +677,3 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpuOptions(JNIEnv* env, jobject thi
     (void)thiz;
     pas::SetGpuOptions(chain == JNI_TRUE, vulkan == JNI_TRUE);
 }
-

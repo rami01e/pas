@@ -52,19 +52,21 @@ static volatile int g_gpu_conf_major = 1;   // conformance major
 static volatile int g_gpu_conf_minor = 3;   // conformance minor
 static volatile int g_gpu_conf_sub = 1;     // conformance sub-minor
 static volatile int g_gpu_conf_patch = 0;   // conformance patch
+static volatile int g_gpu_driver_id = 0;    // VkDriverId (0 = leave real)
 static volatile int g_gpu_desc_indexing = 0;  // 0 = force off, 1 = force on
 static volatile int g_gpu_sparse_binding = 0;
 
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
-                   bool descriptorIndexing, bool sparseBinding) {
+                   int driverId, bool descriptorIndexing, bool sparseBinding) {
     g_gpu_conf_major = confMajor;
     g_gpu_conf_minor = confMinor;
     g_gpu_conf_sub = confSub;
     g_gpu_conf_patch = confPatch;
+    g_gpu_driver_id = driverId;
     g_gpu_desc_indexing = descriptorIndexing ? 1 : 0;
     g_gpu_sparse_binding = sparseBinding ? 1 : 0;
-    Log("native: gpu profile conf=%d.%d.%d.%d descIdx=%d sparse=%d", confMajor,
-        confMinor, confSub, confPatch, (int)descriptorIndexing, (int)sparseBinding);
+    Log("native: gpu profile conf=%d.%d.%d.%d driverId=%d descIdx=%d sparse=%d", confMajor,
+        confMinor, confSub, confPatch, driverId, (int)descriptorIndexing, (int)sparseBinding);
 }
 
 static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
@@ -117,6 +119,9 @@ struct PasDriverProps {
 static void PatchDriverPropsNode(void* node) {
     if (node == nullptr || !GpuSpoofActive()) return;
     auto* d = (PasDriverProps*)node;
+    // v2.4.2: driverID is the field DevCheck-style readers use to map the
+    // GPU vendor icon ("Unknown" = the host driver's ID leaked through).
+    if (g_gpu_driver_id > 0) d->driverID = (uint32_t)g_gpu_driver_id;
     snprintf(d->driverName, sizeof(d->driverName), "%s", GpuSpoofDriverName().c_str());
     snprintf(d->driverInfo, sizeof(d->driverInfo), "%s", GpuSpoofDriverInfo().c_str());
     // v2.4.0: conformance version comes from the GPU profile (real Xclipse

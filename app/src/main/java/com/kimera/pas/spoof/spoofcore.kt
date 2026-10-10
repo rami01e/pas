@@ -47,7 +47,8 @@ object SpoofCore {
         cpuMaxKHz: Int,
         cpuHwLine: String,
         cpuImplementer: String,
-        cpuHardware: String
+        cpuHardware: String,
+        cpuClusters: String
     )
 
     external fun nativeSetGpu(
@@ -67,12 +68,15 @@ object SpoofCore {
     // >>> v2.4.0: per-GPU Vulkan profile (conformance version + feature
     // flags) so Xclipse/Adreno/Mali spoof the right vkGetPhysicalDevice*
     // answers instead of the old single reference profile.
+    // >>> v2.4.2: driverId (VkDriverId) added - the vendor field that maps
+    // DevCheck-style GPU vendor icons; 0 = leave the real value untouched.
     external fun nativeSetGpuProfile(
         gpuOn: Boolean,
         confMajor: Int,
         confMinor: Int,
         confSub: Int,
         confPatch: Int,
+        driverId: Int,
         descriptorIndexing: Boolean,
         sparseBinding: Boolean
     )
@@ -247,7 +251,8 @@ object SpoofCore {
                     "${cpuEntry.hardware} (Samsung board based on ${cpuEntry.socModel})"
                 },
                 cpuEntry.implementer,
-                cpuEntry.hardware
+                cpuEntry.hardware,
+                cpuEntry.clusters
             )
         }
         runCatching {
@@ -260,6 +265,7 @@ object SpoofCore {
         }
         // >>> v2.4.0: per-GPU Vulkan profile (conformance + feature flags),
         // delivered before the config gate like the other early values.
+        // >>> v2.4.2: driverId delivered too (Samsung=21, ARM=9, Qualcomm=8).
         runCatching {
             nativeSetGpuProfile(
                 gpuOnEff,
@@ -267,6 +273,7 @@ object SpoofCore {
                 (gpuEntry.conformance shr 16) and 0xFF,
                 (gpuEntry.conformance shr 8) and 0xFF,
                 gpuEntry.conformance and 0xFF,
+                gpuEntry.driverId,
                 gpuEntry.descriptorIndexing,
                 gpuEntry.sparseBinding
             )
