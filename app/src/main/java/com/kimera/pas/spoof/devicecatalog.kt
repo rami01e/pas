@@ -3,11 +3,11 @@ package com.kimera.pas.spoof
 /**
  * Shared CPU / GPU model catalogs.
  *
- * v2.4.7: GPU entries now carry a real min/max clock (kHz) so DevCheck's
- * GPU tab shows a coherent frequency range. Physical specs (cores, L2,
- * arch) already existed but were only exposed through the Vulkan path;
- * DevCheck also reads /sys/class/kgsl and /sys/class/devfreq, so the
- * native side now serves fake values there too.
+ * v2.4.8: Xclipse driverId changed from 21 (VK_DRIVER_ID_SAMSUNG_PROPRIETARY,
+ * unknown to DevCheck's enum mapping) to 1 (VK_DRIVER_ID_AMD_PROPRIETARY) so
+ * DevCheck resolves the Vulkan Vendor row. Architecturally accurate - Xclipse
+ * is licensed AMD RDNA. Real Exynos devices report driverID=21 but DevCheck
+ * (as of the tested version) has no mapping for that enum member.
  */
 object DeviceCatalog {
 
@@ -64,8 +64,6 @@ object DeviceCatalog {
         val gpuCores: Int = 1,
         val l2CacheKb: Int = 64,
         val gpuArch: String = "Bifrost",
-        // v2.4.7: physical clock range (kHz) so the GPU tab has a real
-        // frequency row instead of relying on the emulator's fake kgsl data.
         val gpuMinFreqKHz: Int = 200000,
         val gpuMaxFreqKHz: Int = 1000000
     )
@@ -431,6 +429,11 @@ object DeviceCatalog {
         gpuMaxFreqKHz = maxKHz
     )
 
+    // v2.4.8: Xclipse driverId now 1 (AMD_PROPRIETARY) instead of 21
+    // (SAMSUNG_PROPRIETARY) so DevCheck's enum-to-vendor table resolves.
+    // Everything else (vendorId 0x144D, name "Samsung Xclipse NNN") stays
+    // consistent with real devices - only the driverID field, which is the
+    // API-facing "who wrote this driver" hint, is remapped.
     private fun xclipse(
         num: String,
         deviceId: Long,
@@ -459,7 +462,7 @@ object DeviceCatalog {
         driverInfo = "${if (spal) "SPAL " else ""}Driver version: $vkDrvText, git hash: $vkGit",
         glVersion = "OpenGL ES 3.2 Driver version: $glDrv git hash: $glGit",
         conformance = conformanceV,
-        driverId = 21,
+        driverId = 1,  // v2.4.8: AMD_PROPRIETARY (Xclipse is licensed RDNA)
         descriptorIndexing = true,
         sparseBinding = true,
         gpuCores = gpuCores,
@@ -470,8 +473,6 @@ object DeviceCatalog {
     )
 
     val GPUS = listOf(
-        // Mali-G52 MC2 (Galaxy A13 reference) - 1001 MHz max verified on
-        // the real device (user's own measurement)
         mali("Mali-G52 MC2", 0x74021000L, MALI_INFO_G52,
              descriptorIndexing = false,
              gpuCores = 2, l2CacheKb = 64, gpuArch = "Bifrost",
