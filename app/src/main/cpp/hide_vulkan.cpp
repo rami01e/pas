@@ -328,7 +328,7 @@ static void VkProps2KhrPtr(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* out
 }
 
 static void VkFeatPtr(VkPhysicalDevice pd, VkPhysicalDeviceFeatures* out) {
-    auto real = (PFn_vkGetPhysicalDeviceFeatures)ResolveRealTarget(VK_T_FEAT);
+    auto real = (PFN_vkGetPhysicalDeviceFeatures)ResolveRealTarget(VK_T_FEAT);
     if (real) real(pd, out);
     if (out && GpuSpoofActive()) PatchFeatures(out);
 }
