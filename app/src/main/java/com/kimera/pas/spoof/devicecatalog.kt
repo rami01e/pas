@@ -3,9 +3,19 @@ package com.kimera.pas.spoof
 /**
  * Shared CPU / GPU model catalogs.
  *
- * v2.4.5: GPU entries now carry core count, L2 cache size and architecture
- * (Bifrost / Valhall / Adreno) so DevCheck-style readers see a fully
- * coherent GPU identity instead of just a name string.
+ * v2.4.8: Xclipse driverId temporarily changed (reverted in v2.4.9).
+ *
+ * v2.4.9: Gpu data class now carries `eglHardware` and `vulkanHardware` -
+ * the driver hint strings that the Android GL loader and DevCheck-style
+ * tools read from ro.hardware.egl / ro.hardware.vulkan. Values reflect
+ * real Samsung firmware per GPU family:
+ *   - Mali   -> "mali"
+ *   - Adreno -> "adreno"
+ *   - Xclipse-> "samsung"
+ *
+ * Xclipse vendorId stays 0x144D (Samsung Electronics). driverId stays 21
+ * (VK_DRIVER_ID_SAMSUNG_PROPRIETARY) - the correct enum member for real
+ * Xclipse devices.
  */
 object DeviceCatalog {
 
@@ -59,10 +69,14 @@ object DeviceCatalog {
         val driverId: Int,
         val descriptorIndexing: Boolean,
         val sparseBinding: Boolean,
-        // v2.4.5: physical characteristics probed by DevCheck for Mali.
         val gpuCores: Int = 1,
         val l2CacheKb: Int = 64,
-        val gpuArch: String = "Bifrost"
+        val gpuArch: String = "Bifrost",
+        val gpuMinFreqKHz: Int = 200000,
+        val gpuMaxFreqKHz: Int = 1000000,
+        // v2.4.9: driver hint for ro.hardware.egl / ro.hardware.vulkan.
+        val eglHardware: String = "mali",
+        val vulkanHardware: String = "mali"
     )
 
     private fun vk(major: Int, minor: Int, patch: Int): Long =
@@ -374,7 +388,9 @@ object DeviceCatalog {
         descriptorIndexing: Boolean = true,
         gpuCores: Int = 1,
         l2CacheKb: Int = 64,
-        gpuArch: String = "Bifrost"
+        gpuArch: String = "Bifrost",
+        minKHz: Int = 200000,
+        maxKHz: Int = 1000000
     ) = Gpu(
         vendor = "ARM",
         renderer = renderer,
@@ -393,7 +409,11 @@ object DeviceCatalog {
         sparseBinding = false,
         gpuCores = gpuCores,
         l2CacheKb = l2CacheKb,
-        gpuArch = gpuArch
+        gpuArch = gpuArch,
+        gpuMinFreqKHz = minKHz,
+        gpuMaxFreqKHz = maxKHz,
+        eglHardware = "mali",
+        vulkanHardware = "mali"
     )
 
     private fun adreno(
@@ -409,7 +429,9 @@ object DeviceCatalog {
         descriptorIndexing: Boolean = true,
         sparseBinding: Boolean = true,
         gpuCores: Int = 1,
-        l2CacheKb: Int = 64
+        l2CacheKb: Int = 64,
+        minKHz: Int = 200000,
+        maxKHz: Int = 1000000
     ) = Gpu(
         vendor = "Qualcomm",
         renderer = renderer,
@@ -428,7 +450,11 @@ object DeviceCatalog {
         sparseBinding = sparseBinding,
         gpuCores = gpuCores,
         l2CacheKb = l2CacheKb,
-        gpuArch = "Adreno"
+        gpuArch = "Adreno",
+        gpuMinFreqKHz = minKHz,
+        gpuMaxFreqKHz = maxKHz,
+        eglHardware = "adreno",
+        vulkanHardware = "adreno"
     )
 
     private fun xclipse(
@@ -443,7 +469,9 @@ object DeviceCatalog {
         spal: Boolean = false,
         conformanceV: Int = conf(1, 3, 5, 1),
         gpuCores: Int = 1,
-        l2CacheKb: Int = 64
+        l2CacheKb: Int = 64,
+        minKHz: Int = 400000,
+        maxKHz: Int = 1300000
     ) = Gpu(
         vendor = "Samsung Electronics Co., Ltd.",
         renderer = "ANGLE ((Samsung Xclipse $num) on Vulkan $apiText)",
@@ -462,7 +490,11 @@ object DeviceCatalog {
         sparseBinding = true,
         gpuCores = gpuCores,
         l2CacheKb = l2CacheKb,
-        gpuArch = "RDNA"
+        gpuArch = "RDNA",
+        gpuMinFreqKHz = minKHz,
+        gpuMaxFreqKHz = maxKHz,
+        eglHardware = "samsung",
+        vulkanHardware = "samsung"
     )
 
     val GPUS = listOf(
@@ -484,63 +516,81 @@ object DeviceCatalog {
                "OpenGL ES 3.2 V@0502.39.1 (GIT@a22bdbeed1, I9e7c613add, 1749016775) (Date:06/04/25)",
                "Driver Build: a22bdbeed1, I9e7c613add, 1749016775\nDate: 06/04/25\nCompiler Version: EV031.36.08.35\nDriver Branch:",
                conf(1, 2, 7, 2), descriptorIndexing = false, sparseBinding = false,
-               gpuCores = 1, l2CacheKb = 64),
+               gpuCores = 1, l2CacheKb = 64, minKHz = 200000, maxKHz = 950000),
         adreno("Adreno (TM) 619", 0x6010901L, 512, 762, 43, vk(1, 3, 128),
                "OpenGL ES 3.2 V@0762.43 (GIT@3e46547c6d, I05d4d500aa, 1763457967) (Date:11/18/25)",
                "Driver Build: 3e46547c6d, I05d4d500aa, 1763457967\nDate: 11/18/25\nCompiler Version: E031.45.02.26\nDriver Branch:",
-               conf(1, 3, 6, 0), sparseBinding = false, gpuCores = 1, l2CacheKb = 128),
+               conf(1, 3, 6, 0), sparseBinding = false,
+               gpuCores = 1, l2CacheKb = 128, minKHz = 200000, maxKHz = 950000),
         adreno("Adreno (TM) 640", 0x6040001L, 512, 502, 0, vk(1, 1, 128),
                "OpenGL ES 3.2 V@0502.0 (GIT@3dad7f8ed7, I593c16c433, 1633080534) (Date:10/01/21)",
                "Driver Build: 3dad7f8ed7, I593c16c433, 1633080534\nDate: 10/01/21\nCompiler Version: EV031.32.02.02\nDriver Branch:",
-               conf(1, 2, 0, 1), sparseBinding = false, gpuCores = 1, l2CacheKb = 256),
+               conf(1, 2, 0, 1), sparseBinding = false,
+               gpuCores = 1, l2CacheKb = 256, minKHz = 257000, maxKHz = 585000),
         adreno("Adreno (TM) 650", 0x6050002L, 512, 819, 2, vk(1, 3, 295),
                "OpenGL ES 3.2 V@0819.2 (GIT@651341e91d, I8d46b3bbb7, 1754290135) (Date:08/04/25)",
                "Driver Build: 651341e91d, I8d46b3bbb7, 1754290135\nDate: 08/04/25\nCompiler Version: E031.50.02.00\nDriver Branch:",
-               conf(1, 4, 0, 0), sparseBinding = false, gpuCores = 2, l2CacheKb = 512),
+               conf(1, 4, 0, 0), sparseBinding = false,
+               gpuCores = 2, l2CacheKb = 512, minKHz = 305000, maxKHz = 670000),
         adreno("Adreno (TM) 660", 0x6060001L, 512, 530, 0, vk(1, 1, 128),
                "OpenGL ES 3.2 V@0530.0 (GIT@a1cf8ab5e3, I428bf45773, 1699535026) (Date:11/09/23)",
                "Driver Build: a1cf8ab5e3, I428bf45773, 1699535026\nDate: 11/09/23\nCompiler Version: EV031.35.01.12\nDriver Branch:",
-               conf(1, 2, 0, 1), sparseBinding = false, gpuCores = 2, l2CacheKb = 512),
+               conf(1, 2, 0, 1), sparseBinding = false,
+               gpuCores = 2, l2CacheKb = 512, minKHz = 490000, maxKHz = 840000),
         adreno("Adreno (TM) 642L", 0x6030500L, 512, 863, 1, vk(1, 3, 295),
                "OpenGL ES 3.2 V@0863.1 (GIT@ffdf890711, I896ce78af2, 1766558511) (Date:12/24/25)",
                "Driver Build: ffdf890711, I896ce78af2, 1766558511\nDate: 12/24/25\nCompiler Version: E031.50.36.00\nDriver Branch:",
-               conf(1, 4, 1, 0), sparseBinding = false, gpuCores = 2, l2CacheKb = 256),
+               conf(1, 4, 1, 0), sparseBinding = false,
+               gpuCores = 2, l2CacheKb = 256, minKHz = 300000, maxKHz = 550000),
         adreno("Adreno (TM) 730", 0x7030001L, 512, 615, 98, vk(1, 1, 128),
                "OpenGL ES 3.2 V@0615.98 (GIT@0c393b63cf, I94e2bd5684, 1746191168) (Date:05/02/25)",
                "Driver Build: 0c393b63cf, I94e2bd5684, 1746191168\nDate: 05/02/25\nCompiler Version: EV031.36.08.33\nDriver Branch:",
-               conf(1, 2, 7, 2), gpuCores = 2, l2CacheKb = 1024),
+               conf(1, 2, 7, 2),
+               gpuCores = 2, l2CacheKb = 1024, minKHz = 300000, maxKHz = 818000),
         adreno("Adreno (TM) 740", 0x43050A01L, 512, 676, 1, vk(1, 3, 128),
                "OpenGL ES 3.2 V@0676.1 (GIT@bad34dcf83, I1064ae0a1f, 1764326394) (Date:11/28/25)",
                "Driver Build: bad34dcf83, I1064ae0a1f, 1764326394\nDate: 11/28/25\nCompiler Version: E031.41.03.64\nDriver Branch:",
-               conf(1, 3, 1, 0), gpuCores = 3, l2CacheKb = 1024),
+               conf(1, 3, 1, 0),
+               gpuCores = 3, l2CacheKb = 1024, minKHz = 300000, maxKHz = 680000),
         adreno("Adreno (TM) 750", 0x43051401L, 512, 762, 1, vk(1, 3, 128),
                "OpenGL ES 3.2 V@0762.1 (GIT@a0053eb399, I31b05c049d, 1766398679) (Date:12/22/25)",
                "Driver Build: a0053eb399, I31b05c049d, 1766398679\nDate: 12/22/25\nCompiler Version: E031.45.02.25\nDriver Branch:",
-               conf(1, 3, 6, 0), gpuCores = 3, l2CacheKb = 1024),
+               conf(1, 3, 6, 0),
+               gpuCores = 3, l2CacheKb = 1024, minKHz = 300000, maxKHz = 903000),
         adreno("Adreno (TM) 830", 0x44050001L, 512, 800, 64, vk(1, 3, 284),
                "OpenGL ES 3.2 V@0800.64.7 (GIT@f61dec9117, I68b0a64d7e, 1774510019) (Date:03/26/26)",
                "Driver Build: f61dec9117, I68b0a64d7e, 1774510019\nDate: 03/26/26\nCompiler Version: E031.47.18.56\nDriver Branch:",
-               conf(1, 3, 8, 0), gpuCores = 4, l2CacheKb = 2048),
+               conf(1, 3, 8, 0),
+               gpuCores = 4, l2CacheKb = 2048, minKHz = 500000, maxKHz = 1100000),
         adreno("Adreno (TM) 840", 0x44050A31L, 512, 842, 19, vk(1, 4, 295),
                "OpenGL ES 3.2 V@0842.19.13 (GIT@089d643e2a, Icecd8f0534, 1782882597) (Date:07/01/26)",
                "Driver Build: 089d643e2a, Icecd8f0534, 1782882597\nDate: 07/01/26\nCompiler Version: E031.50.19.32\nDriver Branch:",
-               conf(1, 4, 1, 0), gpuCores = 4, l2CacheKb = 2048),
+               conf(1, 4, 1, 0),
+               gpuCores = 4, l2CacheKb = 2048, minKHz = 500000, maxKHz = 1100000),
+
         xclipse("920", 0x73A0L, "1.3.279", "24.1.293", "35f6eab5b214", "24.0.545",
-                vk(24, 0, 545), "1fc295b0d2", gpuCores = 4, l2CacheKb = 512),
+                vk(24, 0, 545), "1fc295b0d2",
+                gpuCores = 4, l2CacheKb = 512, minKHz = 400000, maxKHz = 1300000),
         xclipse("940", 0x2600200L, "1.3.279", "24.1.307", "86f99cfe6317", "24.0.534",
-                vk(24, 0, 534), "1900168dcb", gpuCores = 6, l2CacheKb = 1024),
+                vk(24, 0, 534), "1900168dcb",
+                gpuCores = 6, l2CacheKb = 1024, minKHz = 400000, maxKHz = 1095000),
         xclipse("950", 0x3600200L, "1.3.279", "24.1.293", "35f6eab5b214", "24.0.542",
-                vk(24, 0, 542), "b02432ec77", gpuCores = 6, l2CacheKb = 1024),
+                vk(24, 0, 542), "b02432ec77",
+                gpuCores = 6, l2CacheKb = 1024, minKHz = 400000, maxKHz = 1100000),
         xclipse("960", 0x4600200L, "1.4.304", "25.6.3", "cbd4f9cf1088", "25.2.39",
-                vk(25, 2, 39), "ee686460f4", spal = true, conformanceV = conf(1, 4, 1, 1),
-                gpuCores = 8, l2CacheKb = 2048),
+                vk(25, 2, 39), "ee686460f4", spal = true,
+                conformanceV = conf(1, 4, 1, 1),
+                gpuCores = 8, l2CacheKb = 2048, minKHz = 400000, maxKHz = 1200000),
         xclipse("530", 0x1300100L, "1.3.279", "24.1.306", "6c522b193c69", "24.0.539",
-                vk(24, 0, 539), "bd45943d20", gpuCores = 4, l2CacheKb = 512),
+                vk(24, 0, 539), "bd45943d20",
+                gpuCores = 4, l2CacheKb = 512, minKHz = 300000, maxKHz = 1200000),
         xclipse("540", 0x2300100L, "1.3.279", "24.1.305", "e94bc7a33c77", "24.0.560",
-                vk(24, 0, 560), "34bb549c57", gpuCores = 4, l2CacheKb = 512),
+                vk(24, 0, 560), "34bb549c57",
+                gpuCores = 4, l2CacheKb = 512, minKHz = 300000, maxKHz = 1280000),
         xclipse("550", 0x3300100L, "1.4.304", "25.1.127", "7c9893305eb5", "25.4.7",
-                vk(25, 4, 7), "702e7fd271", spal = true, conformanceV = conf(1, 4, 1, 1),
-                gpuCores = 6, l2CacheKb = 1024)
+                vk(25, 4, 7), "702e7fd271", spal = true,
+                conformanceV = conf(1, 4, 1, 1),
+                gpuCores = 6, l2CacheKb = 1024, minKHz = 300000, maxKHz = 1280000)
     )
 
     fun cpu(display: String?): Cpu = CPUS.firstOrNull { it.display == display } ?: CPUS[0]

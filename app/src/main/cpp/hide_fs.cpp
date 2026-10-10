@@ -147,10 +147,8 @@ static const char* const kReconTokens[] = {
     "board", "platform", "vendor_id", "bogomips", "physical_package",
     "libssl", "libcrypto", "boring", "conscrypt", "cacerts",
     ".pem", ".crt", ".cer", "pinning", "truststore",
-    // v2.4.6: GPU sysfs probes (Mali / Adreno / generic devfreq) so the next
-    // Diagnose capture reveals what DevCheck reads for GPU core counts.
     "mali", "kgsl", "devfreq", "gpufreq", "gpu_model", "gpuclk",
-    "gpu_cores", "core_count", "shader_core", "mp_count",
+    "gpu_cores", "core_count", "shader_core", "mp_count", "gpu_available",
 };
 
 static bool ReconHit(const char* s) {
@@ -411,7 +409,6 @@ static int CpuClusterMap(int* coreCluster, int* coreIndexInCluster) {
     return total;
 }
 
-// v2.4.6: number of clusters in the layout string. "1+2+2+3" -> 4 clusters.
 static int CpuClusterCount() {
     const char* s = CpuSpoofClusters();
     if (!s || !*s) return 0;
@@ -428,10 +425,6 @@ static int CpuClusterCount() {
     return count;
 }
 
-// v2.4.6: is this path a cpufreq/policyN directory that must NOT exist?
-// DevCheck enumerates policy dirs to determine the cluster count. On the
-// emulator every CPU has its own policy dir, so without hiding policy4..N
-// DevCheck sees one cluster per core.
 static bool IsHiddenPolicyPath(const char* path) {
     if (!CpuSpoofActive() || !path) return false;
     static const char kPre[] = "/sys/devices/system/cpu/cpufreq/policy";
@@ -445,15 +438,12 @@ static bool IsHiddenPolicyPath(const char* path) {
         hasN = true;
     }
     if (!hasN) return false;
-    // Match the policy dir itself or any file inside it - but NOT names like
-    // "policy0x" or "policy0_alt".
     if (*p != '\0' && *p != '/') return false;
     int clusterCount = CpuClusterCount();
     if (clusterCount <= 0) return false;
     return n >= clusterCount;
 }
 
-// v2.4.6: same test for a dirent name (no leading path).
 static bool IsHiddenPolicyDirEntry(const char* name) {
     if (!name || strncmp(name, "policy", 6) != 0) return false;
     const char* p = name + 6;
@@ -525,9 +515,6 @@ static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
     } else if (strcmp(leaf, "cpuinfo_max_freq") == 0 || strcmp(leaf, "scaling_max_freq") == 0) {
         v = CpuSpoofMaxKHz();
     } else if (strcmp(leaf, "scaling_cur_freq") == 0) {
-        // v2.4.6: DevCheck polls this per-core and uses it (with max freq)
-        // to render the live cluster view. Report a value inside the
-        // cluster's range so higher clusters do not appear idle.
         v = (CpuSpoofMinKHz() + CpuSpoofMaxKHz()) / 2;
     } else {
         return false;
@@ -558,9 +545,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
 
     static const char kCpuRoot[] = "/sys/devices/system/cpu/";
 
-    // --- cpufreq/policyN/{affected,related}_cpus ----------------------------
-    // v2.4.6: policyN is the CLUSTER index, not a CPU index. On a real device
-    // policy0 contains the first cluster's members, policy1 the second's, ...
     {
         static const char kPolicy[] = "/sys/devices/system/cpu/cpufreq/policy";
         if (strncmp(path, kPolicy, sizeof(kPolicy) - 1) == 0) {
@@ -583,7 +567,6 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
         }
     }
 
-    // --- cpuN/... -----------------------------------------------------------
     if (strncmp(path, kCpuRoot, sizeof(kCpuRoot) - 1) != 0) return false;
     const char* p = path + sizeof(kCpuRoot) - 1;
     int core = 0;
@@ -658,9 +641,173 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// v2.4.7: GPU sysfs mirrors.
+//
+// DevCheck reads GPU physical data from three families of paths:
+//   /sys/class/kgsl/kgsl-3d0/*            (Adreno / Qualcomm driver)
+//   /sys/class/devfreq/*/*                (generic governor interface)
+//   /sys/devices/platform/*.mali/*        (Mali driver)
+// The emulator exposes fake values in all of them, so DevCheck aborts
+// the "cores / L2 / arch" reconciliation. Serving the spoofed GPU's
+// real clock range and model string makes those rows populate.
+//
+// The "cores" and "L2" values are NOT sysfs-derived on real devices -
+// they come through /dev/mali0 ioctl and Vulkan driverInfo. The ioctl
+// path is not covered (see note at bottom); the Vulkan driverInfo
+// already carries both from v2.4.5.
+// ---------------------------------------------------------------------------
+
+static bool GpuSysfsSpoofValue(const char* path, char* out, size_t cap) {
+    if (!GpuSpoofActive() || path == nullptr) return false;
+
+    int maxKHz = GpuSpoofMaxFreqKHz();
+    int minKHz = GpuSpoofMinFreqKHz();
+    if (maxKHz <= 0) maxKHz = 1000000;
+    if (minKHz <= 0) minKHz = 200000;
+
+    // --- Qualcomm kgsl-3d0 ----------------------------------------------
+    // max_gpuclk: Hz.
+    if (strstr(path, "kgsl-3d0/max_gpuclk") != nullptr) {
+        snprintf(out, cap, "%d\n", maxKHz * 1000);
+        return true;
+    }
+    // gpu_available_frequencies: space-separated Hz list.
+    if (strstr(path, "gpu_available_frequencies") != nullptr) {
+        int span = maxKHz - minKHz;
+        int step = span > 0 ? span / 3 : 1;
+        snprintf(out, cap, "%d %d %d %d\n",
+                 minKHz * 1000,
+                 (minKHz + step) * 1000,
+                 (minKHz + 2 * step) * 1000,
+                 maxKHz * 1000);
+        return true;
+    }
+    // gpu_model / gpu_name: the raw Vulkan device name (no ANGLE wrapper).
+    if (strstr(path, "kgsl-3d0/gpu_model") != nullptr ||
+        strstr(path, "kgsl-3d0/gpu_name") != nullptr) {
+        snprintf(out, cap, "%s\n", GpuSpoofVkDeviceName().c_str());
+        return true;
+    }
+    // max_pwrlevel / min_pwrlevel / num_pwrlevels: keep driver metadata
+    // internally consistent with the number of freq steps we serve.
+    if (strstr(path, "kgsl-3d0/max_pwrlevel") != nullptr) {
+        snprintf(out, cap, "0\n");
+        return true;
+    }
+    if (strstr(path, "kgsl-3d0/min_pwrlevel") != nullptr) {
+        snprintf(out, cap, "3\n");
+        return true;
+    }
+    if (strstr(path, "kgsl-3d0/num_pwrlevels") != nullptr) {
+        snprintf(out, cap, "4\n");
+        return true;
+    }
+    if (strstr(path, "kgsl-3d0/gpu_busy_percentage") != nullptr) {
+        snprintf(out, cap, "0 %%\n");
+        return true;
+    }
+
+    // --- generic devfreq interface (governor paths) ---------------------
+    if (strstr(path, "/devfreq/") != nullptr) {
+        const char* slash = strrchr(path, '/');
+        if (!slash || slash[1] == '\0') return false;
+        const char* leaf = slash + 1;
+        if (strcmp(leaf, "max_freq") == 0) {
+            snprintf(out, cap, "%d\n", maxKHz * 1000);
+            return true;
+        }
+        if (strcmp(leaf, "min_freq") == 0) {
+            snprintf(out, cap, "%d\n", minKHz * 1000);
+            return true;
+        }
+        if (strcmp(leaf, "cur_freq") == 0) {
+            snprintf(out, cap, "%d\n", (maxKHz * 3 / 4) * 1000);
+            return true;
+        }
+        if (strcmp(leaf, "available_frequencies") == 0) {
+            int span = maxKHz - minKHz;
+            int step = span > 0 ? span / 3 : 1;
+            snprintf(out, cap, "%d %d %d %d\n",
+                     minKHz * 1000,
+                     (minKHz + step) * 1000,
+                     (minKHz + 2 * step) * 1000,
+                     maxKHz * 1000);
+            return true;
+        }
+        if (strcmp(leaf, "governor") == 0) {
+            snprintf(out, cap, "simple_ondemand\n");
+            return true;
+        }
+        if (strcmp(leaf, "available_governors") == 0) {
+            snprintf(out, cap, "simple_ondemand performance powersave\n");
+            return true;
+        }
+        if (strcmp(leaf, "polling_interval") == 0) {
+            snprintf(out, cap, "50\n");
+            return true;
+        }
+        if (strcmp(leaf, "trans_stat") == 0) {
+            snprintf(out, cap, "     From  :   To\n");
+            return true;
+        }
+    }
+
+    // --- Mali driver (Samsung Exynos) -----------------------------------
+    // Samsung exposes the GPU through /sys/devices/platform/*.mali/ and
+    // (for some kernels) /sys/class/misc/mali0/. These are typically only
+    // readable by the graphics group, but a few fields are world-readable.
+    if (strstr(path, ".mali/") != nullptr || strstr(path, "/mali0/") != nullptr) {
+        const char* slash = strrchr(path, '/');
+        if (!slash || slash[1] == '\0') return false;
+        const char* leaf = slash + 1;
+        if (strcmp(leaf, "gpu_model") == 0 || strcmp(leaf, "gpu_name") == 0) {
+            snprintf(out, cap, "%s\n", GpuSpoofVkDeviceName().c_str());
+            return true;
+        }
+        if (strcmp(leaf, "max_freq") == 0 || strcmp(leaf, "max_clock") == 0) {
+            snprintf(out, cap, "%d\n", maxKHz * 1000);
+            return true;
+        }
+        if (strcmp(leaf, "min_freq") == 0 || strcmp(leaf, "min_clock") == 0) {
+            snprintf(out, cap, "%d\n", minKHz * 1000);
+            return true;
+        }
+        if (strcmp(leaf, "available_frequencies") == 0) {
+            int span = maxKHz - minKHz;
+            int step = span > 0 ? span / 3 : 1;
+            snprintf(out, cap, "%d %d %d %d\n",
+                     minKHz * 1000,
+                     (minKHz + step) * 1000,
+                     (minKHz + 2 * step) * 1000,
+                     maxKHz * 1000);
+            return true;
+        }
+        if (strcmp(leaf, "num_cores") == 0 || strcmp(leaf, "core_count") == 0 ||
+            strcmp(leaf, "shader_cores") == 0) {
+            snprintf(out, cap, "%d\n", GpuSpoofCores());
+            return true;
+        }
+        if (strcmp(leaf, "l2_cache") == 0 || strcmp(leaf, "l2_size") == 0) {
+            snprintf(out, cap, "%d\n", GpuSpoofL2CacheKb());
+            return true;
+        }
+        if (strcmp(leaf, "architecture") == 0) {
+            snprintf(out, cap, "%s\n", GpuSpoofArch().c_str());
+            return true;
+        }
+        if (strcmp(leaf, "power_policy") == 0) {
+            snprintf(out, cap, "always_on\n");
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static long ServeSysfsSpoofFd(const char* path, int flags) {
-    if (!CpuSpoofActive() || path == nullptr) return -1;
-    if (strcmp(path, "/proc/cpuinfo") == 0) {
+    if (path == nullptr) return -1;
+    if (strcmp(path, "/proc/cpuinfo") == 0 && CpuSpoofActive()) {
         std::string raw;
         if (!ReadWholeFile(path, &raw)) return -1;
         std::string out;
@@ -669,11 +816,18 @@ static long ServeSysfsSpoofFd(const char* path, int flags) {
         if (mfd >= 0) Log("native: cpuinfo served (direct syscall)");
         return mfd;
     }
-    char val[64];
-    if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
-        CpuGovernorSpoofValue(path, val, sizeof(val)) ||
-        CpuTopologySpoofValue(path, val, sizeof(val))) {
-        return CreateMemfdWith(val, strlen(val), flags);
+    char val[128];
+    if (CpuSpoofActive()) {
+        if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
+            CpuGovernorSpoofValue(path, val, sizeof(val)) ||
+            CpuTopologySpoofValue(path, val, sizeof(val))) {
+            return CreateMemfdWith(val, strlen(val), flags);
+        }
+    }
+    if (GpuSpoofActive()) {
+        if (GpuSysfsSpoofValue(path, val, sizeof(val))) {
+            return CreateMemfdWith(val, strlen(val), flags);
+        }
     }
     return -1;
 }
@@ -681,7 +835,6 @@ static long ServeSysfsSpoofFd(const char* path, int flags) {
 static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
     SpecialAction sp = ResolveSpecial(path);
     if (sp == SpecialAction::None) {
-        // v2.4.6: hide non-existent policy dirs.
         if (IsHiddenPolicyPath(path)) {
             errno = ENOENT;
             *fdOut = -1;
@@ -709,11 +862,18 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
             *fdOut = mfd;
             return true;
         }
-        if (CpuSpoofActive() && (flags & O_ACCMODE) == O_RDONLY) {
-            char val[64];
-            if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
-                CpuGovernorSpoofValue(path, val, sizeof(val)) ||
-                CpuTopologySpoofValue(path, val, sizeof(val))) {
+        if ((flags & O_ACCMODE) == O_RDONLY) {
+            char val[128];
+            bool handled = false;
+            if (CpuSpoofActive()) {
+                handled = CpuFreqSpoofValue(path, val, sizeof(val)) ||
+                          CpuGovernorSpoofValue(path, val, sizeof(val)) ||
+                          CpuTopologySpoofValue(path, val, sizeof(val));
+            }
+            if (!handled && GpuSpoofActive()) {
+                handled = GpuSysfsSpoofValue(path, val, sizeof(val));
+            }
+            if (handled) {
                 int mfd = CreateMemfdWith(val, strlen(val), flags);
                 if (mfd >= 0) {
                     *fdOut = mfd;
@@ -1122,7 +1282,6 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
         auto* d = (PasLinuxDirent64*)p;
         size_t rl = d->d_reclen;
         if (rl < sizeof(PasLinuxDirent64) || p + rl > end) break;
-        // v2.4.6: also hide cpufreq/policyN entries beyond the cluster count.
         if (!IsHiddenIfaceName(d->d_name) && !IsHiddenPolicyDirEntry(d->d_name)) {
             if (out != p) memmove(out, p, rl);
             out += rl;
@@ -1181,10 +1340,6 @@ int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     }
     return BYTEHOOK_CALL_PREV(HideFStatAt, dirfd, path, buf, flags);
 }
-
-// ---------------------------------------------------------------------------
-// CPU: subprocess readers
-// ---------------------------------------------------------------------------
 
 static std::string g_fake_cpuinfo_path;
 static bool g_fake_cpuinfo_probed = false;
@@ -1419,7 +1574,7 @@ static long MySyscall(long number, ...) {
     }
 #endif
 #ifdef __NR_openat
-    if (CpuSpoofActive() && number == __NR_openat) {
+    if (number == __NR_openat) {
         const char* cpath = (const char*)a1;
         if (cpath != nullptr && (a2 & O_ACCMODE) == O_RDONLY) {
             long mfd = ServeSysfsSpoofFd(cpath, (int)a2);
@@ -1439,7 +1594,7 @@ static long MySyscall(long number, ...) {
             return -1;
         }
     }
-    if (CpuSpoofActive() && number == __NR_open) {
+    if (number == __NR_open) {
         const char* cpath = (const char*)a0;
         if (cpath != nullptr && (a1 & O_ACCMODE) == O_RDONLY) {
             long mfd = ServeSysfsSpoofFd(cpath, (int)a1);

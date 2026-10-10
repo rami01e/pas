@@ -10,8 +10,6 @@
 
 #include <string>
 
-// ---- LSPosed native module entry ABI (see LSPosed wiki "Native Hook") ----
-
 typedef int (*HookFunType)(void* func, void* replace, void** backup);
 typedef int (*UnhookFunType)(void* func);
 
@@ -24,8 +22,6 @@ typedef struct {
 } NativeAPIEntries;
 
 typedef NativeOnModuleLoaded (*NativeInit)(const NativeAPIEntries* entries);
-
-// ---- shared helpers ----
 
 namespace pas {
 
@@ -54,19 +50,21 @@ void StartInitWorker();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled);
 
-// CPU model / GPU (OpenGL + Vulkan) spoof
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
                   int maxKHz, const char* hwLine, const char* implementer,
                   const char* hardware);
 void SetCpuClusters(bool cpuOn, const char* clusters);
 
-// v2.4.5: GPU now carries core count / L2 cache / architecture.
+// v2.4.9: GPU config now also carries the EGL/Vulkan driver hint strings
+// (ro.hardware.egl / ro.hardware.vulkan equivalents) for the property mirrors.
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
                   const char* driverName, const char* driverInfo, const char* vkDeviceName,
-                  int gpuCores, int l2CacheKb, const char* gpuArch);
+                  int gpuCores, int l2CacheKb, const char* gpuArch,
+                  int gpuMinFreqKHz, int gpuMaxFreqKHz,
+                  const char* eglHardware, const char* vulkanHardware);
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
                    int driverId, bool descriptorIndexing, bool sparseBinding);
 
@@ -96,10 +94,14 @@ unsigned long long GpuSpoofApiVersion();
 std::string GpuSpoofDriverName();
 std::string GpuSpoofDriverInfo();
 
-// v2.4.5: physical GPU characteristics exposed to DevCheck-style readers.
 int GpuSpoofCores();
 int GpuSpoofL2CacheKb();
 std::string GpuSpoofArch();
+int GpuSpoofMinFreqKHz();
+int GpuSpoofMaxFreqKHz();
+// v2.4.9: driver hint values for ro.hardware.egl / ro.hardware.vulkan.
+std::string GpuSpoofEglHardware();
+std::string GpuSpoofVulkanHardware();
 
 void InstallGpuHooks();
 void InstallVulkanHooks();
