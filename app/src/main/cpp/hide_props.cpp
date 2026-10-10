@@ -105,22 +105,18 @@ static bool IsSpoofTarget(const char* name) {
     static const char* const kSoc[] = {
         "ro.soc.model",
         "ro.soc.manufacturer",
+        // v2.4.0: hardware family keys - real Samsung devices report the
+        // SoC platform here ("s5e9945" / "qcom" / "mt6769"), and integrity
+        // checks cross-read them against Build.HARDWARE.
         "ro.hardware",
         "ro.boot.hardware",
     };
-    // v2.4.9: GPU driver hints. ro.hardware.egl determines which
-    // libEGL_<value>.so the loader prefers; tools that identify the GPU
-    // vendor by name read this directly. ro.hardware.vulkan mirrors it for
-    // the Vulkan stack.
-    static const char* const kGpuDriver[] = {
-        "ro.hardware.egl",
-        "ro.hardware.vulkan",
-        "ro.board.platform",
-    };
+    // The SDK prop is only spoofed upward-safe: values below 35 break the
+    // WebView provider (see spoofcore J1 note), so the native layer falls
+    // back to the real value when the requested level is under the floor.
     if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0])) && g_sdk_val >= 35) return true;
     if (g_abi_on && NameIn(name, kAbi, sizeof(kAbi) / sizeof(kAbi[0]))) return true;
     if (CpuSpoofActive() && NameIn(name, kSoc, sizeof(kSoc) / sizeof(kSoc[0]))) return true;
-    if (GpuSpoofActive() && NameIn(name, kGpuDriver, sizeof(kGpuDriver) / sizeof(kGpuDriver[0]))) return true;
     return false;
 }
 
@@ -333,26 +329,6 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         // the platform; a wrong value there is worse than the host's own.
         if (strcmp(name, "ro.hardware") == 0 || strcmp(name, "ro.boot.hardware") == 0) {
             return SetStr(out, cap, outLen, CpuSpoofHardware().c_str());
-        }
-    }
-    if (GpuSpoofActive()) {
-        if (strcmp(name, "ro.hardware.egl") == 0) {
-            const std::string v = GpuSpoofEglHardware();
-            if (!v.empty()) return SetStr(out, cap, outLen, v.c_str());
-            return false;
-        }
-        if (strcmp(name, "ro.hardware.vulkan") == 0) {
-            const std::string v = GpuSpoofVulkanHardware();
-            if (!v.empty()) return SetStr(out, cap, outLen, v.c_str());
-            return false;
-        }
-        // ro.board.platform: some detectors read this (e.g. "kalama",
-        // "taro", "exynos2100"). Real Xclipse reports an Exynos codename,
-        // Adreno reports the Snapdragon codename.
-        if (strcmp(name, "ro.board.platform") == 0) {
-            const std::string v = GpuSpoofEglHardware();
-            if (!v.empty()) return SetStr(out, cap, outLen, v.c_str());
-            return false;
         }
     }
     return false;
