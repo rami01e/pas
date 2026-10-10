@@ -341,6 +341,19 @@ object DeviceCatalog {
             clusters = "2+6"
         ),
         Cpu(
+            display = "MediaTek Helio G90",
+            manufacturer = "MediaTek",
+            socModel = "MT6785",
+            part = "0xd0b",
+            implementer = "0x41",
+            cpuinfoModel = AARCH64_MODEL,
+            features = FEATURES_ARM64,
+            hardware = "mt6785",
+            minKHz = 300000,
+            maxKHz = 2050000,
+            clusters = "2+6"
+        ),
+        Cpu(
             display = "MediaTek Dimensity 6300",
             manufacturer = "MediaTek",
             socModel = "MT6835",
