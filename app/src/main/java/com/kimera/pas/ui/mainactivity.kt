@@ -1532,36 +1532,138 @@ class MainActivity : Activity() {
             return
         }
         refreshScopeChip()
-        val builder = AlertDialog.Builder(this)
-            .setTitle("Module scope (${scope.size})")
-            .setPositiveButton("Add apps\u2026") { _, _ -> openAddAppsDialog() }
-            .setNegativeButton("Close", null)
-        if (scope.isNotEmpty()) {
-            builder.setSingleChoiceItems(scope.toTypedArray(), -1) { d, which ->
-                d.dismiss()
-                confirmRemove(scope[which])
-            }
-        } else {
-            builder.setMessage("Scope is empty. Use Add apps\u2026 to pick target apps.")
+        if (scope.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle("Module scope (0)")
+                .setMessage("Scope is empty. Use Add apps\u2026 to pick target apps.")
+                .setPositiveButton("Add apps\u2026") { _, _ -> openAddAppsDialog() }
+                .setNegativeButton("Close", null)
+                .show()
+            return
         }
-        builder.show()
+        showScopeListDialog()
     }
 
-    private fun confirmRemove(pkg: String) {
-        AlertDialog.Builder(this)
-            .setTitle("Remove from scope?")
-            .setMessage(pkg)
-            .setPositiveButton("Remove") { _, _ ->
-                Thread {
-                    val ok = SpoofSettings.removeScope(listOf(pkg))
-                    runOnUiThread {
-                        toast(if (ok) "Removed from scope: $pkg" else "Remove failed")
-                        refreshScopeChip()
+    /**
+     * v2.4.10: scope viewer with an inline search bar. Filtering happens on
+     * every keystroke (case-insensitive substring match on the package name).
+     * Tapping a row opens the confirm-remove dialog; on success the search
+     * dialog is closed and reopened so its title count and list reflect the
+     * framework-side change.
+     */
+    private fun showScopeListDialog() {
+        val scope = SpoofSettings.scopePackages() ?: return
+        if (scope.isEmpty()) return
+
+        val search = EditText(this).apply {
+            hint = "Search scoped packages\u2026"
+            setSingleLine(true)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+            setTextColor(cText)
+            setHintTextColor(cText3)
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        val filtered = ArrayList<String>()
+        val listView = ListView(this)
+        val adapter = object : BaseAdapter() {
+            override fun getCount(): Int = filtered.size
+            override fun getItem(position: Int): Any = filtered[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val pkg = filtered[position]
+                val row = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(dp(14), dp(10), dp(14), dp(10))
+                }
+                row.addView(
+                    TextView(this@MainActivity).apply {
+                        text = pkg
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+                        setTextColor(cText)
+                        typeface = Typeface.MONOSPACE
                     }
-                }.start()
+                )
+                row.addView(
+                    TextView(this@MainActivity).apply {
+                        text = "Tap to remove"
+                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+                        setTextColor(cText3)
+                        setPadding(0, dp(3), 0, 0)
+                    }
+                )
+                return row
             }
-            .setNegativeButton("Cancel", null)
-            .show()
+        }
+        listView.adapter = adapter
+
+        fun refilter(q: String) {
+            filtered.clear()
+            val qq = q.trim().lowercase()
+            if (qq.isEmpty()) {
+                filtered.addAll(scope)
+            } else {
+                for (p in scope) {
+                    if (p.lowercase().contains(qq)) filtered.add(p)
+                }
+            }
+            adapter.notifyDataSetChanged()
+        }
+        refilter("")
+        search.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                refilter(s?.toString() ?: "")
+            }
+        })
+
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        box.addView(
+            search,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+        box.addView(
+            listView,
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(400))
+        )
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("Module scope (${scope.size})")
+            .setView(box)
+            .setPositiveButton("Add apps\u2026") { _, _ -> openAddAppsDialog() }
+            .setNegativeButton("Close", null)
+            .create()
+
+        listView.setOnItemClickListener { _, _, position, _ ->
+            val pkg = filtered.getOrNull(position) ?: return@setOnItemClickListener
+            AlertDialog.Builder(this)
+                .setTitle("Remove from scope?")
+                .setMessage(pkg)
+                .setPositiveButton("Remove") { _, _ ->
+                    Thread {
+                        val ok = SpoofSettings.removeScope(listOf(pkg))
+                        runOnUiThread {
+                            toast(if (ok) "Removed from scope: $pkg" else "Remove failed")
+                            refreshScopeChip()
+                            if (ok) {
+                                dialog.dismiss()
+                                // Give the framework a beat to persist the new
+                                // scope before we re-query it for the reopened
+                                // dialog.
+                                ui.postDelayed({ showScopeListDialog() }, 250)
+                            }
+                        }
+                    }.start()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+
+        dialog.show()
     }
 
     private data class AppEntry(val label: String, val pkg: String, val system: Boolean)
