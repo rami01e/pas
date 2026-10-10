@@ -10,8 +10,6 @@
 
 #include <string>
 
-// ---- LSPosed native module entry ABI (see LSPosed wiki "Native Hook") ----
-
 typedef int (*HookFunType)(void* func, void* replace, void** backup);
 typedef int (*UnhookFunType)(void* func);
 
@@ -24,8 +22,6 @@ typedef struct {
 } NativeAPIEntries;
 
 typedef NativeOnModuleLoaded (*NativeInit)(const NativeAPIEntries* entries);
-
-// ---- shared helpers ----
 
 namespace pas {
 
@@ -54,19 +50,19 @@ void StartInitWorker();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled);
 
-// CPU model / GPU (OpenGL + Vulkan) spoof
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
                   int maxKHz, const char* hwLine, const char* implementer,
                   const char* hardware);
 void SetCpuClusters(bool cpuOn, const char* clusters);
 
-// v2.4.5: GPU now carries core count / L2 cache / architecture.
+// v2.4.7: GPU config carries min/max clock range for the sysfs mirrors.
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
                   unsigned long long vendorId, unsigned long long deviceId,
                   unsigned long long driverVersion, unsigned long long apiVersion,
                   const char* driverName, const char* driverInfo, const char* vkDeviceName,
-                  int gpuCores, int l2CacheKb, const char* gpuArch);
+                  int gpuCores, int l2CacheKb, const char* gpuArch,
+                  int gpuMinFreqKHz, int gpuMaxFreqKHz);
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
                    int driverId, bool descriptorIndexing, bool sparseBinding);
 
@@ -96,10 +92,12 @@ unsigned long long GpuSpoofApiVersion();
 std::string GpuSpoofDriverName();
 std::string GpuSpoofDriverInfo();
 
-// v2.4.5: physical GPU characteristics exposed to DevCheck-style readers.
 int GpuSpoofCores();
 int GpuSpoofL2CacheKb();
 std::string GpuSpoofArch();
+// v2.4.7: physical clock range (kHz) for the sysfs mirrors.
+int GpuSpoofMinFreqKHz();
+int GpuSpoofMaxFreqKHz();
 
 void InstallGpuHooks();
 void InstallVulkanHooks();

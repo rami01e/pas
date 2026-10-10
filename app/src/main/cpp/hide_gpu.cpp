@@ -1,8 +1,7 @@
 // CPU model / GPU (OpenGL) spoof for the scoped process.
 //
-// v2.4.5: GPU now carries core count, L2 cache and architecture so that
-// DevCheck's Mali probe (which reads gpuinfo / core_mask / sysfs) sees a
-// coherent device instead of only a name string.
+// v2.4.7: GPU now carries a min/max clock range (kHz). The GL/Vulkan
+// identity is unchanged.
 
 #include "pas.h"
 
@@ -44,10 +43,12 @@ static volatile unsigned long long g_gpu_driver_version = 0;
 static volatile unsigned long long g_gpu_api_version = 0;
 static char g_gpu_driver_name[192] = {0};
 static char g_gpu_driver_info[256] = {0};
-// v2.4.5: physical characteristics DevCheck probes for Mali GPUs.
 static volatile int g_gpu_cores = 1;
 static volatile int g_gpu_l2_cache_kb = 64;
 static char g_gpu_arch[32] = {0};
+// v2.4.7: GPU clock range for the sysfs mirrors.
+static volatile int g_gpu_min_freq_khz = 200000;
+static volatile int g_gpu_max_freq_khz = 1000000;
 
 static void CopyStr(char* dst, size_t cap, const char* src) {
     snprintf(dst, cap, "%s", src ? src : "");
@@ -93,7 +94,7 @@ void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const ch
                   unsigned long long driverVersion, unsigned long long apiVersion,
                   const char* driverName, const char* driverInfo,
                   const char* vkDeviceName, int gpuCores, int l2CacheKb,
-                  const char* gpuArch) {
+                  const char* gpuArch, int gpuMinFreqKHz, int gpuMaxFreqKHz) {
     g_gpu_on = false;
     CopyStr(g_gpu_vendor, sizeof(g_gpu_vendor), vendor);
     CopyStr(g_gpu_renderer, sizeof(g_gpu_renderer), renderer);
@@ -112,10 +113,12 @@ void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const ch
     g_gpu_cores = gpuCores > 0 ? gpuCores : 1;
     g_gpu_l2_cache_kb = l2CacheKb > 0 ? l2CacheKb : 64;
     CopyStr(g_gpu_arch, sizeof(g_gpu_arch), gpuArch);
+    if (gpuMinFreqKHz > 0) g_gpu_min_freq_khz = gpuMinFreqKHz;
+    if (gpuMaxFreqKHz > 0) g_gpu_max_freq_khz = gpuMaxFreqKHz;
     g_gpu_on = gpuOn && g_gpu_renderer[0] != '\0';
-    Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx cores=%d l2=%dkB arch=%s",
+    Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx cores=%d l2=%dkB arch=%s khz=%d-%d",
         (int)g_gpu_on, g_gpu_renderer, g_gpu_vendor_id, g_gpu_device_id, g_gpu_cores,
-        g_gpu_l2_cache_kb, g_gpu_arch);
+        g_gpu_l2_cache_kb, g_gpu_arch, (int)g_gpu_min_freq_khz, (int)g_gpu_max_freq_khz);
 }
 
 bool CpuSpoofActive() {
@@ -158,10 +161,11 @@ unsigned long long GpuSpoofApiVersion() { return g_gpu_api_version; }
 std::string GpuSpoofDriverName() { return std::string(g_gpu_driver_name); }
 std::string GpuSpoofDriverInfo() { return std::string(g_gpu_driver_info); }
 
-// v2.4.5: physical characteristics for the DevCheck Mali probe.
 int GpuSpoofCores() { return g_gpu_cores; }
 int GpuSpoofL2CacheKb() { return g_gpu_l2_cache_kb; }
 std::string GpuSpoofArch() { return std::string(g_gpu_arch[0] != '\0' ? g_gpu_arch : "Bifrost"); }
+int GpuSpoofMinFreqKHz() { return g_gpu_min_freq_khz; }
+int GpuSpoofMaxFreqKHz() { return g_gpu_max_freq_khz; }
 
 typedef void* (*PasEglGpaFn)(const char*);
 typedef const unsigned char* (*PasGlGetStringFn)(unsigned int);
@@ -512,7 +516,8 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
                                                          jstring driverName, jstring driverInfo,
                                                          jstring vkDeviceName,
                                                          jint gpuCores, jint l2CacheKb,
-                                                         jstring gpuArch) {
+                                                         jstring gpuArch,
+                                                         jint gpuMinFreqKHz, jint gpuMaxFreqKHz) {
     (void)thiz;
     auto toStr = [env](jstring s) -> std::string {
         if (!s) return std::string();
@@ -532,7 +537,8 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetGpu(JNIEnv* env, jobject thiz,
                       (unsigned long long)vendorId, (unsigned long long)deviceId,
                       (unsigned long long)driverVersion, (unsigned long long)apiVersion,
                       dName.c_str(), dInfo.c_str(), vkName.c_str(),
-                      (int)gpuCores, (int)l2CacheKb, arch.c_str());
+                      (int)gpuCores, (int)l2CacheKb, arch.c_str(),
+                      (int)gpuMinFreqKHz, (int)gpuMaxFreqKHz);
 }
 
 extern "C" JNIEXPORT void JNICALL

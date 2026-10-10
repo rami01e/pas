@@ -6,12 +6,6 @@ import android.util.Log
 import io.github.libxposed.api.XposedModule
 import java.lang.reflect.Field
 
-/**
- * Per-app SDK / ABI spoof for the scoped process.
- *
- * v2.4.5: GPU profile now carries core count, L2 cache and architecture so
- * DevCheck's Mali probe sees a fully coherent device.
- */
 object SpoofCore {
 
     private const val TAG = "PerAppSpoofer"
@@ -43,7 +37,7 @@ object SpoofCore {
 
     external fun nativeSetCpuClusters(cpuOn: Boolean, clusters: String)
 
-    // v2.4.5: GPU now carries core count / L2 cache / architecture.
+    // v2.4.7: GPU now carries min/max clock range (kHz).
     external fun nativeSetGpu(
         gpuOn: Boolean,
         gpuVendor: String,
@@ -58,7 +52,9 @@ object SpoofCore {
         gpuVkDeviceName: String,
         gpuCores: Int,
         l2CacheKb: Int,
-        gpuArch: String
+        gpuArch: String,
+        gpuMinFreqKHz: Int,
+        gpuMaxFreqKHz: Int
     )
 
     external fun nativeSetGpuProfile(
@@ -219,14 +215,15 @@ object SpoofCore {
         runCatching {
             nativeSetCpuClusters(cpuOn = cpuOnEff, clusters = cpuEntry.clusters)
         }
-        // v2.4.5: pass the new GPU physical-characteristics fields.
+        // v2.4.7: pass the min/max GPU clock range.
         runCatching {
             nativeSetGpu(
                 gpuOnEff, gpuEntry.vendor, gpuEntry.renderer, gpuEntry.glVersion,
                 gpuEntry.vendorId, gpuEntry.deviceId, gpuEntry.driverVersion,
                 gpuEntry.apiVersion, gpuEntry.driverName, gpuEntry.driverInfo,
                 gpuEntry.vkDeviceName,
-                gpuEntry.gpuCores, gpuEntry.l2CacheKb, gpuEntry.gpuArch
+                gpuEntry.gpuCores, gpuEntry.l2CacheKb, gpuEntry.gpuArch,
+                gpuEntry.gpuMinFreqKHz, gpuEntry.gpuMaxFreqKHz
             )
         }
         runCatching {
