@@ -161,6 +161,18 @@ object DeviceCatalog {
             clusters = "1+3+4"
         ),
         Cpu(
+            display = "Samsung Exynos 2100",
+            manufacturer = "Samsung",
+            socModel = "EXYNOS2100",
+            part = "0xd48",
+            cpuinfoModel = AARCH64_MODEL,
+            features = FEATURES_ARM64,
+            hardware = "exynos2100",
+            minKHz = 400000,
+            maxKHz = 2912000,
+            clusters = "1+3+4"
+        ),
+        Cpu(
             display = "Samsung Exynos 2200",
             manufacturer = "Samsung",
             socModel = "S5E9925",
