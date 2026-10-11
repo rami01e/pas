@@ -94,10 +94,10 @@ object DeviceCatalog {
             implementer = "0x41",
             cpuinfoModel = "ARMv8 Processor rev 1 (v8)",
             features = FEATURES_ARM32,
-            hardware = "exynos850",
+            hardware = "s5e3830",
             minKHz = 546000,
             maxKHz = 2002000,
-            hardwareLine = "exynos850 (Samsung A13 EUR OPEN REV02B board based on EXYNOS850)",
+            //  hardwareLine = "exynos850 (Samsung A13 EUR OPEN REV02B board based on EXYNOS850)",
             clusters = "4+4"
         ),
         Cpu(
@@ -110,7 +110,7 @@ object DeviceCatalog {
             hardware = "s5e8825",
             minKHz = 300000,
             maxKHz = 2400000,
-            clusters = "1+3+4"
+            clusters = "2+6"
         ),
         Cpu(
             display = "Samsung Exynos 1330",
@@ -122,7 +122,7 @@ object DeviceCatalog {
             hardware = "s5e8535",
             minKHz = 300000,
             maxKHz = 2400000,
-            clusters = "1+3+4"
+            clusters = "2+6"
         ),
         Cpu(
             display = "Samsung Exynos 1380",
@@ -134,7 +134,7 @@ object DeviceCatalog {
             hardware = "s5e8835",
             minKHz = 300000,
             maxKHz = 2400000,
-            clusters = "1+3+4"
+            clusters = "4+4"
         ),
         Cpu(
             display = "Samsung Exynos 1480",
@@ -499,7 +499,7 @@ object DeviceCatalog {
 
     val GPUS = listOf(
         mali("Mali-G52", 0x72120000L, MALI_INFO_G52, descriptorIndexing = false,
-             gpuCores = 2, l2CacheKb = 64, gpuArch = "Bifrost"),
+             gpuCores = 1, l2CacheKb = 64, gpuArch = "Bifrost"),
         mali("Mali-G52 MC2", 0x74021000L, MALI_INFO_G52, descriptorIndexing = false,
              gpuCores = 2, l2CacheKb = 64, gpuArch = "Bifrost"),
         mali("Mali-G57 MC2", 0x90930010L, gpuCores = 2, l2CacheKb = 64, gpuArch = "Valhall"),
