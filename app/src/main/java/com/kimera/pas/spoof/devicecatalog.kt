@@ -209,7 +209,7 @@ object DeviceCatalog {
             clusters = "1+3+6"
         ),
         Cpu(
-            display = "Samsung Exynos 8865",
+            display = "Samsung Exynos 8865/1680",
             manufacturer = "Samsung",
             socModel = "S5E8865",
             part = "0xd81",
@@ -366,6 +366,19 @@ object DeviceCatalog {
             minKHz = 300000,
             maxKHz = 2050000,
             clusters = "2+6"
+        ),
+        Cpu(
+            display = "MediaTek Helio G99",
+            manufacturer = "MediaTek",
+            socModel = "MT6789",
+            part = "0xd0b",
+            implementer = "0x41",
+            cpuinfoModel = AARCH64_MODEL,
+            features = FEATURES_ARM64,
+            hardware = "mt6789",
+            minKHz = 300000,
+            maxKHz = 2050000,
+            clusters = "6+2"
         ),
         Cpu(
             display = "MediaTek Dimensity 6300",
