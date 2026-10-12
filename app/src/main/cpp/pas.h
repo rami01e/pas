@@ -59,7 +59,7 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,
                   int maxKHz, const char* hwLine, const char* implementer,
                   const char* hardware);
-void SetCpuClusters(bool cpuOn, const char* clusters);
+void SetCpuClusters(bool cpuOn, const char* clusters, const char* clusterSpec);
 
 // v2.4.5: GPU now carries core count / L2 cache / architecture.
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
@@ -83,6 +83,25 @@ std::string CpuSpoofFeatures();
 std::string CpuSpoofHwLine();
 int CpuSpoofMinKHz();
 int CpuSpoofMaxKHz();
+
+// v2.5.9: per-cluster table parsed from the catalog clusterSpec string.
+// Accessors take the core's global index; values fall back to the SoC-wide
+// part / freq range when no spec (or index out of range) is available.
+struct PasCpuCluster {
+    int cores;      // number of cores in this cluster
+    int totalBefore; // global index of the cluster's first core
+    char part[16];  // "0xd4e" style CPU part id
+    int minKHz;
+    int maxKHz;
+    char revision[16]; // "r1p1" style ARM revision
+};
+int CpuClusterTableSize();
+const PasCpuCluster* CpuClusterTable();
+const PasCpuCluster* CpuClusterForCore(int core, int* coreIndexInCluster);
+const char* CpuSpoofClusterPart(int core);
+int CpuSpoofClusterMinKHz(int core);
+int CpuSpoofClusterMaxKHz(int core);
+const char* CpuSpoofClusterRevision(int core);
 
 bool GpuSpoofActive();
 std::string GpuSpoofVendor();

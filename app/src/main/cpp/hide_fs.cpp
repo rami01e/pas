@@ -283,6 +283,19 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
     const std::string features = CpuSpoofFeatures();
     const std::string part = CpuSpoofPart();
     const std::string implementer = CpuSpoofImplementer();
+    // v2.5.9: parse the ARM revision from a "rXpY" string. Variant is the hex
+    // nibble after 'r' (cpuinfo "CPU variant"), patch the decimal after 'p'
+    // (cpuinfo "CPU revision").
+    auto revVariant = [](const char* rev) -> int {
+        if (!rev || *rev != 'r') return -1;
+        return (int)strtol(rev + 1, nullptr, 16);
+    };
+    auto revPatch = [](const char* rev) -> int {
+        if (!rev) return -1;
+        const char* p = strchr(rev, 'p');
+        if (!p) return -1;
+        return (int)strtol(p + 1, nullptr, 10);
+    };
     size_t first = std::string::npos;
     {
         size_t p = 0;
@@ -301,6 +314,60 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
         return;
     }
     out->append(raw, 0, first);
+    if (CpuClusterTableSize() > 0) {
+        // v2.5.9: synthesize exactly the spoofed core count, each block
+        // carrying its own cluster's CPU part / variant / revision from the
+        // catalog cluster spec. The host layout is ignored entirely - an
+        // emulator or a different SoC can never leak through.
+        int total = 0;
+        for (int i = 0; i < CpuClusterTableSize(); i++) {
+            total += CpuClusterTable()[i].cores;
+        }
+        // Keep in sync with PAS_CPU_MAX_CORES below: topology and cpuinfo
+        // must agree on the visible core count.
+        if (total > 16) total = 16;
+        char tmp[64];
+        for (int core = 0; core < total; core++) {
+            const PasCpuCluster* cl = CpuClusterForCore(core, nullptr);
+            const char* cpart = (cl && cl->part[0] != '\0') ? cl->part : part.c_str();
+            const char* crev = cl ? cl->revision : "";
+            int variant = revVariant(crev);
+            int revision = revPatch(crev);
+            snprintf(tmp, sizeof(tmp), "%d", core);
+            out->append("processor\t: ");
+            out->append(tmp);
+            out->push_back('\n');
+            out->append("model name\t: ");
+            out->append(model);
+            out->push_back('\n');
+            out->append("BogoMIPS\t: 52.00\n");
+            out->append("Features\t: ");
+            out->append(features);
+            out->push_back('\n');
+            out->append("CPU implementer\t: ");
+            out->append(implementer);
+            out->push_back('\n');
+            out->append("CPU architecture\t: 8\n");
+            if (variant >= 0) {
+                snprintf(tmp, sizeof(tmp), "CPU variant\t: 0x%x\n", variant);
+                out->append(tmp);
+            } else {
+                out->append("CPU variant\t: 0x0\n");
+            }
+            out->append("CPU part\t: ");
+            out->append(cpart);
+            out->push_back('\n');
+            if (revision >= 0) {
+                snprintf(tmp, sizeof(tmp), "CPU revision\t: %d\n", revision);
+                out->append(tmp);
+            } else {
+                out->append("CPU revision\t: 1\n");
+            }
+            // blank line between core blocks; the Hardware trailer below adds
+            // its own leading newline after the last block.
+            if (core + 1 < total) out->push_back('\n');
+        }
+    } else {
     size_t p = first;
     while (p < raw.size()) {
         size_t e = raw.find('\n', p);
@@ -368,6 +435,7 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
             p = e2;
         }
     }
+    }  // v2.5.9: end of legacy per-block rewrite fallback
     const std::string hwLine = CpuSpoofHwLine();
     if (CpuSpoofActive() && !hwLine.empty()) {
         out->push_back('\n');
@@ -519,16 +587,60 @@ static bool CpuFreqSpoofValue(const char* path, char* out, size_t cap) {
     const char* slash = strrchr(path, '/');
     if (!slash || slash[1] == '\0') return false;
     const char* leaf = slash + 1;
+    // v2.5.9: resolve the cluster for this path so each cluster reports its
+    // own frequency range. /sys/.../cpuN/cpufreq -> core N's cluster;
+    // /sys/.../cpufreq/policyN -> cluster N by table order. Falls back to the
+    // SoC-wide range when no cluster spec covers the index.
+    int core = -1;
+    {
+        static const char kCpuPre[] = "/sys/devices/system/cpu/cpu";
+        const char* cp = strstr(path, kCpuPre);
+        if (cp != nullptr) {
+            const char* q = cp + sizeof(kCpuPre) - 1;
+            if (*q >= '0' && *q <= '9') {
+                int n = 0;
+                while (*q >= '0' && *q <= '9') n = n * 10 + (*q++ - '0');
+                if (*q == '/') core = n;
+            }
+        }
+    }
+    int minV = CpuSpoofMinKHz();
+    int maxV = CpuSpoofMaxKHz();
+    if (core >= 0) {
+        int cmin = CpuSpoofClusterMinKHz(core);
+        int cmax = CpuSpoofClusterMaxKHz(core);
+        if (cmin > 0) minV = cmin;
+        if (cmax > 0) maxV = cmax;
+    } else {
+        static const char kPolicyPre[] = "/sys/devices/system/cpu/cpufreq/policy";
+        const char* pp = strstr(path, kPolicyPre);
+        if (pp != nullptr) {
+            const char* q = pp + sizeof(kPolicyPre) - 1;
+            if (*q >= '0' && *q <= '9') {
+                int pol = 0;
+                while (*q >= '0' && *q <= '9') pol = pol * 10 + (*q++ - '0');
+                if (*q == '/' || *q == '\0') {
+                    // walk the cluster table in order: policyN is cluster N
+                    const PasCpuCluster* tbl = CpuClusterTable();
+                    int nClusters = CpuClusterTableSize();
+                    if (pol >= 0 && pol < nClusters && tbl[pol].minKHz > 0) {
+                        minV = tbl[pol].minKHz;
+                        maxV = tbl[pol].maxKHz;
+                    }
+                }
+            }
+        }
+    }
     int v;
     if (strcmp(leaf, "cpuinfo_min_freq") == 0 || strcmp(leaf, "scaling_min_freq") == 0) {
-        v = CpuSpoofMinKHz();
+        v = minV;
     } else if (strcmp(leaf, "cpuinfo_max_freq") == 0 || strcmp(leaf, "scaling_max_freq") == 0) {
-        v = CpuSpoofMaxKHz();
+        v = maxV;
     } else if (strcmp(leaf, "scaling_cur_freq") == 0) {
         // v2.4.6: DevCheck polls this per-core and uses it (with max freq)
         // to render the live cluster view. Report a value inside the
         // cluster's range so higher clusters do not appear idle.
-        v = (CpuSpoofMinKHz() + CpuSpoofMaxKHz()) / 2;
+        v = (minV + maxV) / 2;
     } else {
         return false;
     }

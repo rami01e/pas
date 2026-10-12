@@ -38,6 +38,25 @@ object DeviceCatalog {
 
     private const val AARCH64_MODEL = "AArch64 Processor rev 14 (aarch64)"
 
+    /**
+     * Per-cluster CPU data (deviceinfohw.ru CLUSTERS / FAMILY / REVISION style).
+     *
+     * cores      - number of cores in this cluster
+     * part       - CPU part id from /proc/cpuinfo (e.g. "0xd4e" for A78)
+     * minKHz/maxKHz - cluster frequency range from CLOCK_SPEED
+     * revision   - ARM rXpY revision as reported by REVISION, e.g. "r1p1"
+     * name       - optional core family label (Cortex-A78, X2, ...), unused
+     *              natively but kept so future tools can display it
+     */
+    data class CoreCluster(
+        val cores: Int,
+        val part: String,
+        val minKHz: Int,
+        val maxKHz: Int,
+        val revision: String = "r1p1",
+        val name: String = ""
+    )
+
     data class Cpu(
         val display: String,
         val manufacturer: String,
@@ -50,7 +69,11 @@ object DeviceCatalog {
         val minKHz: Int,
         val maxKHz: Int,
         val hardwareLine: String = "",
-        val clusters: String = "4+4"
+        val clusters: String = "4+4",
+        // v2.5.9: explicit per-cluster data. When empty it is synthesized from
+        // `clusters` + the SoC-wide part / freq range so every existing entry
+        // keeps its old behavior.
+        val clusterList: List<CoreCluster> = emptyList()
     )
 
     data class Gpu(
@@ -110,7 +133,30 @@ object DeviceCatalog {
             hardware = "s5e8825",
             minKHz = 300000,
             maxKHz = 2400000,
-            clusters = "2+6"
+            clusters = "2+6",
+            // deviceinfohw.ru item 126633 (SM-A256E / a25x):
+            // FAMILY  Cortex-A78 Cortex-A55
+            // CLUSTERS 2 x 2.40 GHz 6 x 2.00 GHz
+            // REVISION r1p1 r2p0
+            // CLOCK_SPEED 533 - 2400 MHz
+            clusterList = listOf(
+                CoreCluster(
+                    cores = 2,
+                    part = "0xd4e",
+                    minKHz = 533000,
+                    maxKHz = 2400000,
+                    revision = "r1p1",
+                    name = "Cortex-A78"
+                ),
+                CoreCluster(
+                    cores = 6,
+                    part = "0xd41",
+                    minKHz = 533000,
+                    maxKHz = 2000000,
+                    revision = "r2p0",
+                    name = "Cortex-A55"
+                )
+            )
         ),
         Cpu(
             display = "Samsung Exynos 1330",
@@ -621,4 +667,20 @@ object DeviceCatalog {
     fun cpu(display: String?): Cpu = CPUS.firstOrNull { it.display == display } ?: CPUS[0]
 
     fun gpu(renderer: String?): Gpu = GPUS.firstOrNull { it.renderer == renderer } ?: GPUS[0]
+
+    /**
+     * v2.5.9: compact per-cluster spec for the native layer, one segment per
+     * cluster, ';' separated:
+     *   cores:part:minKHz:maxKHz:revision
+     * e.g. Exynos 1280 -> "2:0xd4e:533000:2400000:r1p1;6:0xd41:533000:2000000:r2p0"
+     * Returns an empty string when the entry has no explicit clusterList; the
+     * native side then falls back to the legacy counts string + global part /
+     * freq values (identical to pre-2.5.9 behavior).
+     */
+    fun clusterSpec(c: Cpu): String {
+        if (c.clusterList.isEmpty()) return ""
+        return c.clusterList.joinToString(";") { cl ->
+            "${cl.cores}:${cl.part}:${cl.minKHz}:${cl.maxKHz}:${cl.revision}"
+        }
+    }
 }

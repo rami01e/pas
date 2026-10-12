@@ -28,6 +28,9 @@ static char g_cpu_features[256] = {0};
 static char g_cpu_hwline[256] = {0};
 static char g_cpu_hardware[64] = {0};
 static char g_cpu_clusters[32] = {0};
+// v2.5.9: parsed per-cluster table from the catalog clusterSpec string.
+static PasCpuCluster g_cpu_cluster_table[8] = {};
+static int g_cpu_cluster_count = 0;
 static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
 
@@ -79,13 +82,57 @@ void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* 
         (int)g_cpu_max_khz);
 }
 
-void SetCpuClusters(bool cpuOn, const char* clusters) {
+void SetCpuClusters(bool cpuOn, const char* clusters, const char* clusterSpec) {
     if (clusters != nullptr && clusters[0] != '\0') {
         CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), clusters);
     } else {
         CopyStr(g_cpu_clusters, sizeof(g_cpu_clusters), "4+4");
     }
-    Log("native: cpu clusters on=%d layout=%s", (int)cpuOn, g_cpu_clusters);
+    // v2.5.9: parse "cores:part:minKHz:maxKHz:revision;..." into the cluster
+    // table. Segments with unusable numbers are skipped; a spec that yields no
+    // valid cluster leaves the table empty so every consumer falls back to the
+    // legacy global part / freq values.
+    g_cpu_cluster_count = 0;
+    int totalBefore = 0;
+    if (clusterSpec != nullptr && clusterSpec[0] != '\0') {
+        const char* p = clusterSpec;
+        while (*p != '\0' && g_cpu_cluster_count < (int)(sizeof(g_cpu_cluster_table) /
+                                                          sizeof(g_cpu_cluster_table[0]))) {
+            long cores = strtol(p, (char**)&p, 10);
+            if (*p != ':' || cores <= 0) break;
+            p++;
+            const char* partStart = p;
+            while (*p != '\0' && *p != ':') p++;
+            if (*p != ':' || p == partStart) break;
+            size_t partLen = (size_t)(p - partStart);
+            p++;
+            long minKHz = strtol(p, (char**)&p, 10);
+            if (*p != ':' || minKHz <= 0) break;
+            p++;
+            long maxKHz = strtol(p, (char**)&p, 10);
+            if (*p != ':' || maxKHz < minKHz) break;
+            p++;
+            const char* revStart = p;
+            while (*p != '\0' && *p != ';' && *p != ':') p++;
+            size_t revLen = (size_t)(p - revStart);
+            PasCpuCluster& cl = g_cpu_cluster_table[g_cpu_cluster_count];
+            cl.cores = (int)cores;
+            cl.totalBefore = totalBefore;
+            size_t n = partLen < sizeof(cl.part) - 1 ? partLen : sizeof(cl.part) - 1;
+            memcpy(cl.part, partStart, n);
+            cl.part[n] = '\0';
+            cl.minKHz = (int)minKHz;
+            cl.maxKHz = (int)maxKHz;
+            n = revLen < sizeof(cl.revision) - 1 ? revLen : sizeof(cl.revision) - 1;
+            memcpy(cl.revision, revStart, n);
+            cl.revision[n] = '\0';
+            g_cpu_cluster_count++;
+            totalBefore += (int)cores;
+            if (*p == ';') p++;
+        }
+    }
+    Log("native: cpu clusters on=%d layout=%s specClusters=%d", (int)cpuOn, g_cpu_clusters,
+        g_cpu_cluster_count);
 }
 
 void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const char* glVersion,
@@ -136,6 +183,43 @@ int CpuSpoofMaxKHz() { return g_cpu_max_khz; }
 
 const char* CpuSpoofClusters() {
     return g_cpu_clusters[0] != '\0' ? g_cpu_clusters : "4+4";
+}
+
+// v2.5.9: per-cluster table accessors.
+int CpuClusterTableSize() { return g_cpu_cluster_count; }
+
+const PasCpuCluster* CpuClusterTable() { return g_cpu_cluster_table; }
+
+const PasCpuCluster* CpuClusterForCore(int core, int* coreIndexInCluster) {
+    for (int i = 0; i < g_cpu_cluster_count; i++) {
+        const PasCpuCluster& cl = g_cpu_cluster_table[i];
+        if (core >= cl.totalBefore && core < cl.totalBefore + cl.cores) {
+            if (coreIndexInCluster) *coreIndexInCluster = core - cl.totalBefore;
+            return &cl;
+        }
+    }
+    return nullptr;
+}
+
+const char* CpuSpoofClusterPart(int core) {
+    const PasCpuCluster* cl = CpuClusterForCore(core, nullptr);
+    // Return the static buffer directly - never a temporary std::string.
+    return (cl && cl->part[0] != '\0') ? cl->part : g_cpu_part;
+}
+
+int CpuSpoofClusterMinKHz(int core) {
+    const PasCpuCluster* cl = CpuClusterForCore(core, nullptr);
+    return (cl && cl->minKHz > 0) ? cl->minKHz : CpuSpoofMinKHz();
+}
+
+int CpuSpoofClusterMaxKHz(int core) {
+    const PasCpuCluster* cl = CpuClusterForCore(core, nullptr);
+    return (cl && cl->maxKHz > 0) ? cl->maxKHz : CpuSpoofMaxKHz();
+}
+
+const char* CpuSpoofClusterRevision(int core) {
+    const PasCpuCluster* cl = CpuClusterForCore(core, nullptr);
+    return (cl && cl->revision[0] != '\0') ? cl->revision : "";
 }
 
 bool GpuSpoofActive() { return g_gpu_on; }
@@ -496,11 +580,14 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpu(JNIEnv* env, jobject thiz,
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_kimera_pas_spoof_SpoofCore_nativeSetCpuClusters(JNIEnv* env, jobject thiz,
-                                                         jboolean cpuOn, jstring cpuClusters) {
+                                                         jboolean cpuOn, jstring cpuClusters,
+                                                         jstring cpuClusterSpec) {
     (void)thiz;
     const char* c = cpuClusters ? env->GetStringUTFChars(cpuClusters, nullptr) : nullptr;
-    pas::SetCpuClusters(cpuOn == JNI_TRUE, c ? c : "");
+    const char* s = cpuClusterSpec ? env->GetStringUTFChars(cpuClusterSpec, nullptr) : nullptr;
+    pas::SetCpuClusters(cpuOn == JNI_TRUE, c ? c : "", s ? s : "");
     if (c) env->ReleaseStringUTFChars(cpuClusters, c);
+    if (s) env->ReleaseStringUTFChars(cpuClusterSpec, s);
 }
 
 extern "C" JNIEXPORT void JNICALL

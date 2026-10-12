@@ -41,7 +41,9 @@ object SpoofCore {
         cpuHardware: String
     )
 
-    external fun nativeSetCpuClusters(cpuOn: Boolean, clusters: String)
+    // v2.5.9: clusters carries the legacy counts string ("2+6"), clusterSpec a
+    // per-cluster table "cores:part:minKHz:maxKHz:revision;..." (may be empty).
+    external fun nativeSetCpuClusters(cpuOn: Boolean, clusters: String, clusterSpec: String)
 
     // v2.4.5: GPU now carries core count / L2 cache / architecture.
     external fun nativeSetGpu(
@@ -217,7 +219,11 @@ object SpoofCore {
             )
         }
         runCatching {
-            nativeSetCpuClusters(cpuOn = cpuOnEff, clusters = cpuEntry.clusters)
+            nativeSetCpuClusters(
+                cpuOn = cpuOnEff,
+                clusters = cpuEntry.clusters,
+                clusterSpec = DeviceCatalog.clusterSpec(cpuEntry)
+            )
         }
         // v2.4.5: pass the new GPU physical-characteristics fields.
         runCatching {
