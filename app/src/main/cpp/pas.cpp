@@ -631,9 +631,28 @@ static void* InitWorker(void* arg) {
         }
     }
 
+    // v2.5.10: GPU identity hooks go in FIRST - before the config wait and
+    // before every other hook group. Chrome's ANGLE resolves its GL function
+    // pointers within the first few hundred ms of the GPU process; previously
+    // the GL hooks landed last (~400 ms in, after names/iface/fs/cpu), so
+    // ANGLE had already cached the real GPU strings (Adreno 640 on MuMu) and
+    // our hooks never fired (verified: zero recon glgs/eglgpa lines with
+    // recon enabled). All these hooks are runtime-gated (GpuSpoofActive /
+    // VulkanSpoofActive / WaitForGpuConfig), so installing them before the
+    // config arrives is safe - they pass through until it lands.
+    int rc = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
+    Log("native: stage0 bytehook rc=%d version=%s mode=%d", rc, bytehook_get_version(),
+        bytehook_get_mode());
+    InstallGpuHooks();
+    InstallGpuDlsymChain();
+    InstallVulkanHooks();
+    Log("native: stage0g gpu identity hooks installed early (runtime-gated)");
+
     // The Kotlin side delivers the configuration first: with the native addon
     // disabled nothing is installed at all (module behaves like the original,
     // Java-only); compatibility mode skips just the extended hook groups.
+    // Note: if the addon turns out to be disabled here, the GPU hooks above
+    // stay installed but inert - every spoof flag is false without a config.
     bool compat = false;
     bool nativeOn = true;
     bool ready = WaitSpoofConfigReady(2500, &compat, &nativeOn);
@@ -641,20 +660,18 @@ static void* InitWorker(void* arg) {
         (int)ready, (int)compat, (int)nativeOn, (int)CpuSpoofActive(), (int)GpuSpoofActive(),
         (int)ReconEnabled(), ProcName().c_str());
     if (!nativeOn) {
-        Log("native: addon disabled by user - no hooks installed");
+        Log("native: addon disabled by user - no further hooks installed");
         return nullptr;
     }
 
     // Light mode: identity-only spoof (delivered from Kotlin). Skips the
-    // heavyweight groups (recon, net, cpu-deep, gpu/vulkan, GL chain) - the
-    // fast path for bisecting stubborn apps.
+    // heavyweight groups (recon, net, cpu-deep) - the fast path for bisecting
+    // stubborn apps. The GPU identity hooks above stay: they are cheap PLT
+    // substitutions and the identity spoof is the point of light mode.
     bool light = g_light_mode;
-    int rc = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
     if (light) {
         Log("native: light mode - heavy groups skipped");
     }
-    Log("native: stage1 bytehook rc=%d version=%s mode=%d", rc, bytehook_get_version(),
-        bytehook_get_mode());
     RefreshHiddenNames(true);
     Log("native: stage2 names cached");
     if (!light) {
@@ -669,25 +686,8 @@ static void* InitWorker(void* arg) {
     } else {
         Log("native: cpu deep hooks skipped (light=%d)", (int)light);
     }
-    // v2.5.9 fix: GPU hooks must NOT depend on the GPU config having arrived
-    // at native-init time. The Kotlin prefs can attach later (the apply thread
-    // re-applies 5 s in); Chrome's GPU/privileged processes can initialize
-    // EGL/GL before that, and skipping the install then leaked the real GPU
-    // (e.g. MuMu's Adreno 640) for the whole process lifetime. Every callback
-    // already checks GpuSpoofActive()/VulkanSpoofActive() at call time, so the
-    // hooks are inert pass-throughs until the config lands.
-    if (!light) {
-        InstallGpuHooks();
-        InstallGpuDlsymChain();
-        if (VulkanSpoofActive()) {
-            InstallVulkanHooks();
-        } else {
-            Log("native: vulkan spoof off - vulkan hooks skipped");
-        }
-        Log("native: stage4b gpu gl+vulkan hooks (unconditional install, runtime-gated)");
-    } else {
-        Log("native: light mode - gpu hooks skipped");
-    }
+    // v2.5.10: GPU hooks were already installed at stage0g (before the config
+    // wait) so Chrome's ANGLE cannot resolve GL identity ahead of them.
     if (!light && ReconEnabled()) {
         InstallReconHooks();
         Log("native: stage4c recon hooks");
