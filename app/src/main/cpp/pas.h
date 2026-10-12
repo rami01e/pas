@@ -71,6 +71,11 @@ void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
                    int driverId, bool descriptorIndexing, bool sparseBinding);
 
 bool CpuSpoofActive();
+
+// v2.5.9: bounded wait for the GPU config (see hide_gpu.cpp). Early GL /
+// Vulkan identity queries call this so a fast GL init cannot capture the
+// real GPU before the config thread lands.
+void WaitForGpuConfig(int timeoutMs);
 std::string CpuSpoofDisplay();
 std::string CpuSpoofManufacturer();
 std::string CpuSpoofModel();

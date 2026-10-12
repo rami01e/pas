@@ -35,6 +35,12 @@ static volatile int g_cpu_min_khz = 0;
 static volatile int g_cpu_max_khz = 0;
 
 static volatile bool g_gpu_on = false;
+// v2.5.9: set once SetGpuConfig has run (whether gpu spoof ends up on or
+// off). Early GL/Vulkan identity queries wait briefly for this so the
+// target's GL init cannot win the race against the config thread.
+static pthread_mutex_t g_gpu_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_gpu_cfg_cv = PTHREAD_COND_INITIALIZER;
+static volatile bool g_gpu_cfg_seen = false;
 static volatile bool g_gpu_chain_on = true;
 static volatile bool g_gpu_vulkan_on = true;
 static char g_gpu_vendor[64] = {0};
@@ -160,6 +166,11 @@ void SetGpuConfig(bool gpuOn, const char* vendor, const char* renderer, const ch
     g_gpu_l2_cache_kb = l2CacheKb > 0 ? l2CacheKb : 64;
     CopyStr(g_gpu_arch, sizeof(g_gpu_arch), gpuArch);
     g_gpu_on = gpuOn && g_gpu_renderer[0] != '\0';
+    // v2.5.9: release any early GL/Vulkan query that waited for the config.
+    pthread_mutex_lock(&g_gpu_cfg_mtx);
+    g_gpu_cfg_seen = true;
+    pthread_cond_broadcast(&g_gpu_cfg_cv);
+    pthread_mutex_unlock(&g_gpu_cfg_mtx);
     Log("native: gpu config on=%d renderer=%s vendorId=0x%llx deviceId=0x%llx cores=%d l2=%dkB arch=%s",
         (int)g_gpu_on, g_gpu_renderer, g_gpu_vendor_id, g_gpu_device_id, g_gpu_cores,
         g_gpu_l2_cache_kb, g_gpu_arch);
@@ -223,6 +234,30 @@ const char* CpuSpoofClusterRevision(int core) {
 }
 
 bool GpuSpoofActive() { return g_gpu_on; }
+
+// v2.5.9: bounded wait for the GPU config. Called from early GL/Vulkan
+// identity queries so that a fast GL init cannot capture the real GPU before
+// the config thread lands (the DEBUG-switch heisenburg: debug logging slowed
+// the target enough that the config always won; without it Chrome cached the
+// host GPU). Bounded, one-time per process: when the config is disabled or
+// late, the caller proceeds after the timeout.
+void WaitForGpuConfig(int timeoutMs) {
+    if (g_gpu_cfg_seen) return;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_sec += timeoutMs / 1000;
+    ts.tv_nsec += (long)(timeoutMs % 1000) * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec += 1;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_mutex_lock(&g_gpu_cfg_mtx);
+    while (!g_gpu_cfg_seen) {
+        int r = pthread_cond_timedwait(&g_gpu_cfg_cv, &g_gpu_cfg_mtx, &ts);
+        if (r != 0) break;
+    }
+    pthread_mutex_unlock(&g_gpu_cfg_mtx);
+}
 bool VulkanSpoofActive() { return g_gpu_vulkan_on; }
 
 void SetGpuOptions(bool chain, bool vulkan) {
@@ -264,6 +299,7 @@ static GlChainSlot g_gl_slots[PAS_GL_SLOTS];
 static pthread_mutex_t g_gl_slot_mtx = PTHREAD_MUTEX_INITIALIZER;
 static volatile unsigned g_gl_chain_logged = 0;
 static volatile int g_gl_diag = 0;
+static volatile bool g_gl_diag_missing_config = false;
 
 void GpuDiag(const char* tag, const char* detail) {
     if (!ReconEnabled()) return;
@@ -292,7 +328,20 @@ static void GlChainLog(const char* name, const char* how) {
 }
 
 static bool SpoofGlName(unsigned name, const unsigned char** out) {
-    if (!g_gpu_on) return false;
+    if (!g_gpu_on) {
+        // v2.5.9: first GL string query may arrive before the config thread
+        // has applied the GPU identity. Wait briefly - this closes the race
+        // where Chrome cached the real GPU when it initialized GL faster
+        // than the config (visible as the DEBUG-switch heisenburg).
+        WaitForGpuConfig(1500);
+        if (!g_gpu_on) {
+            if (!g_gl_diag_missing_config) {
+                g_gl_diag_missing_config = true;
+                Log("native: gpu diag: glGetString passed through - gpu config absent after wait");
+            }
+            return false;
+        }
+    }
     if (name == 0x1F00) { *out = (const unsigned char*)g_gpu_vendor; return true; }
     if (name == 0x1F01) { *out = (const unsigned char*)g_gpu_renderer; return true; }
     if (name == 0x1F02 && g_gpu_gl_version[0] != '\0') {

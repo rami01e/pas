@@ -49,6 +49,9 @@ void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
 
 static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
     if (!p) return;
+    // v2.5.9: early queries may precede the config thread; wait briefly so
+    // ANGLE/Chrome cannot cache the real GPU identity (same race as GL).
+    WaitForGpuConfig(1500);
     // v2.4.5: DevCheck reads the GPU core count and L2 cache from the
     // device name / driver info for Mali. We build a coherent string that
     // carries those values.
@@ -115,7 +118,9 @@ static void PatchDriverPropsNode(void* node) {
 }
 
 static void PatchProps2(VkPhysicalDeviceProperties2* out) {
-    if (!out || !GpuSpoofActive()) return;
+    if (!out) return;
+    WaitForGpuConfig(1500);
+    if (!GpuSpoofActive()) return;
     PatchCoreProps(&out->properties);
     int guard = 0;
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
@@ -153,7 +158,9 @@ static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
 static void MyVkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties* out) {
     BYTEHOOK_STACK_SCOPE();
     BYTEHOOK_CALL_PREV(MyVkGetPhysicalDeviceProperties, pd, out);
-    if (!out || !GpuSpoofActive()) return;
+    if (!out) return;
+    WaitForGpuConfig(1500);
+    if (!GpuSpoofActive()) return;
     PatchCoreProps(out);
 }
 
@@ -312,7 +319,9 @@ static void ChainLog(int id, const char* how) {
 static void VkPropsPtr(VkPhysicalDevice pd, VkPhysicalDeviceProperties* out) {
     auto real = (PFN_vkGetPhysicalDeviceProperties)ResolveRealTarget(VK_T_PROP);
     if (real) real(pd, out);
-    if (out && GpuSpoofActive()) PatchCoreProps(out);
+    if (!out) return;
+    WaitForGpuConfig(1500);
+    if (GpuSpoofActive()) PatchCoreProps(out);
 }
 
 static void VkProps2Ptr(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* out) {
@@ -330,7 +339,9 @@ static void VkProps2KhrPtr(VkPhysicalDevice pd, VkPhysicalDeviceProperties2* out
 static void VkFeatPtr(VkPhysicalDevice pd, VkPhysicalDeviceFeatures* out) {
     auto real = (PFN_vkGetPhysicalDeviceFeatures)ResolveRealTarget(VK_T_FEAT);
     if (real) real(pd, out);
-    if (out && GpuSpoofActive()) PatchFeatures(out);
+    if (!out) return;
+    WaitForGpuConfig(1500);
+    if (GpuSpoofActive()) PatchFeatures(out);
 }
 
 static void VkFeat2Ptr(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* out) {
