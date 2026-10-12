@@ -21,14 +21,15 @@ object SpoofSettings {
 
     private val KEYS = arrayOf(
         "native_enabled", "safe_mode",
-        "sdk_enabled", "sdk_value",
+        "sdk_enabled", "sdk_value", "sdk_java_enabled",
         "abi_enabled", "abi_value",
         "cpu_enabled", "cpu_value",
         "gpu_enabled", "gpu_value",
         "widevine_enabled", "widevine_id",
         "gsf_enabled", "gsf_id",
-        "recon_enabled", "webrtc_mode", "gpu_chain", "gpu_vulkan",
-        "ssl_unpin_enabled", "ssl_unpin_mode"
+        "recon_enabled", "webrtc_mode", "webrtc_localip", "gpu_chain", "gpu_vulkan",
+        "ssl_unpin_enabled", "ssl_unpin_mode",
+        "net_cellular"
     )
 
     @Volatile

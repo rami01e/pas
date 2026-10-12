@@ -669,7 +669,14 @@ static void* InitWorker(void* arg) {
     } else {
         Log("native: cpu deep hooks skipped (light=%d)", (int)light);
     }
-    if (GpuSpoofActive() && !light) {
+    // v2.5.9 fix: GPU hooks must NOT depend on the GPU config having arrived
+    // at native-init time. The Kotlin prefs can attach later (the apply thread
+    // re-applies 5 s in); Chrome's GPU/privileged processes can initialize
+    // EGL/GL before that, and skipping the install then leaked the real GPU
+    // (e.g. MuMu's Adreno 640) for the whole process lifetime. Every callback
+    // already checks GpuSpoofActive()/VulkanSpoofActive() at call time, so the
+    // hooks are inert pass-throughs until the config lands.
+    if (!light) {
         InstallGpuHooks();
         InstallGpuDlsymChain();
         if (VulkanSpoofActive()) {
@@ -677,9 +684,9 @@ static void* InitWorker(void* arg) {
         } else {
             Log("native: vulkan spoof off - vulkan hooks skipped");
         }
-        Log("native: stage4b gpu gl+vulkan hooks");
+        Log("native: stage4b gpu gl+vulkan hooks (unconditional install, runtime-gated)");
     } else {
-        Log("native: gpu hooks skipped (light=%d or off=%d)", (int)light, (int)!GpuSpoofActive());
+        Log("native: light mode - gpu hooks skipped");
     }
     if (!light && ReconEnabled()) {
         InstallReconHooks();

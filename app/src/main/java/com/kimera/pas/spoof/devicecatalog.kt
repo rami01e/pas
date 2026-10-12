@@ -142,7 +142,7 @@ object DeviceCatalog {
             clusterList = listOf(
                 CoreCluster(
                     cores = 2,
-                    part = "0xd4e",
+                    part = "0xd41",
                     minKHz = 533000,
                     maxKHz = 2400000,
                     revision = "r1p1",
@@ -150,7 +150,7 @@ object DeviceCatalog {
                 ),
                 CoreCluster(
                     cores = 6,
-                    part = "0xd41",
+                    part = "0xd4e",
                     minKHz = 533000,
                     maxKHz = 2000000,
                     revision = "r2p0",
