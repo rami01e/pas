@@ -47,7 +47,37 @@ if(ANDROID_ABI STREQUAL "x86_64")
         GIT_TAG latest
         GIT_SHALLOW TRUE
         GIT_PROGRESS TRUE)
-    FetchContent_MakeAvailable(dobby)
+    FetchContent_GetProperties(dobby)
+    if(NOT dobby_POPULATED)
+        FetchContent_Populate(dobby)
+        # Dobby's ClosureTrampolineBridge unconditionally compiles its ARM64
+        # closure-bridge/trampoline .asm files, which the NDK x86_64 assembler
+        # cannot parse (CI build failure). They are used only by DobbyInstrument
+        # on ARM64; the PAS inline backstop uses plain DobbyHook exclusively.
+        # Replace them with x86_64 stubs that keep the symbols so any stray
+        # reference still resolves.
+        file(WRITE "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm" [==[
+# Neutralized for x86_64 builds by PAS (see app/src/main/cpp/CMakeLists.txt):
+# the ARM64 closure bridge is only used by DobbyInstrument on ARM64.
+    .text
+    .globl closure_bridge_asm
+closure_bridge_asm:
+    ret
+    .globl closure_bridge_asm_end
+closure_bridge_asm_end:
+]==])
+        file(WRITE "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_trampoline_arm64.asm" [==[
+# Neutralized for x86_64 builds by PAS (see app/src/main/cpp/CMakeLists.txt):
+# the ARM64 closure trampoline is only used by DobbyInstrument on ARM64.
+    .text
+    .globl closure_trampoline_asm
+closure_trampoline_asm:
+    ret
+    .globl closure_trampoline_asm_end
+closure_trampoline_asm_end:
+]==])
+        add_subdirectory(${dobby_SOURCE_DIR} ${dobby_BINARY_DIR})
+    endif()
     target_include_directories(pas PRIVATE ${dobby_SOURCE_DIR}/include)
     target_compile_definitions(pas PRIVATE PAS_HAVE_DOBBY=1)
     target_link_libraries(pas dobby)
