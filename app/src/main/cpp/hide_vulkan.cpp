@@ -535,11 +535,211 @@ static volatile int g_vk_hooklog = 0;
 // fires underneath) is safe and produces identical results.
 // ---------------------------------------------------------------------------
 
-#if defined(__x86_64__) && defined(PAS_HAVE_DOBBY)
-
-#include "dobby.h"
+#if defined(__x86_64__)
 
 static void* g_inline_orig[VK_T_COUNT] = {nullptr};
+
+// ---------------------------------------------------------------------------
+// Minimal fail-safe x86_64 inline hook engine (no external dependencies).
+//
+// Trampoline-based: the target's displaced prologue instructions are copied
+// into an executable trampoline (RIP-relative disp32 operands relocated),
+// followed by an absolute jump back to target+displaced. The target is then
+// patched with `movabs rax, wrapper; jmp rax` (12 bytes).
+//
+// Every displaced instruction must be understood by the conservative decoder
+// below or the hook is ABORTED for that function (logged): unknown bytes mean
+// "not hooked" (identical to today's behavior), never a crash.
+// ---------------------------------------------------------------------------
+
+// Conservative x86_64 instruction length decoder. Returns the instruction
+// length in bytes, or 0 to BAIL. `avail` = safely readable bytes at `c`
+// (the builder passes 16). On success *ripDispOff = byte offset of a
+// [rip+disp32] operand within the instruction (relocatable), else -1.
+// Covers exactly the instruction classes seen in Android -O2 prologues:
+// endbr64, REX push/pop, nop, mov r,imm, ModRM mov/lea/test/xchg/alu,
+// grp1 imm (83/81), imul imm (69/6B), mov r/m,imm (C7), 0F1F multi-byte nop.
+// Everything else - control flow (E8/E9/EB/70-7F/0F8x/FF/C3/C2), shifts,
+// string ops, VEX/EVEX, unknown - bails.
+static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
+    *ripDispOff = -1;
+    if (avail < 1) return 0;
+    if (avail >= 4 && c[0] == 0xF3 && c[1] == 0x0F && c[2] == 0x1E && c[3] == 0xFA)
+        return 4;  // endbr64
+
+    size_t i = 0;
+    bool rexW = false;
+    if (c[0] >= 0x40 && c[0] <= 0x4F) {
+        rexW = (c[0] & 0x08) != 0;
+        i = 1;
+        if (i >= avail) return 0;
+    }
+
+    uint8_t op = c[i];
+    i++;
+
+    bool modrm = false, allowRipRel = false;
+    size_t imm = 0;
+
+    switch (op) {
+        case 0x50: case 0x51: case 0x52: case 0x53:
+        case 0x54: case 0x55: case 0x56: case 0x57:
+        case 0x58: case 0x59: case 0x5A: case 0x5B:
+        case 0x5C: case 0x5D: case 0x5E: case 0x5F:
+            return i;  // push/pop r
+        case 0x90:
+            return i;  // nop
+        case 0xB8: case 0xB9: case 0xBA: case 0xBB:
+        case 0xBC: case 0xBD: case 0xBE: case 0xBF:
+            imm = rexW ? 8 : 4;  // mov r, imm32 / movabs r, imm64
+            break;
+        case 0x89: case 0x8B: case 0x8D: case 0x85: case 0x87:
+        case 0x01: case 0x03: case 0x09: case 0x0B:
+        case 0x21: case 0x23: case 0x29: case 0x2B:
+        case 0x31: case 0x33: case 0x39: case 0x3B:
+        case 0x63:
+            modrm = true; allowRipRel = true;
+            break;
+        case 0x83: modrm = true; imm = 1; break;
+        case 0x81: modrm = true; imm = 4; break;
+        case 0x69: modrm = true; imm = 4; break;
+        case 0x6B: modrm = true; imm = 1; break;
+        case 0xC7: modrm = true; imm = 4; break;
+        case 0x0F: {
+            if (i >= avail) return 0;
+            if (c[i] == 0x1F) {  // multi-byte nop (0F 1F /0)
+                i++;
+                modrm = true; allowRipRel = true;
+                break;
+            }
+            return 0;  // any other 0F opcode: bail
+        }
+        default:
+            return 0;  // unknown/control flow: bail
+    }
+
+    if (i > 15) return 0;
+
+    if (!modrm) return i + imm;
+
+    if (i > 14) return 0;
+    if (i >= avail) return 0;
+    uint8_t mrm = c[i];
+    i++;
+    uint8_t mod = (uint8_t)(mrm >> 6);
+    uint8_t rm = (uint8_t)(mrm & 7);
+    if (mod == 3) {
+        // register form, nothing further
+    } else if (rm == 4) {
+        if (i >= avail) return 0;
+        uint8_t sib = c[i];
+        i++;
+        uint8_t base = (uint8_t)(sib & 7);
+        if (mod == 0) {
+            if (base == 5) {
+                if (i + 4 > avail) return 0;
+                i += 4;  // disp32, absolute (no base) - no relocation
+            }
+        } else {
+            i += (mod == 1) ? 1 : 4;
+        }
+    } else if (mod == 0 && rm == 5) {  // RIP-relative (mod 0 only)
+        if (!allowRipRel) return 0;
+        if (i + 4 > avail) return 0;
+        *ripDispOff = (int)i;
+        i += 4;
+    } else {
+        // mod 1/2: disp8/disp32; mod 0 with rm 0-3, 6, 7: register indirect
+        // (no displacement)
+        if (mod == 1) {
+            if (i + 1 > avail) return 0;
+            i += 1;
+        } else if (mod == 2) {
+            if (i + 4 > avail) return 0;
+            i += 4;
+        }
+    }
+
+    if (i > 15) return 0;
+    if (imm) {
+        if (i + imm > avail) return 0;
+        i += imm;
+    }
+    if (i > 15) return 0;
+    return i;
+}
+
+// Copy the displaced instructions to the trampoline, relocating RIP-relative
+// disp32 operands, then append an absolute jump back to target+copied.
+static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
+                               uint8_t* tramp, size_t trampCap, size_t* copiedOut) {
+    size_t copied = 0;
+    while (copied < needBytes) {
+        int ripOff = -1;
+        size_t len = PasDecodeX64(target + copied, 16, &ripOff);
+        if (len == 0 || copied + len + 13 > trampCap) return false;
+        memcpy(tramp + copied, target + copied, len);
+        if (ripOff >= 0) {
+            // Relocate: newDisp = oldDisp + (origInsn - trampInsn)
+            int64_t delta = (int64_t)((uintptr_t)(target + copied) -
+                                      (uintptr_t)(tramp + copied));
+            uint8_t* d = tramp + copied + (size_t)ripOff;
+            int32_t oldDisp;
+            memcpy(&oldDisp, d, 4);
+            int64_t newDisp = (int64_t)oldDisp + delta;
+            if (newDisp < INT32_MIN || newDisp > INT32_MAX) return false;
+            memcpy(d, &newDisp, 4);
+        }
+        copied += len;
+    }
+    // jump back: movabs r11, addr ; jmp r11
+    uintptr_t back = (uintptr_t)target + copied;
+    tramp[copied++] = 0x49;
+    tramp[copied++] = 0xBA;
+    memcpy(tramp + copied, &back, 8);
+    copied += 8;
+    tramp[copied++] = 0x41;
+    tramp[copied++] = 0xFF;
+    tramp[copied++] = 0xE3;
+    *copiedOut = copied;
+    return true;
+}
+
+// Install an inline hook: target's first >=12 bytes become
+// `movabs rax, wrapper; jmp rax`; *origOut receives the trampoline.
+static bool PasInlineHookX64(void* target, void* wrapper, void** origOut) {
+    uint8_t* tramp = (uint8_t*)mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (tramp == MAP_FAILED) return false;
+    size_t copied = 0;
+    if (!PasBuildTrampoline((const uint8_t*)target, 12, tramp, 4096, &copied)) {
+        munmap(tramp, 4096);
+        return false;
+    }
+    __builtin___clear_cache((char*)tramp, (char*)tramp + copied);
+
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) pageSize = 4096;
+    uintptr_t start = (uintptr_t)target & ~(uintptr_t)(pageSize - 1);
+    uintptr_t end = ((uintptr_t)target + 12 + (uintptr_t)pageSize - 1) &
+                    ~(uintptr_t)(pageSize - 1);
+    if (mprotect((void*)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        munmap(tramp, 4096);
+        return false;
+    }
+    uint8_t patch[12];
+    patch[0] = 0x48;
+    patch[1] = 0xB8;
+    memcpy(patch + 2, &wrapper, 8);
+    patch[10] = 0xFF;
+    patch[11] = 0xE0;
+    memcpy(target, patch, sizeof(patch));
+    __builtin___clear_cache((char*)target, (char*)target + 12);
+    // Drop write; keep the mapping executable again.
+    mprotect((void*)start, end - start, PROT_READ | PROT_EXEC);
+    *origOut = tramp;
+    return true;
+}
 
 static void InlineVkGetPhysicalDeviceProperties(VkPhysicalDevice pd,
                                                 VkPhysicalDeviceProperties* out) {
@@ -685,10 +885,11 @@ void InstallVulkanInlineBackstop() {
             Log("native: vulkan inline: %s not found", specs[i].sym);
             continue;
         }
-        if (DobbyHook(target, specs[i].fn, &g_inline_orig[specs[i].id]) == 0) {
+        if (PasInlineHookX64(target, specs[i].fn, &g_inline_orig[specs[i].id])) {
             ok++;
         } else {
-            Log("native: vulkan inline: %s hook failed", specs[i].sym);
+            Log("native: vulkan inline: %s skipped (unsupported prologue or mprotect failed)",
+                specs[i].sym);
         }
     }
     Log("native: vulkan inline hooks installed %d/%d (x86_64 backstop)", ok, VK_T_COUNT);
