@@ -708,9 +708,12 @@ void InstallVulkanHooks() {
 }
 
 void InstallGpuDlsymChain() {
-    void* dStub = HookChainStubGfx("libc.so", "dlsym", (void*)MyDlsym);
+    // v2.6.5: use the broadened dlsym-chain filter so Houdini's forwarding
+    // machinery (resolving ARM public-library shims on MuMu-style emulators)
+    // receives spoofed GL/Vulkan pointers for ARM-translated apps.
+    void* dStub = HookChainStubDlsymChain("libc.so", "dlsym", (void*)MyDlsym);
     Log("native: dlsym chain libc.so stub=%d", dStub != nullptr);
-    void* dStub2 = HookChainStubGfx("libdl.so", "dlsym", (void*)MyDlsym);
+    void* dStub2 = HookChainStubDlsymChain("libdl.so", "dlsym", (void*)MyDlsym);
     Log("native: dlsym chain libdl.so stub=%d", dStub2 != nullptr);
 }
 

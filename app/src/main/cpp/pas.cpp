@@ -536,6 +536,36 @@ void* HookChainStubGfx(const char* owner_regex, const char* sym, void* proxy) {
                                         nullptr);
 }
 
+// v2.6.5: dlsym-chain caller filter. Broader than CallerAllowGfx: Houdini's
+// forwarding machinery (libnb.so / libhp*.so / libhoudini.so / mumu helpers)
+// resolves the ARM public-library shims' symbols via libc dlsym, and those
+// callers were excluded by the translated-code skip list - so ARM-translated
+// apps (e.g. DevCheck on MuMu) never received spoofed pointers. The dlsym
+// chain never patches translated code: it only substitutes the RETURN VALUE
+// of dlsym, which Houdini then bridges into ARM exactly like a real pointer.
+// The EGL / Vulkan API loaders keep their own dlsym results raw (same
+// display-init corruption guard as CallerAllowGfx).
+bool CallerAllowDlsymChain(const char* caller_path_name, void* arg) {
+    (void)arg;
+    if (!caller_path_name) return true;
+    static const char* const kSkip[] = {
+        "libpas.so",      // ourselves (recursion guard)
+        "libbytehook.so", // bytehook internals
+    };
+    for (size_t i = 0; i < sizeof(kSkip) / sizeof(kSkip[0]); i++) {
+        if (strstr(caller_path_name, kSkip[i]) != nullptr) return false;
+    }
+    // Keep the API loaders' own dlsym raw (display-init corruption guard).
+    if (strstr(caller_path_name, "/libEGL.so") != nullptr) return false;
+    if (strstr(caller_path_name, "/libvulkan.so") != nullptr) return false;
+    return true;
+}
+
+void* HookChainStubDlsymChain(const char* owner_regex, const char* sym, void* proxy) {
+    return (void*)bytehook_hook_partial(CallerAllowDlsymChain, nullptr, owner_regex, sym, proxy,
+                                        OnHooked, nullptr);
+}
+
 void HookLibcSym(const char* sym, void* proxy) {
     bytehook_stub_t stub = bytehook_hook_partial(CallerAllow, nullptr, "libc.so", sym, proxy,
                                                  OnHooked, nullptr);

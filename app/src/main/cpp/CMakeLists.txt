@@ -33,57 +33,13 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
     target_compile_definitions(pas PRIVATE PAS_HAVE_SHADOWHOOK=1)
 endif()
 
-# v2.6.3: x86_64-only inline-hook backstop (Dobby) for the Vulkan identity.
-# ARM-translated apps (MuMu/Houdini: arm64-only libraries executed through the
-# native bridge) resolve Vulkan symbols outside every PLT/GOT surface we can
-# patch, so the identity hooks must sit on the x86_64 libvulkan.so function
-# bodies themselves. ARM builds are completely unaffected.
-if(ANDROID_ABI STREQUAL "x86_64")
-    include(FetchContent)
-    set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
-    set(DOBBY_DEBUG OFF CACHE BOOL "" FORCE)
-    FetchContent_Declare(dobby
-        GIT_REPOSITORY https://github.com/jmpews/Dobby.git
-        GIT_TAG latest
-        GIT_SHALLOW TRUE
-        GIT_PROGRESS TRUE)
-    FetchContent_GetProperties(dobby)
-    if(NOT dobby_POPULATED)
-        FetchContent_Populate(dobby)
-        # Neutralize EVERY closure-bridge/trampoline .asm in Dobby. They rely
-        # on a cdecl macro that only a preprocessing assembler pass would
-        # expand, and CMake compiles .asm without preprocessing - so they fail
-        # under the NDK on every architecture. The bridges serve only
-        # DobbyInstrument, which the PAS inline backstop never calls (plain
-        # DobbyHook uses inline trampolines exclusively). Stubs keep the
-        # symbols so any stray reference still resolves; unreferenced archive
-        # members are never pulled into the final link.
-        file(GLOB_RECURSE _pas_dobby_asm_files
-            "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/*.asm")
-        foreach(_asm ${_pas_dobby_asm_files})
-            file(WRITE "${_asm}" [==[
-# Neutralized by PAS (see app/src/main/cpp/CMakeLists.txt): the closure
-# bridges/trampolines are only used by DobbyInstrument, which the PAS inline
-# backstop never calls. Symbols kept so any stray reference still resolves.
-    .text
-    .globl closure_bridge_asm
-closure_bridge_asm:
-    ret
-    .globl closure_bridge_asm_end
-closure_bridge_asm_end:
-    .globl closure_trampoline_asm
-closure_trampoline_asm:
-    ret
-    .globl closure_trampoline_asm_end
-closure_trampoline_asm_end:
-]==])
-        endforeach()
-        add_subdirectory(${dobby_SOURCE_DIR} ${dobby_BINARY_DIR})
-    endif()
-    target_include_directories(pas PRIVATE ${dobby_SOURCE_DIR}/include)
-    target_compile_definitions(pas PRIVATE PAS_HAVE_DOBBY=1)
-    target_link_libraries(pas dobby)
-endif()
+# v2.6.5: the Dobby inline-hook experiment was removed. Device evidence
+# (MuMu/Houdini) showed the ARM public-library shim libvulkan.so (45 KB)
+# forwards into the real x86_64 loader via Houdini's dlsym-based machinery,
+# so the existing dlsym chain - now allowed for Houdini callers via
+# CallerAllowDlsymChain - covers ARM-translated apps without any inline
+# hooking. The guarded inline-backstop code in hide_vulkan.cpp compiles out
+# (PAS_HAVE_DOBBY is no longer defined) and stays as a no-op.
 
 target_link_libraries(pas
     log
