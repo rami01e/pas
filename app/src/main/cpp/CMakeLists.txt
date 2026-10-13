@@ -76,6 +76,20 @@ closure_trampoline_asm:
     .globl closure_trampoline_asm_end
 closure_trampoline_asm_end:
 ]==])
+        # The x64 closure bridge has the same defect: it uses the cdecl macro,
+        # which only a preprocessing assembler pass would define. Stub it the
+        # same way (symbols kept, body = ret).
+        file(WRITE "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/x64/closure_bridge_x64.asm" [==[
+# Neutralized for x86_64 builds by PAS (see app/src/main/cpp/CMakeLists.txt):
+# the closure bridge is only used by DobbyInstrument, which the PAS inline
+# backstop never calls - plain DobbyHook uses inline trampolines only.
+    .text
+    .globl closure_bridge_asm
+closure_bridge_asm:
+    ret
+    .globl closure_bridge_asm_end
+closure_bridge_asm_end:
+]==])
         add_subdirectory(${dobby_SOURCE_DIR} ${dobby_BINARY_DIR})
     endif()
     target_include_directories(pas PRIVATE ${dobby_SOURCE_DIR}/include)
