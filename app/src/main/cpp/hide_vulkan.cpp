@@ -913,13 +913,33 @@ void InstallVulkanInlineBackstop() {
             Log("native: vulkan inline: %s not found", specs[i].sym);
             continue;
         }
+        const uint8_t* tb = (const uint8_t*)target;
+        if (tb[0] == 0xE9) {
+            // Export is a tail-call thunk: `jmp rel32` into the internal
+            // implementation. Rewrite the rel32 so the thunk jumps to our
+            // wrapper instead; the wrapper calls the original internal
+            // destination (recorded in g_inline_orig) as a plain pointer.
+            int32_t rel;
+            memcpy(&rel, tb + 1, 4);
+            void* origDest = (void*)(tb + 5 + (int64_t)rel);
+            int64_t newRel = (int64_t)((uintptr_t)specs[i].fn - (uintptr_t)target - 5);
+            if (newRel < INT32_MIN || newRel > INT32_MAX) {
+                Log("native: vulkan inline: %s thunk out of rel32 range", specs[i].sym);
+                continue;
+            }
+            int32_t nr = (int32_t)newRel;
+            if (!PasWriteCode((void*)(tb + 1), &nr, 4)) continue;
+            g_inline_orig[specs[i].id] = origDest;
+            ok++;
+            Log("native: vulkan inline: %s thunk hooked", specs[i].sym);
+            continue;
+        }
         int ripOff = -1;
-        size_t firstLen = PasDecodeX64((const uint8_t*)target, 16, &ripOff);
+        size_t firstLen = PasDecodeX64(tb, 16, &ripOff);
         if (firstLen == 0) {
-            const uint8_t* b = (const uint8_t*)target;
             Log("native: vulkan inline: %s unsupported prologue bytes "
                 "%02x %02x %02x %02x %02x %02x %02x %02x",
-                specs[i].sym, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+                specs[i].sym, tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7]);
             continue;
         }
         if (PasInlineHookX64(target, specs[i].fn, &g_inline_orig[specs[i].id])) {
