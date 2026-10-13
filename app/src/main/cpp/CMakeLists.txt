@@ -50,46 +50,34 @@ if(ANDROID_ABI STREQUAL "x86_64")
     FetchContent_GetProperties(dobby)
     if(NOT dobby_POPULATED)
         FetchContent_Populate(dobby)
-        # Dobby's ClosureTrampolineBridge unconditionally compiles its ARM64
-        # closure-bridge/trampoline .asm files, which the NDK x86_64 assembler
-        # cannot parse (CI build failure). They are used only by DobbyInstrument
-        # on ARM64; the PAS inline backstop uses plain DobbyHook exclusively.
-        # Replace them with x86_64 stubs that keep the symbols so any stray
-        # reference still resolves.
-        file(WRITE "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm" [==[
-# Neutralized for x86_64 builds by PAS (see app/src/main/cpp/CMakeLists.txt):
-# the ARM64 closure bridge is only used by DobbyInstrument on ARM64.
+        # Neutralize EVERY closure-bridge/trampoline .asm in Dobby. They rely
+        # on a cdecl macro that only a preprocessing assembler pass would
+        # expand, and CMake compiles .asm without preprocessing - so they fail
+        # under the NDK on every architecture. The bridges serve only
+        # DobbyInstrument, which the PAS inline backstop never calls (plain
+        # DobbyHook uses inline trampolines exclusively). Stubs keep the
+        # symbols so any stray reference still resolves; unreferenced archive
+        # members are never pulled into the final link.
+        file(GLOB_RECURSE _pas_dobby_asm_files
+            "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/*.asm")
+        foreach(_asm ${_pas_dobby_asm_files})
+            file(WRITE "${_asm}" [==[
+# Neutralized by PAS (see app/src/main/cpp/CMakeLists.txt): the closure
+# bridges/trampolines are only used by DobbyInstrument, which the PAS inline
+# backstop never calls. Symbols kept so any stray reference still resolves.
     .text
     .globl closure_bridge_asm
 closure_bridge_asm:
     ret
     .globl closure_bridge_asm_end
 closure_bridge_asm_end:
-]==])
-        file(WRITE "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_trampoline_arm64.asm" [==[
-# Neutralized for x86_64 builds by PAS (see app/src/main/cpp/CMakeLists.txt):
-# the ARM64 closure trampoline is only used by DobbyInstrument on ARM64.
-    .text
     .globl closure_trampoline_asm
 closure_trampoline_asm:
     ret
     .globl closure_trampoline_asm_end
 closure_trampoline_asm_end:
 ]==])
-        # The x64 closure bridge has the same defect: it uses the cdecl macro,
-        # which only a preprocessing assembler pass would define. Stub it the
-        # same way (symbols kept, body = ret).
-        file(WRITE "${dobby_SOURCE_DIR}/source/TrampolineBridge/ClosureTrampolineBridge/x64/closure_bridge_x64.asm" [==[
-# Neutralized for x86_64 builds by PAS (see app/src/main/cpp/CMakeLists.txt):
-# the closure bridge is only used by DobbyInstrument, which the PAS inline
-# backstop never calls - plain DobbyHook uses inline trampolines only.
-    .text
-    .globl closure_bridge_asm
-closure_bridge_asm:
-    ret
-    .globl closure_bridge_asm_end
-closure_bridge_asm_end:
-]==])
+        endforeach()
         add_subdirectory(${dobby_SOURCE_DIR} ${dobby_BINARY_DIR})
     endif()
     target_include_directories(pas PRIVATE ${dobby_SOURCE_DIR}/include)
