@@ -84,6 +84,7 @@ static void LogVkHeaderProbes() {
 }
 
 static volatile bool g_drvprops_logged = false;
+static volatile bool g_props2_node_diag = false;
 
 static const uint32_t kPasDriverPropsSType = 1000196000u;
 
@@ -124,11 +125,24 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
     if (!GpuSpoofActive()) return;
     PatchCoreProps(&out->properties);
     int guard = 0;
-    for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
-         s = s->pNext, guard++) {
+    bool foundDriverProps = false;
+    for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext;
+         s != nullptr && guard < 32; s = s->pNext, guard++) {
         if ((uint32_t)s->sType == kPasDriverPropsSType) {
             PatchDriverPropsNode((void*)s);
+            foundDriverProps = true;
         }
+    }
+    // v2.6.5 diag (one-shot): a properties2 call went through the proxy but
+    // carried no driver-properties node. If a tool still displays the real
+    // driver name, its data came from a call that bypassed this proxy.
+    if (!foundDriverProps && !g_props2_node_diag) {
+        g_props2_node_diag = true;
+        char b[96];
+        VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext;
+        uint32_t st0 = s ? (uint32_t)s->sType : 0;
+        snprintf(b, sizeof(b), "chain=%d firstSType=%u", guard, st0);
+        Log("native: vk diag: props2 call without driverprops node (%s)", b);
     }
 }
 
@@ -446,6 +460,7 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
 }
 
 static __thread int g_dlsym_depth = 0;
+static volatile bool g_second_gipa_diag = false;
 
 static void* MyDlsym(void* handle, const char* symbol) {
     BYTEHOOK_STACK_SCOPE();
@@ -463,10 +478,19 @@ static void* MyDlsym(void* handle, const char* symbol) {
         if (!symbol || symbol[0] != 'v' || symbol[1] != 'k') break;
         if (!GpuSpoofActive() || !VulkanSpoofActive()) break;
         if (strcmp(symbol, "vkGetInstanceProcAddr") == 0) {
-            if (g_real_gipa == nullptr || g_real_gipa == real) {
+            if (g_real_gipa == nullptr) {
                 g_real_gipa = real;
-                out = (void*)MyVkGetInstanceProcAddrPtr;
+            } else if (g_real_gipa != real) {
+                // v2.6.5 diag: a second, different gipa address was resolved.
+                // The current code passes it through raw - if a tool resolves
+                // its functions through this one, its queries bypass every
+                // proxy (observed as real driver-name leak in DevCheck).
+                if (!g_second_gipa_diag) {
+                    g_second_gipa_diag = true;
+                    Log("native: vk diag: second gipa address seen - passed through raw");
+                }
             }
+            out = (void*)MyVkGetInstanceProcAddrPtr;
             break;
         }
         int id = TargetIndex(symbol);
