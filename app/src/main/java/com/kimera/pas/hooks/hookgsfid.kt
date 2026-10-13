@@ -32,6 +32,16 @@ class HookGsfId : XHook {
     override val targetKlass: String
         get() = "android.content.ContentResolver"
 
+    // v2.6.3 diag: one-shot counter for gsf-authority queries that do NOT
+    // match any spoofed shape - the next capture names the uncovered path.
+    private var unmatchedLogged = 0
+
+    private fun logUnmatchedGsf(module: XposedModule, shape: String) {
+        if (unmatchedLogged >= 3) return
+        unmatchedLogged++
+        module.log(Log.INFO, TAG, "[PAS] GSF diag: gsf query NOT spoofed: $shape")
+    }
+
     override fun injectHook(module: XposedModule) {
         hookQuery(module)
         hookQueryBundle(module)
@@ -101,6 +111,9 @@ class HookGsfId : XHook {
                     module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed")
                     cursor
                 } else {
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "query uri=$uri sel=$selection args=${args?.joinToString()}")
+                    }
                     chain.proceed()
                 }
             }
@@ -126,6 +139,9 @@ class HookGsfId : XHook {
                     module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (bundle)")
                     cursor
                 } else {
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "query-bundle uri=$uri keys=${bundle?.keySet()?.joinToString()}")
+                    }
                     chain.proceed()
                 }
             }
@@ -154,6 +170,9 @@ class HookGsfId : XHook {
                     module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (cancellation)")
                     cursor
                 } else {
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "query-cancel uri=$uri sel=$selection args=${args?.joinToString()}")
+                    }
                     chain.proceed()
                 }
             }
@@ -203,6 +222,9 @@ class HookGsfId : XHook {
                     module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (call)")
                     spoofed
                 } else {
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "call uri=$uri method=$callMethod arg=$arg")
+                    }
                     result
                 }
             }
@@ -231,6 +253,9 @@ class HookGsfId : XHook {
                     module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (call)")
                     spoofed
                 } else {
+                    if (isGsfAuthorityName(authority)) {
+                        logUnmatchedGsf(module, "call-auth method=$callMethod arg=$arg")
+                    }
                     result
                 }
             }

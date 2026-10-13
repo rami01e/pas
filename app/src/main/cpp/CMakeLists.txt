@@ -33,6 +33,26 @@ if(ANDROID_ABI STREQUAL "arm64-v8a")
     target_compile_definitions(pas PRIVATE PAS_HAVE_SHADOWHOOK=1)
 endif()
 
+# v2.6.3: x86_64-only inline-hook backstop (Dobby) for the Vulkan identity.
+# ARM-translated apps (MuMu/Houdini: arm64-only libraries executed through the
+# native bridge) resolve Vulkan symbols outside every PLT/GOT surface we can
+# patch, so the identity hooks must sit on the x86_64 libvulkan.so function
+# bodies themselves. ARM builds are completely unaffected.
+if(ANDROID_ABI STREQUAL "x86_64")
+    include(FetchContent)
+    set(DOBBY_GENERATE_SHARED OFF CACHE BOOL "" FORCE)
+    set(DOBBY_DEBUG OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(dobby
+        GIT_REPOSITORY https://github.com/jmpews/Dobby.git
+        GIT_TAG latest
+        GIT_SHALLOW TRUE
+        GIT_PROGRESS TRUE)
+    FetchContent_MakeAvailable(dobby)
+    target_include_directories(pas PRIVATE ${dobby_SOURCE_DIR}/include)
+    target_compile_definitions(pas PRIVATE PAS_HAVE_DOBBY=1)
+    target_link_libraries(pas dobby)
+endif()
+
 target_link_libraries(pas
     log
     dl
