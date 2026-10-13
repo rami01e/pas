@@ -27,7 +27,15 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Set up NDK and CMake
-        run: yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null 2>&1 || true
+        run: |
+          set -e
+          rm -rf "$ANDROID_HOME/ndk/27.0.12077973"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
+          test -f "$ANDROID_HOME/ndk/27.0.12077973/source.properties" || {
+            echo "NDK install verification failed"
+            exit 1
+          }
 
       - name: Use github keystore for release
         run: |
