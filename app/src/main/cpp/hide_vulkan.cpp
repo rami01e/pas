@@ -85,6 +85,7 @@ static void LogVkHeaderProbes() {
 
 static volatile bool g_drvprops_logged = false;
 static volatile bool g_props2_node_diag = false;
+static volatile int g_props2_calllog = 0;
 
 static const uint32_t kPasDriverPropsSType = 1000196000u;
 
@@ -133,16 +134,23 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
             foundDriverProps = true;
         }
     }
-    // v2.6.5 diag (one-shot): a properties2 call went through the proxy but
-    // carried no driver-properties node. If a tool still displays the real
-    // driver name, its data came from a call that bypassed this proxy.
-    if (!foundDriverProps && !g_props2_node_diag) {
-        g_props2_node_diag = true;
-        char b[96];
+    // v2.6.5 diag (capped): log the first properties2 calls that reach the
+    // proxy, with chain shape, so a tool showing real driver data is
+    // attributable: found=1 + real display => display source is elsewhere;
+    // no calls logged at all => the tool resolved a raw pointer elsewhere.
+    if (g_props2_calllog < 12) {
+        g_props2_calllog++;
         VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext;
         uint32_t st0 = s ? (uint32_t)s->sType : 0;
-        snprintf(b, sizeof(b), "chain=%d firstSType=%u", guard, st0);
-        Log("native: vk diag: props2 call without driverprops node (%s)", b);
+        int nodes = 0;
+        for (VkBaseOutStructure* t = s; t != nullptr && nodes < 32; t = t->pNext, nodes++) {
+        }
+        Log("native: vk diag: props2 found=%d nodes=%d firstSType=%u",
+            foundDriverProps ? 1 : 0, nodes, st0);
+    }
+    if (!foundDriverProps && !g_props2_node_diag) {
+        g_props2_node_diag = true;
+        Log("native: vk diag: props2 call without driverprops node");
     }
 }
 
