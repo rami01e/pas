@@ -6,6 +6,8 @@
 #include "pas.h"
 
 #include <dlfcn.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -709,6 +711,39 @@ static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
 
 // Install an inline hook: target's first >=12 bytes become
 // `movabs rax, wrapper; jmp rax`; *origOut receives the trampoline.
+// Write strategy: mprotect+memcpy first; on hardened targets where adding W
+// to file-backed code is denied (TEXTREL/execmod protections), fall back to
+// a /proc/self/mem write, which the kernel performs via COW without any
+// page-protection change.
+static bool PasWriteCode(void* target, const void* data, size_t len) {
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) pageSize = 4096;
+    uintptr_t start = (uintptr_t)target & ~(uintptr_t)(pageSize - 1);
+    uintptr_t end = ((uintptr_t)target + len + (uintptr_t)pageSize - 1) &
+                    ~(uintptr_t)(pageSize - 1);
+    if (mprotect((void*)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) == 0) {
+        memcpy(target, data, len);
+        __builtin___clear_cache((char*)target, (char*)target + len);
+        mprotect((void*)start, end - start, PROT_READ | PROT_EXEC);
+        return true;
+    }
+    int err = errno;
+    int fd = open("/proc/self/mem", O_RDWR);
+    if (fd < 0) {
+        Log("native: vk inline: mprotect errno=%d and /proc/self/mem open failed", err);
+        return false;
+    }
+    bool ok = lseek(fd, (off_t)(uintptr_t)target, SEEK_SET) != (off_t)-1 &&
+              write(fd, data, len) == (ssize_t)len;
+    close(fd);
+    if (!ok) {
+        Log("native: vk inline: /proc/self/mem write failed errno=%d", errno);
+        return false;
+    }
+    __builtin___clear_cache((char*)target, (char*)target + len);
+    return true;
+}
+
 static bool PasInlineHookX64(void* target, void* wrapper, void** origOut) {
     uint8_t* tramp = (uint8_t*)mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -720,25 +755,16 @@ static bool PasInlineHookX64(void* target, void* wrapper, void** origOut) {
     }
     __builtin___clear_cache((char*)tramp, (char*)tramp + copied);
 
-    long pageSize = sysconf(_SC_PAGESIZE);
-    if (pageSize <= 0) pageSize = 4096;
-    uintptr_t start = (uintptr_t)target & ~(uintptr_t)(pageSize - 1);
-    uintptr_t end = ((uintptr_t)target + 12 + (uintptr_t)pageSize - 1) &
-                    ~(uintptr_t)(pageSize - 1);
-    if (mprotect((void*)start, end - start, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        munmap(tramp, 4096);
-        return false;
-    }
     uint8_t patch[12];
     patch[0] = 0x48;
     patch[1] = 0xB8;
     memcpy(patch + 2, &wrapper, 8);
     patch[10] = 0xFF;
     patch[11] = 0xE0;
-    memcpy(target, patch, sizeof(patch));
-    __builtin___clear_cache((char*)target, (char*)target + 12);
-    // Drop write; keep the mapping executable again.
-    mprotect((void*)start, end - start, PROT_READ | PROT_EXEC);
+    if (!PasWriteCode(target, patch, sizeof(patch))) {
+        munmap(tramp, 4096);
+        return false;
+    }
     *origOut = tramp;
     return true;
 }
@@ -887,11 +913,19 @@ void InstallVulkanInlineBackstop() {
             Log("native: vulkan inline: %s not found", specs[i].sym);
             continue;
         }
+        int ripOff = -1;
+        size_t firstLen = PasDecodeX64((const uint8_t*)target, 16, &ripOff);
+        if (firstLen == 0) {
+            const uint8_t* b = (const uint8_t*)target;
+            Log("native: vulkan inline: %s unsupported prologue bytes "
+                "%02x %02x %02x %02x %02x %02x %02x %02x",
+                specs[i].sym, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]);
+            continue;
+        }
         if (PasInlineHookX64(target, specs[i].fn, &g_inline_orig[specs[i].id])) {
             ok++;
         } else {
-            Log("native: vulkan inline: %s skipped (unsupported prologue or mprotect failed)",
-                specs[i].sym);
+            Log("native: vulkan inline: %s write failed (see prior line)", specs[i].sym);
         }
     }
     Log("native: vulkan inline hooks installed %d/%d (x86_64 backstop)", ok, VK_T_COUNT);
