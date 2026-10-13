@@ -5,6 +5,7 @@
 
 #include "pas.h"
 
+#include <dlfcn.h>
 #include <jni.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -484,6 +485,190 @@ static void* MyDlsym(void* handle, const char* symbol) {
 }
 
 static volatile int g_vk_hooklog = 0;
+
+// ---------------------------------------------------------------------------
+// v2.6.3: x86_64 inline-hook backstop (Dobby).
+//
+// ARM-translated apps (MuMu/Houdini: arm64-only libraries executed through
+// the native bridge) resolve Vulkan symbols outside every PLT/GOT surface the
+// caller-side hooks can patch - the ARM linker's GOT is runtime-managed by
+// the translation layer and is deliberately not touched - so the real GPU
+// identity leaked through (e.g. DevCheck's updated Vulkan probe).
+//
+// Every Vulkan call, translated or not, eventually executes the real x86_64
+// libvulkan.so function bodies. Inline-hooking those exports intercepts
+// execution itself and cannot be bypassed by any resolution path (static
+// import, dlsym, PLT, translated call). The patch helpers below are
+// idempotent, so double coverage (caller PLT hook fires first, inline hook
+// fires underneath) is safe and produces identical results.
+// ---------------------------------------------------------------------------
+
+#if defined(__x86_64__) && defined(PAS_HAVE_DOBBY)
+
+#include "dobby.h"
+
+static void* g_inline_orig[VK_T_COUNT] = {nullptr};
+
+static void InlineVkGetPhysicalDeviceProperties(VkPhysicalDevice pd,
+                                                VkPhysicalDeviceProperties* out) {
+    auto orig = (PFN_vkGetPhysicalDeviceProperties)g_inline_orig[VK_T_PROP];
+    if (orig) orig(pd, out);
+    if (!out) return;
+    WaitForGpuConfig(1500);
+    if (GpuSpoofActive() && VulkanSpoofActive()) PatchCoreProps(out);
+}
+
+static void InlineVkGetPhysicalDeviceProperties2(VkPhysicalDevice pd,
+                                                 VkPhysicalDeviceProperties2* out) {
+    auto orig = (PFN_vkGetPhysicalDeviceProperties2)g_inline_orig[VK_T_PROP2];
+    if (orig) orig(pd, out);
+    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchProps2(out);
+}
+
+static void InlineVkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice pd,
+                                                    VkPhysicalDeviceProperties2* out) {
+    auto orig = (PFN_vkGetPhysicalDeviceProperties2)g_inline_orig[VK_T_PROP2K];
+    if (orig) orig(pd, out);
+    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchProps2(out);
+}
+
+static void InlineVkGetPhysicalDeviceFeatures(VkPhysicalDevice pd,
+                                              VkPhysicalDeviceFeatures* out) {
+    auto orig = (PFN_vkGetPhysicalDeviceFeatures)g_inline_orig[VK_T_FEAT];
+    if (orig) orig(pd, out);
+    if (!out) return;
+    WaitForGpuConfig(1500);
+    if (GpuSpoofActive() && VulkanSpoofActive()) PatchFeatures(out);
+}
+
+static void InlineVkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd,
+                                               VkPhysicalDeviceFeatures2* out) {
+    auto orig = (PFN_vkGetPhysicalDeviceFeatures2)g_inline_orig[VK_T_FEAT2];
+    if (orig) orig(pd, out);
+    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchFeatures2(out);
+}
+
+static void InlineVkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice pd,
+                                                  VkPhysicalDeviceFeatures2* out) {
+    auto orig = (PFN_vkGetPhysicalDeviceFeatures2)g_inline_orig[VK_T_FEAT2K];
+    if (orig) orig(pd, out);
+    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchFeatures2(out);
+}
+
+static VkResult InlineVkEnumerateDeviceExtensionProperties(VkPhysicalDevice pd,
+                                                           const char* layer,
+                                                           uint32_t* count,
+                                                           VkExtensionProperties* props) {
+    auto orig = (PFN_vkEnumerateDeviceExtensionProperties)g_inline_orig[VK_T_EXTDEV];
+    if (!orig) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = orig(pd, layer, count, props);
+    if (!count) return r;
+    if (layer != nullptr && layer[0] != '\0') return r;
+    if (props == nullptr) {
+        // Size query: report the count with hidden extensions subtracted.
+        if (!GpuSpoofActive() || !VulkanSpoofActive() || *count == 0) return r;
+        uint32_t total = *count;
+        VkExtensionProperties* tmp =
+            (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * total);
+        if (!tmp) return r;
+        uint32_t got = total;
+        orig(pd, layer, &got, tmp);
+        uint32_t hidden = 0;
+        for (uint32_t i = 0; i < got; i++) {
+            if (IsHiddenExtName(tmp[i].extensionName)) hidden++;
+        }
+        free(tmp);
+        if (hidden > 0) *count = total - hidden;
+        return r;
+    }
+    return FilterExtList(count, props, r);
+}
+
+static VkResult InlineVkEnumerateInstanceExtensionProperties(const char* layer,
+                                                             uint32_t* count,
+                                                             VkExtensionProperties* props) {
+    auto orig = (PFN_vkEnumerateInstanceExtensionProperties)g_inline_orig[VK_T_EXTINST];
+    if (!orig) return VK_ERROR_INITIALIZATION_FAILED;
+    VkResult r = orig(layer, count, props);
+    if (!count) return r;
+    if (layer != nullptr && layer[0] != '\0') return r;
+    if (props == nullptr) {
+        if (!GpuSpoofActive() || !VulkanSpoofActive() || *count == 0) return r;
+        uint32_t total = *count;
+        VkExtensionProperties* tmp =
+            (VkExtensionProperties*)malloc(sizeof(VkExtensionProperties) * total);
+        if (!tmp) return r;
+        uint32_t got = total;
+        orig(layer, &got, tmp);
+        uint32_t hidden = 0;
+        for (uint32_t i = 0; i < got; i++) {
+            if (IsHiddenExtName(tmp[i].extensionName)) hidden++;
+        }
+        free(tmp);
+        if (hidden > 0) *count = total - hidden;
+        return r;
+    }
+    return FilterExtList(count, props, r);
+}
+
+void InstallVulkanInlineBackstop() {
+    static int g_inline_state = 0;  // 0 = not tried, 1 = installed/attempted
+    if (g_inline_state) return;
+    g_inline_state = 1;
+
+    void* h = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!h) {
+        Log("native: vulkan inline: libvulkan.so dlopen failed");
+        return;
+    }
+
+    struct InlineSpec {
+        const char* sym;
+        int id;
+        void* fn;
+    };
+    static const InlineSpec specs[VK_T_COUNT] = {
+        {"vkGetPhysicalDeviceProperties", VK_T_PROP,
+         (void*)InlineVkGetPhysicalDeviceProperties},
+        {"vkGetPhysicalDeviceProperties2", VK_T_PROP2,
+         (void*)InlineVkGetPhysicalDeviceProperties2},
+        {"vkGetPhysicalDeviceProperties2KHR", VK_T_PROP2K,
+         (void*)InlineVkGetPhysicalDeviceProperties2KHR},
+        {"vkGetPhysicalDeviceFeatures", VK_T_FEAT,
+         (void*)InlineVkGetPhysicalDeviceFeatures},
+        {"vkGetPhysicalDeviceFeatures2", VK_T_FEAT2,
+         (void*)InlineVkGetPhysicalDeviceFeatures2},
+        {"vkGetPhysicalDeviceFeatures2KHR", VK_T_FEAT2K,
+         (void*)InlineVkGetPhysicalDeviceFeatures2KHR},
+        {"vkEnumerateDeviceExtensionProperties", VK_T_EXTDEV,
+         (void*)InlineVkEnumerateDeviceExtensionProperties},
+        {"vkEnumerateInstanceExtensionProperties", VK_T_EXTINST,
+         (void*)InlineVkEnumerateInstanceExtensionProperties},
+    };
+
+    int ok = 0;
+    for (int i = 0; i < VK_T_COUNT; i++) {
+        void* target = dlsym(h, specs[i].sym);
+        if (!target) {
+            Log("native: vulkan inline: %s not found", specs[i].sym);
+            continue;
+        }
+        if (DobbyHook(target, specs[i].fn, &g_inline_orig[specs[i].id]) == 0) {
+            ok++;
+        } else {
+            Log("native: vulkan inline: %s hook failed", specs[i].sym);
+        }
+    }
+    Log("native: vulkan inline hooks installed %d/%d (x86_64 backstop)", ok, VK_T_COUNT);
+}
+
+#else
+
+void InstallVulkanInlineBackstop() {
+    // Inline backstop is x86_64-only; ARM builds rely on the PLT/dlsym layers.
+}
+
+#endif
 
 static void OnVkHooked(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                        const char* sym_name, void* new_func, void* prev_func, void* arg) {

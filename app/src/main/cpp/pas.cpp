@@ -646,6 +646,7 @@ static void* InitWorker(void* arg) {
     InstallGpuHooks();
     InstallGpuDlsymChain();
     InstallVulkanHooks();
+    InstallVulkanInlineBackstop();
     Log("native: stage0g gpu identity hooks installed early (runtime-gated)");
 
     // The Kotlin side delivers the configuration first: with the native addon

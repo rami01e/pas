@@ -127,6 +127,10 @@ std::string GpuSpoofArch();
 
 void InstallGpuHooks();
 void InstallVulkanHooks();
+// v2.6.3: x86_64-only inline backstop on the real libvulkan.so exports so
+// ARM-translated apps (Houdini) cannot bypass the PLT/dlsym layers. No-op on
+// other ABIs.
+void InstallVulkanInlineBackstop();
 void InstallCpuDeepHooks();
 
 void SetRecon(bool on);
