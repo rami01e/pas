@@ -541,6 +541,10 @@ static volatile int g_vk_hooklog = 0;
 
 #if defined(__x86_64__)
 
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+
 static void* g_inline_orig[VK_T_COUNT] = {nullptr};
 
 // ---------------------------------------------------------------------------
@@ -573,9 +577,18 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
 
     size_t i = 0;
     bool rexW = false;
-    if (c[0] >= 0x40 && c[0] <= 0x4F) {
-        rexW = (c[0] & 0x08) != 0;
-        i = 1;
+    // v2.6.5: segment prefixes (fs/gs) precede stack-canary loads
+    // (mov rax, fs:[0x28]) that appear in the first bytes of nearly every
+    // hardended system-lib function.
+    int segSkip = 0;
+    while (i < avail && (c[i] == 0x64 || c[i] == 0x65)) {
+        i++;
+        if (++segSkip > 1) return 0;
+    }
+    if (i >= avail) return 0;
+    if (c[i] >= 0x40 && c[i] <= 0x4F) {
+        rexW = (c[i] & 0x08) != 0;
+        i++;
         if (i >= avail) return 0;
     }
 
@@ -916,19 +929,58 @@ void InstallVulkanInlineBackstop() {
         const uint8_t* tb = (const uint8_t*)target;
         if (tb[0] == 0xE9) {
             // Export is a tail-call thunk: `jmp rel32` into the internal
-            // implementation. Rewrite the rel32 so the thunk jumps to our
-            // wrapper instead; the wrapper calls the original internal
-            // destination (recorded in g_inline_orig) as a plain pointer.
+            // implementation. The wrapper (libpas.so) is usually outside
+            // rel32 range, so place a 12-byte near trampoline page within
+            // rel32 of the target (absolute jump to the wrapper), then
+            // rewrite the thunk's rel32 to point at it.
             int32_t rel;
             memcpy(&rel, tb + 1, 4);
             void* origDest = (void*)(tb + 5 + (int64_t)rel);
-            int64_t newRel = (int64_t)((uintptr_t)specs[i].fn - (uintptr_t)target - 5);
+            uint8_t* nearTramp = nullptr;
+            for (uintptr_t off = 0x1000000; off <= 0x7F000000; off += 0x1000000) {
+                // 16 MB steps in both directions, up to ~2 GB
+                for (int dir = 0; dir < 2; dir++) {
+                    uintptr_t cand = (dir ? (uintptr_t)target + off
+                                          : (uintptr_t)target - off) &
+                                     ~(uintptr_t)0xFFF;
+                    void* p = mmap((void*)cand, 4096,
+                                   PROT_READ | PROT_WRITE | PROT_EXEC,
+                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                                   -1, 0);
+                    if (p != MAP_FAILED) {
+                        nearTramp = (uint8_t*)p;
+                        break;
+                    }
+                }
+                if (nearTramp) break;
+            }
+#ifndef MAP_FIXED_NOREPLACE
+#define MAP_FIXED_NOREPLACE 0x100000
+#endif
+            if (!nearTramp) {
+                Log("native: vulkan inline: %s no near page for thunk", specs[i].sym);
+                continue;
+            }
+            size_t o = 0;
+            nearTramp[o++] = 0x48;
+            nearTramp[o++] = 0xB8;
+            memcpy(nearTramp + o, &specs[i].fn, 8);
+            o += 8;
+            nearTramp[o++] = 0xFF;
+            nearTramp[o++] = 0xE0;
+            __builtin___clear_cache((char*)nearTramp, (char*)nearTramp + o);
+            int64_t newRel = (int64_t)((uintptr_t)nearTramp - (uintptr_t)target - 5);
             if (newRel < INT32_MIN || newRel > INT32_MAX) {
-                Log("native: vulkan inline: %s thunk out of rel32 range", specs[i].sym);
+                Log("native: vulkan inline: %s near trampoline still out of range",
+                    specs[i].sym);
+                munmap(nearTramp, 4096);
                 continue;
             }
             int32_t nr = (int32_t)newRel;
-            if (!PasWriteCode((void*)(tb + 1), &nr, 4)) continue;
+            if (!PasWriteCode((void*)(tb + 1), &nr, 4)) {
+                munmap(nearTramp, 4096);
+                continue;
+            }
             g_inline_orig[specs[i].id] = origDest;
             ok++;
             Log("native: vulkan inline: %s thunk hooked", specs[i].sym);
