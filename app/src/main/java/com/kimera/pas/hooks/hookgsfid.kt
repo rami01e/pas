@@ -18,6 +18,12 @@ import java.util.WeakHashMap
 
 private const val GSF_AUTHORITY = "com.google.android.gsf.gservices"
 
+/** 16-char value containing at least one hex letter => hex16 format. */
+private fun looksHex16(s: String?): Boolean =
+    s != null && s.length == 16 &&
+        s.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' } &&
+        s.any { it in 'a'..'f' || it in 'A'..'F' }
+
 /**
  * GSF ID (Google Services Framework android_id) spoof.
  *
@@ -26,21 +32,27 @@ private const val GSF_AUTHORITY = "com.google.android.gsf.gservices"
  *     4-arg, Bundle and CancellationSignal overloads.
  *  2. Path-style URI (key in the URI path).
  *  3. ContentResolver.call() "getValue"-style, Uri and authority overloads.
- *  4. ContentProviderClient.query(...) - apps that acquire a provider
- *     client bypass every ContentResolver hook. The query Uri carries the
- *     authority, so no receiver access is needed.
- *  5. ContentProviderClient.call(...) - receiver-free: gservices is the
- *     only provider whose call() surface uses android_id as a key, so the
- *     method/arg/extras shape identifies the read. acquire[Unstable]
- *     ContentProviderClient calls are tagged (WeakHashMap + one-shot diag)
- *     as an additional gate for future refinement.
+ *  4. ContentProviderClient.query(...) and .call(...).
+ *  5. acquire[Unstable]ContentProviderClient tagging (observation diag).
+ *
+ * v2.7.4 RESPONSE MIRRORING: every matched query proceeds the REAL provider
+ * read (the same binder call the app would have made unhooked), then returns
+ * a copy with identical column names, per-cell types and rows - only the
+ * android_id value cell is replaced, formatted with the same type and radix
+ * as the real cell. The real value never reaches the app. The previous
+ * static (_id,value) shape was parseable by index-based readers (Mantle
+ * Verify) but not by TB Checker, whose read was intercepted at the Phase-4
+ * expansion (real id shown before, "not found" after).
  *
  * One-shot diagnostics (all INFO, tag PerAppSpoofer):
- *  - "gsf read while spoof inert"      -> read raced the config thread
- *  - "real cursor cols/types/count"    -> exact shape to mimic (peek+discard)
- *  - "real call() android_id type"     -> value type the call path delivers
- *  - "ContentProviderClient acquired"  -> reader uses the client path
- *  - "gsfId unparseable"               -> config format problem (leak cause)
+ *  - "mirror shape cols=[...] types=[...] count=... radix=..."  -> observed
+ *    real provider response shape (the reference for any residual mismatch)
+ *  - "real call() result android_id=... keys=[...]"             -> call-path
+ *    value type and key set (names the key if it is not "android_id")
+ *  - "gsf query NOT spoofed: <shape>"                           -> uncovered
+ *    read shape (cap 10, includes projection)
+ *  - "gsf read while spoof inert" / "gsfId unparseable"         -> config
+ *  - "ContentProviderClient acquired for gservices via ..."     -> client path
  *
  * Not reachable from an in-process hook: reads performed by GMS inside its
  * own process, and reads issued over the raw IContentProvider binder
@@ -54,7 +66,7 @@ class HookGsfId : XHook {
     private var unmatchedLogged = 0
     private var inertLogged = false
     private var formatLogged = false
-    private var cursorPeeked = false
+    private var shapeLogged = false
     private var callPeeked = false
     private var cpcAcquireLogged = false
     private var diagModule: XposedModule? = null
@@ -69,7 +81,6 @@ class HookGsfId : XHook {
         hookQueryCancellation(module)
         hookCallUri(module)
         hookCallAuthority(module)
-        // Client-path coverage + observation
         hookCpcQueryClassic(module)
         hookCpcQueryBundle(module)
         hookCpcCall(module)
@@ -129,12 +140,7 @@ class HookGsfId : XHook {
     // value helpers
     // ------------------------------------------------------------------
 
-    /**
-     * Accept the configured GSF ID as decimal or 16-char hex (with/without
-     * 0x). Delivered value is always a Long: readers doing getString(1) +
-     * Long.parseLong and readers doing getLong(1) both work, and
-     * Long.toHexString(...) then produces the expected hex form.
-     */
+    /** Configured GSF ID as decimal or 16-char hex (with/without 0x). */
     private fun gsfIdValue(): Long? {
         val raw = SpoofState.gsfId.trim()
         if (raw.isEmpty()) return null
@@ -144,54 +150,112 @@ class HookGsfId : XHook {
         return null
     }
 
-    private fun gsfCursor(module: XposedModule): MatrixCursor? {
-        val value = gsfIdValue()
-        if (value == null) {
-            if (!formatLogged && SpoofState.gsfId.isNotEmpty()) {
-                formatLogged = true
-                module.log(Log.INFO, TAG,
-                    "[PAS] GSF diag: configured gsfId unparseable " +
-                        "(len=${SpoofState.gsfId.length} prefix='${SpoofState.gsfId.take(4)}') " +
-                        "- expected decimal or 16-char hex; reads passed through")
-            }
-            return null
-        }
+    private fun logUnparseableOnce(module: XposedModule) {
+        if (formatLogged || SpoofState.gsfId.isEmpty()) return
+        formatLogged = true
+        module.log(Log.INFO, TAG,
+            "[PAS] GSF diag: configured gsfId unparseable " +
+                "(len=${SpoofState.gsfId.length} prefix='${SpoofState.gsfId.take(4)}') " +
+                "- expected decimal or 16-char hex; matched reads passed through")
+    }
+
+    /** Legacy static shape: last-resort when the real read fails or is empty. */
+    private fun staticGsfCursor(spoof: Long): Cursor {
         val cursor = MatrixCursor(arrayOf("_id", "value"))
-        cursor.addRow(arrayOf<Any?>(0L, value))
+        cursor.addRow(arrayOf<Any?>(0L, spoof))
         return cursor
     }
 
+    private fun cellAt(c: Cursor, i: Int): Any? = when (c.getType(i)) {
+        Cursor.FIELD_TYPE_INTEGER -> c.getLong(i)
+        Cursor.FIELD_TYPE_FLOAT -> c.getDouble(i)
+        Cursor.FIELD_TYPE_STRING -> c.getString(i)
+        Cursor.FIELD_TYPE_BLOB -> c.getBlob(i)
+        else -> null
+    }
+
+    private fun typeName(t: Int): String = when (t) {
+        Cursor.FIELD_TYPE_INTEGER -> "int"
+        Cursor.FIELD_TYPE_FLOAT -> "float"
+        Cursor.FIELD_TYPE_STRING -> "string"
+        Cursor.FIELD_TYPE_BLOB -> "blob"
+        else -> "null"
+    }
+
+    private fun logShapeOnce(module: XposedModule, detail: String) {
+        if (shapeLogged) return
+        shapeLogged = true
+        module.log(Log.INFO, TAG, "[PAS] GSF diag: $detail")
+    }
+
     /**
-     * One-shot: proceed the real query, log the real provider's cursor shape,
-     * discard it. The spoofed cursor is returned by the caller regardless.
+     * Build the spoofed response by MIRRORING the real provider's cursor:
+     * identical columns, per-cell types and rows; only the android_id value
+     * cell is replaced, with the same type and radix as the real cell.
+     * Returns null only when the configured gsfId is unparseable (caller
+     * then passes the real query through).
      */
-    private fun peekRealCursorShape(module: XposedModule, proceed: () -> Any?) {
-        if (cursorPeeked) return
-        cursorPeeked = true
-        try {
-            val real = proceed() as? Cursor
-            if (real == null) {
-                module.log(Log.INFO, TAG, "[PAS] GSF diag: real query returned null cursor")
-                return
-            }
-            val names = real.columnNames?.joinToString(",") ?: "?"
-            val types = (0 until real.columnCount).joinToString(",") { i ->
-                when (real.getType(i)) {
-                    Cursor.FIELD_TYPE_INTEGER -> "int"
-                    Cursor.FIELD_TYPE_FLOAT -> "float"
-                    Cursor.FIELD_TYPE_STRING -> "string"
-                    Cursor.FIELD_TYPE_BLOB -> "blob"
-                    else -> "null"
-                }
-            }
-            val count = if (real.moveToFirst()) real.count else 0
-            module.log(Log.INFO, TAG,
-                "[PAS] GSF diag: real cursor cols=[$names] types=[$types] count=$count " +
-                    "- spoofed cursor delivers [_id,value]")
-            real.close()
+    private fun spoofedQueryCursor(module: XposedModule, proceed: () -> Any?): Cursor? {
+        val spoof = gsfIdValue()
+        if (spoof == null) {
+            logUnparseableOnce(module)
+            return null
+        }
+        val real: Cursor? = try {
+            proceed() as? Cursor
         } catch (t: Throwable) {
-            module.log(Log.INFO, TAG,
-                "[PAS] GSF diag: real cursor peek failed: ${t.javaClass.simpleName}")
+            null
+        }
+        if (real == null) {
+            logShapeOnce(module, "mirror: real query returned null - static shape used")
+            return staticGsfCursor(spoof)
+        }
+        try {
+            val cols = real.columnNames?.toList()
+            if (cols.isNullOrEmpty()) {
+                real.close()
+                logShapeOnce(module, "mirror: real query returned no columns - static shape used")
+                return staticGsfCursor(spoof)
+            }
+            val valueCol = cols.indexOf("value").let { if (it >= 0) it else if (cols.size >= 2) 1 else -1 }
+            val nameCol = cols.indexOf("name")
+            val out = MatrixCursor(cols.toTypedArray())
+            var rowCount = 0
+            var hex = false
+            if (real.moveToFirst()) {
+                var first = true
+                do {
+                    val row = arrayOfNulls<Any?>(cols.size)
+                    for (i in cols.indices) row[i] = cellAt(real, i)
+                    if (first) {
+                        first = false
+                        val types = (0 until real.columnCount).joinToString(",") { typeName(real.getType(it)) }
+                        val nameMatches = nameCol < 0 || (row[nameCol] as? String) == "android_id"
+                        if (nameMatches && valueCol >= 0) hex = looksHex16(row[valueCol] as? String)
+                        logShapeOnce(module, "mirror shape cols=[${cols.joinToString(",")}] " +
+                            "types=[$types] count=${real.count} valueCol=$valueCol nameCol=$nameCol " +
+                            "radix=${if (hex) "hex16" else "decimal"}")
+                    }
+                    val isTargetRow = nameCol < 0 || (row[nameCol] as? String) == "android_id"
+                    if (isTargetRow && valueCol >= 0) {
+                        val orig = row[valueCol]
+                        row[valueCol] = if (orig is Long) spoof
+                            else if (hex) spoof.toString(16).padStart(16, '0')
+                            else spoof.toString()
+                    }
+                    out.addRow(*row)
+                    rowCount++
+                } while (real.moveToNext() && rowCount < 8)
+            } else {
+                logShapeOnce(module, "mirror shape cols=[${cols.joinToString(",")}] count=0 " +
+                    "(real result empty - mirrored)")
+            }
+            real.close()
+            return out
+        } catch (t: Throwable) {
+            try { real.close() } catch (_: Throwable) {}
+            logShapeOnce(module, "mirror failed (${t.javaClass.simpleName}) - static shape used")
+            return staticGsfCursor(spoof)
         }
     }
 
@@ -211,17 +275,21 @@ class HookGsfId : XHook {
             )
             module.hook(method).intercept { chain ->
                 val uri = chain.getArg(0) as? Uri
+                val projection = chain.getArg(1) as? Array<*>
                 val selection = chain.getArg(2) as? String
                 val args = chain.getArg(3) as? Array<*>
-                val matched = isGsfAuthority(uri) && refsAndroidId(uri, selection, args)
-                val cursor = if (matched) gsfCursor(module) else null
-                if (cursor != null) {
-                    peekRealCursorShape(module) { chain.proceed() }
-                    module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed")
-                    cursor
+                if (isGsfAuthority(uri) && refsAndroidId(uri, selection, args)) {
+                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    if (cursor != null) {
+                        module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored)")
+                        cursor
+                    } else {
+                        chain.proceed()
+                    }
                 } else {
-                    if (isGsfAuthority(uri) && !matched) {
-                        logUnmatchedGsf(module, "query uri=$uri sel=$selection args=${args?.joinToString()}")
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "query uri=$uri proj=${projection?.joinToString()} " +
+                            "sel=$selection args=${args?.joinToString()}")
                     }
                     chain.proceed()
                 }
@@ -241,15 +309,18 @@ class HookGsfId : XHook {
             module.hook(method).intercept { chain ->
                 val uri = chain.getArg(0) as? Uri
                 val bundle = chain.getArg(2) as? Bundle
-                val matched = isGsfAuthority(uri) &&
+                if (isGsfAuthority(uri) &&
                     (refsAndroidIdInBundle(bundle) || refsAndroidId(uri, null, null))
-                val cursor = if (matched) gsfCursor(module) else null
-                if (cursor != null) {
-                    peekRealCursorShape(module) { chain.proceed() }
-                    module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (bundle)")
-                    cursor
+                ) {
+                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    if (cursor != null) {
+                        module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,bundle)")
+                        cursor
+                    } else {
+                        chain.proceed()
+                    }
                 } else {
-                    if (isGsfAuthority(uri) && !matched) {
+                    if (isGsfAuthority(uri)) {
                         logUnmatchedGsf(module, "query-bundle uri=$uri keys=${bundle?.keySet()?.joinToString()}")
                     }
                     chain.proceed()
@@ -271,17 +342,21 @@ class HookGsfId : XHook {
             )
             module.hook(method).intercept { chain ->
                 val uri = chain.getArg(0) as? Uri
+                val projection = chain.getArg(1) as? Array<*>
                 val selection = chain.getArg(2) as? String
                 val args = chain.getArg(3) as? Array<*>
-                val matched = isGsfAuthority(uri) && refsAndroidId(uri, selection, args)
-                val cursor = if (matched) gsfCursor(module) else null
-                if (cursor != null) {
-                    peekRealCursorShape(module) { chain.proceed() }
-                    module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (cancellation)")
-                    cursor
+                if (isGsfAuthority(uri) && refsAndroidId(uri, selection, args)) {
+                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    if (cursor != null) {
+                        module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,cancellation)")
+                        cursor
+                    } else {
+                        chain.proceed()
+                    }
                 } else {
-                    if (isGsfAuthority(uri) && !matched) {
-                        logUnmatchedGsf(module, "query-cancel uri=$uri sel=$selection args=${args?.joinToString()}")
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "query-cancel uri=$uri proj=${projection?.joinToString()} " +
+                            "sel=$selection args=${args?.joinToString()}")
                     }
                     chain.proceed()
                 }
@@ -295,21 +370,28 @@ class HookGsfId : XHook {
 
     private fun spoofedCallResult(module: XposedModule, result: Bundle?, explicit: Boolean): Bundle {
         val out = Bundle(result ?: Bundle())
-        if (!callPeeked && result != null && result.containsKey("android_id")) {
+        if (!callPeeked && result != null) {
             callPeeked = true
             val v: Any? = result.get("android_id")
             val desc = when (v) {
-                null -> "null"
+                null -> "absent"
                 is Long -> "Long(${v.toString().length} digits)"
                 is String -> "String(len=${v.length} prefix='${v.take(4)}')"
                 else -> v.javaClass.simpleName
             }
-            module.log(Log.INFO, TAG, "[PAS] GSF diag: real call() android_id value type=$desc")
+            val keys = result.keySet().joinToString(",").take(120)
+            module.log(Log.INFO, TAG,
+                "[PAS] GSF diag: real call() result android_id=$desc keys=[$keys]")
         }
-        val spoof = gsfIdValue() ?: return result ?: out
+        val spoof = gsfIdValue()
+        if (spoof == null) {
+            logUnparseableOnce(module)
+            return result ?: out
+        }
         if (out.containsKey("android_id")) {
-            when (out.get("android_id")) {
-                is String -> out.putString("android_id", spoof.toString()) // decimal, same as the provider
+            when (val v = out.get("android_id")) {
+                is String -> out.putString("android_id",
+                    if (looksHex16(v)) spoof.toString(16).padStart(16, '0') else spoof.toString())
                 else -> out.putLong("android_id", spoof)
             }
         } else if (explicit) {
@@ -393,19 +475,21 @@ class HookGsfId : XHook {
                 String::class.java
             )
             module.hook(method).intercept { chain ->
-                // The client carries no authority; the query Uri does.
                 val uri = chain.getArg(0) as? Uri
                 val selection = chain.getArg(2) as? String
                 val args = chain.getArg(3) as? Array<*>
-                val matched = isGsfAuthority(uri) && refsAndroidId(uri, selection, args)
-                val cursor = if (matched) gsfCursor(module) else null
-                if (cursor != null) {
-                    peekRealCursorShape(module) { chain.proceed() }
-                    module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (providerclient)")
-                    cursor
+                if (isGsfAuthority(uri) && refsAndroidId(uri, selection, args)) {
+                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    if (cursor != null) {
+                        module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,providerclient)")
+                        cursor
+                    } else {
+                        chain.proceed()
+                    }
                 } else {
-                    if (isGsfAuthority(uri) && !matched) {
-                        logUnmatchedGsf(module, "providerclient-query uri=$uri sel=$selection args=${args?.joinToString()}")
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "providerclient-query uri=$uri sel=$selection " +
+                            "args=${args?.joinToString()}")
                     }
                     chain.proceed()
                 }
@@ -425,12 +509,16 @@ class HookGsfId : XHook {
             module.hook(method).intercept { chain ->
                 val uri = chain.getArg(0) as? Uri
                 val bundle = chain.getArg(2) as? Bundle
-                val matched = isGsfAuthority(uri) &&
+                if (isGsfAuthority(uri) &&
                     (refsAndroidIdInBundle(bundle) || refsAndroidId(uri, null, null))
-                val cursor = if (matched) gsfCursor(module) else null
-                if (cursor != null) {
-                    module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (providerclient,bundle)")
-                    cursor
+                ) {
+                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    if (cursor != null) {
+                        module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,providerclient,bundle)")
+                        cursor
+                    } else {
+                        chain.proceed()
+                    }
                 } else {
                     chain.proceed()
                 }
@@ -441,8 +529,8 @@ class HookGsfId : XHook {
     /**
      * Client call() path. Receiver-free: gservices is the only provider
      * whose call() surface uses android_id as a key, so the method/arg/
-     * extras shape identifies the read. Result rewriting is type-preserving
-     * and touches only the android_id entry.
+     * extras shape identifies the read. Result rewriting is type- and
+     * radix-preserving and touches only the android_id entry.
      */
     private fun hookCpcCall(module: XposedModule) {
         hookSafe(module, "ContentProviderClient.call(gsf)") {
@@ -492,7 +580,7 @@ class HookGsfId : XHook {
     // ------------------------------------------------------------------
 
     private fun logUnmatchedGsf(module: XposedModule, shape: String) {
-        if (unmatchedLogged >= 3) return
+        if (unmatchedLogged >= 10) return
         unmatchedLogged++
         module.log(Log.INFO, TAG, "[PAS] GSF diag: gsf query NOT spoofed: $shape")
     }
