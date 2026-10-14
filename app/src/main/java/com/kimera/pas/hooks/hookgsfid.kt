@@ -243,7 +243,7 @@ class HookGsfId : XHook {
                             else if (hex) spoof.toString(16).padStart(16, '0')
                             else spoof.toString()
                     }
-                    out.addRow(*row)
+                    out.addRow(row)
                     rowCount++
                 } while (real.moveToNext() && rowCount < 8)
             } else {
