@@ -2,6 +2,26 @@
 //
 // v2.4.5: VkPhysicalDeviceProperties now carries the spoofed core count and
 // L2 cache size so DevCheck's Vulkan path sees a coherent device.
+//
+// v2.7.3:
+//  - Inline backstop hooks the IMPLEMENTATION BODY (the thunk's jump target
+//    when the export is an E9 thunk), not the export entry. gipa hands out
+//    body pointers, so gipa-dispatched calls (the ARM-translated probe path)
+//    never execute the export thunk - the v2.7.2 thunk rewrite covered only
+//    export-entry calls. A body hook covers every path: export entry, thunk
+//    jump, gipa-returned pointer, direct call, KHR alias via the core body.
+//  - Two patch strategies: 12-byte movabs+jmp when >=12 prologue bytes
+//    decode; 5-byte jmp rel32 -> near page otherwise (loader dispatch
+//    prologues are typically 5-8 bytes before an indirect jump).
+//  - Decode stops are logged with offset + bytes (v2.7.2 logged "write
+//    failed" for silent decoder stops - the 6/8 result in the first v2.7.2
+//    capture was undecodable instruction 2/3, not a write failure).
+//  - Trampoline jump-back is RIP-indirect (touches no registers; the old
+//    movabs r11 form clobbered r11 after the displaced prologue ran).
+//  - WaitForGpuConfig race parity on the features2 path; VulkanSpoofActive
+//    is the single gate inside PatchProps2/PatchFeatures2.
+//  - LogVkHeaderProbes removed: VK_STRUCTURE_TYPE_* are enum constants, not
+//    macros - the #ifdef probes always printed "missing" (false alarm).
 
 #include "pas.h"
 
@@ -69,24 +89,6 @@ static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
     p->apiVersion = (uint32_t)GpuSpoofApiVersion();
 }
 
-static void LogVkHeaderProbes() {
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES
-    Log("native: vk probe drvprops=macro");
-#else
-    Log("native: vk probe drvprops=missing");
-#endif
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES
-    Log("native: vk probe vk12feat=macro");
-#else
-    Log("native: vk probe vk12feat=missing");
-#endif
-#ifdef VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES
-    Log("native: vk probe vk13feat=macro");
-#else
-    Log("native: vk probe vk13feat=missing");
-#endif
-}
-
 static volatile bool g_drvprops_logged = false;
 static volatile bool g_props2_node_diag = false;
 static volatile int g_props2_calllog = 0;
@@ -120,14 +122,20 @@ static void PatchDriverPropsNode(void* node) {
     d->conformance[3] = (uint8_t)g_gpu_conf_patch;
     if (!g_drvprops_logged) {
         g_drvprops_logged = true;
-        Log("native: vulkan driverprops patched");
+        // v2.7.3: name the exact strings delivered, so a capture can prove
+        // the node was patched with the spoofed values (not merely reached).
+        Log("native: vulkan driverprops patched (name='%s' info='%s')",
+            d->driverName, d->driverInfo);
     }
 }
 
 static void PatchProps2(VkPhysicalDeviceProperties2* out) {
     if (!out) return;
     WaitForGpuConfig(1500);
-    if (!GpuSpoofActive()) return;
+    // v2.7.3: VulkanSpoofActive is the single gate for every patch path
+    // (PLT proxy, dlsym proxy, inline backstop) - the gpu options "vulkan"
+    // toggle is now respected uniformly.
+    if (!GpuSpoofActive() || !VulkanSpoofActive()) return;
     PatchCoreProps(&out->properties);
     int guard = 0;
     bool foundDriverProps = false;
@@ -165,7 +173,12 @@ static void PatchFeatures(VkPhysicalDeviceFeatures* f) {
 }
 
 static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
-    if (!out || !GpuSpoofActive()) return;
+    if (!out) return;
+    // v2.7.3: wait before gating (race parity with PatchProps2 - v2.7.2's
+    // pre-gate let pre-config features2 queries pass through raw on the
+    // inline path, the exact race stage0g fixed for GL).
+    WaitForGpuConfig(1500);
+    if (!GpuSpoofActive() || !VulkanSpoofActive()) return;
     PatchFeatures(&out->features);
     int guard = 0;
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext; s != nullptr && guard < 32;
@@ -435,8 +448,8 @@ static VkResult VkExtInstPtr(const char* layer, uint32_t* count, VkExtensionProp
 }
 
 static void* const kVkProxies[VK_T_COUNT] = {
-    (void*)VkPropsPtr,  (void*)VkProps2Ptr, (void*)VkProps2KhrPtr,
-    (void*)VkFeatPtr,   (void*)VkFeat2Ptr,  (void*)VkFeat2KhrPtr,
+    (void*)VkPropsPtr,  (void*)VkProps2Ptr,  (void*)VkProps2KhrPtr,
+    (void*)VkFeatPtr,   (void*)VkFeat2Ptr,   (void*)VkFeat2KhrPtr,
     (void*)VkExtDevPtr, (void*)VkExtInstPtr,
 };
 
@@ -472,12 +485,19 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
 }
 
 static __thread int g_dlsym_depth = 0;
+// v2.7.3: set while the inline-backstop installer resolves hook targets via
+// dlsym; those calls must receive REAL addresses, never our substituted
+// proxies (otherwise we would inline-hook libpas' own wrapper functions).
+// Declared outside the __x86_64__ guard: MyDlsym exists on every ABI.
+// (CallerAllowDlsymChain already excludes libpas callers - this is a second,
+// order-independent line of defense.)
+static __thread int g_inline_resolving = 0;
 static volatile bool g_second_gipa_diag = false;
 
 static void* MyDlsym(void* handle, const char* symbol) {
     BYTEHOOK_STACK_SCOPE();
     void* real = BYTEHOOK_CALL_PREV(MyDlsym, handle, symbol);
-    if (g_dlsym_depth > 0) return real;
+    if (g_dlsym_depth > 0 || g_inline_resolving) return real;
     g_dlsym_depth = 1;
     void* out = real;
     do {
@@ -497,9 +517,12 @@ static void* MyDlsym(void* handle, const char* symbol) {
                 // The current code passes it through raw - if a tool resolves
                 // its functions through this one, its queries bypass every
                 // proxy (observed as real driver-name leak in DevCheck).
+                // v2.7.3: the inline body hooks close this hole structurally
+                // (any pointer the loader hands out points into a hooked
+                // body); the diag remains for attribution.
                 if (!g_second_gipa_diag) {
                     g_second_gipa_diag = true;
-                    Log("native: vk diag: second gipa address seen - passed through raw");
+                    Log("native: vk diag: second gipa address seen - covered by inline body hooks");
                 }
             }
             out = (void*)MyVkGetInstanceProcAddrPtr;
@@ -523,20 +546,16 @@ static void* MyDlsym(void* handle, const char* symbol) {
 static volatile int g_vk_hooklog = 0;
 
 // ---------------------------------------------------------------------------
-// v2.6.3: x86_64 inline-hook backstop (Dobby).
+// v2.7.3: x86_64 inline-hook backstop (hand-rolled, no dependencies).
 //
 // ARM-translated apps (MuMu/Houdini: arm64-only libraries executed through
-// the native bridge) resolve Vulkan symbols outside every PLT/GOT surface the
-// caller-side hooks can patch - the ARM linker's GOT is runtime-managed by
-// the translation layer and is deliberately not touched - so the real GPU
-// identity leaked through (e.g. DevCheck's updated Vulkan probe).
-//
-// Every Vulkan call, translated or not, eventually executes the real x86_64
-// libvulkan.so function bodies. Inline-hooking those exports intercepts
-// execution itself and cannot be bypassed by any resolution path (static
-// import, dlsym, PLT, translated call). The patch helpers below are
-// idempotent, so double coverage (caller PLT hook fires first, inline hook
-// fires underneath) is safe and produces identical results.
+// the native bridge) resolve Vulkan symbols outside every PLT/GOT surface
+// the caller-side hooks can patch, and gipa-dispatched calls never execute
+// the export thunks. Every Vulkan call, translated or not, eventually
+// executes the real x86_64 libvulkan.so IMPLEMENTATION BODIES - inline-
+// hooking those intercepts execution itself and cannot be bypassed by any
+// resolution path. Patch helpers are idempotent, so double coverage (caller
+// PLT/dlsym proxy above, inline hook underneath) is safe.
 // ---------------------------------------------------------------------------
 
 #if defined(__x86_64__)
@@ -547,28 +566,38 @@ static volatile int g_vk_hooklog = 0;
 
 static void* g_inline_orig[VK_T_COUNT] = {nullptr};
 
-// ---------------------------------------------------------------------------
-// Minimal fail-safe x86_64 inline hook engine (no external dependencies).
-//
-// Trampoline-based: the target's displaced prologue instructions are copied
-// into an executable trampoline (RIP-relative disp32 operands relocated),
-// followed by an absolute jump back to target+displaced. The target is then
-// patched with `movabs rax, wrapper; jmp rax` (12 bytes).
-//
-// Every displaced instruction must be understood by the conservative decoder
-// below or the hook is ABORTED for that function (logged): unknown bytes mean
-// "not hooked" (identical to today's behavior), never a crash.
-// ---------------------------------------------------------------------------
+// Decode-stop description, for failure logging (v2.7.2 failed silently and
+// mislabeled decoder stops as "write failed").
+struct PasDecodeFail {
+    bool valid;       // bytes/offset describe a real decode stop
+    size_t offset;    // offset from function start of the undecodable insn
+    uint8_t bytes[8]; // the bytes there, for the log line
+};
+
+static void FillFail(PasDecodeFail* fail, const uint8_t* at, size_t offset) {
+    if (!fail) return;
+    fail->valid = true;
+    fail->offset = offset;
+    for (int k = 0; k < 8; k++) fail->bytes[k] = at[k];
+}
 
 // Conservative x86_64 instruction length decoder. Returns the instruction
-// length in bytes, or 0 to BAIL. `avail` = safely readable bytes at `c`
-// (the builder passes 16). On success *ripDispOff = byte offset of a
-// [rip+disp32] operand within the instruction (relocatable), else -1.
-// Covers exactly the instruction classes seen in Android -O2 prologues:
-// endbr64, REX push/pop, nop, mov r,imm, ModRM mov/lea/test/xchg/alu,
-// grp1 imm (83/81), imul imm (69/6B), mov r/m,imm (C7), 0F1F multi-byte nop.
-// Everything else - control flow (E8/E9/EB/70-7F/0F8x/FF/C3/C2), shifts,
-// string ops, VEX/EVEX, unknown - bails.
+// length in bytes, or 0 to BAIL. `avail` = safely readable bytes at `c`.
+// On success *ripDispOff = byte offset of a [rip+disp32] operand within the
+// instruction (relocatable into a trampoline), else -1.
+//
+// Covers the instruction classes seen in Android -O2 prologues and loader
+// dispatch bodies: endbr64, REX push/pop, nop, mov r,imm (B8+r), ModRM
+// mov/lea/test/xchg/alu (byte and word forms, incl. adc/sbb), movsxd,
+// grp1 imm (80/81/83), imul imm (69/6B), mov r/m,imm (C7), grp3 test/not/
+// neg/mul/div (F6/F7), movzx/movsx/imul-rm (0F B6/B7/BE/BF/AF), multi-byte
+// nop (0F 1F), cmp/test al/eax,imm (3C/3D/A8/A9), segment-prefixed stack
+// canary loads, and register-indirect FF /0 /1 /2 /4 /6 (inc/dec/call/jmp/
+// push r/m) - the loader dispatch pattern `mov rax,[rdi+N]; jmp [rax+M]`.
+//
+// Everything else bails: position-dependent control flow (E8/E9/EB/7x/0F8x,
+// RIP-relative call/jmp [rip+disp32], FF /3 /5 /7), ret (C3/C2), shifts,
+// string ops, VEX/EVEX, legacy operand/address-size prefixes, unknown bytes.
 static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
     *ripDispOff = -1;
     if (avail < 1) return 0;
@@ -577,11 +606,8 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
 
     size_t i = 0;
     bool rexW = false;
-    // v2.6.5: segment prefixes (fs/gs) precede stack-canary loads
-    // (mov rax, fs:[0x28]) that appear in the first bytes of nearly every
-    // hardended system-lib function.
     int segSkip = 0;
-    while (i < avail && (c[i] == 0x64 || c[i] == 0x65)) {
+    while (i < avail && (c[i] == 0x64 || c[i] == 0x65)) {  // fs/gs canary loads
         i++;
         if (++segSkip > 1) return 0;
     }
@@ -595,7 +621,8 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
     uint8_t op = c[i];
     i++;
 
-    bool modrm = false, allowRipRel = false;
+    enum Kind { K_IMM_ONLY, K_MODRM, K_GRP3, K_GRP5 } kind = K_IMM_ONLY;
+    bool allowRipRel = false;
     size_t imm = 0;
 
     switch (op) {
@@ -610,44 +637,83 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
         case 0xBC: case 0xBD: case 0xBE: case 0xBF:
             imm = rexW ? 8 : 4;  // mov r, imm32 / movabs r, imm64
             break;
-        case 0x89: case 0x8B: case 0x8D: case 0x85: case 0x87:
+        case 0x3C: case 0xA8:  // cmp al,imm8 / test al,imm8
+            return i + 1;
+        case 0x3D: case 0xA9:  // cmp eax,imm32 / test eax,imm32
+            return i + 4;
+        case 0x00: case 0x02: case 0x08: case 0x0A:
+        case 0x10: case 0x12: case 0x18: case 0x1A:
+        case 0x20: case 0x22: case 0x28: case 0x2A:
+        case 0x30: case 0x32: case 0x38: case 0x3A:  // byte-form alu
         case 0x01: case 0x03: case 0x09: case 0x0B:
+        case 0x11: case 0x13: case 0x19: case 0x1B:
         case 0x21: case 0x23: case 0x29: case 0x2B:
-        case 0x31: case 0x33: case 0x39: case 0x3B:
-        case 0x63:
-            modrm = true; allowRipRel = true;
+        case 0x31: case 0x33: case 0x39: case 0x3B:  // word-form alu
+        case 0x63:                                    // movsxd
+        case 0x84: case 0x85:                         // test r/m, r
+        case 0x86: case 0x87:                         // xchg
+        case 0x88: case 0x89: case 0x8A: case 0x8B: case 0x8D:
+            kind = K_MODRM;
+            allowRipRel = true;
             break;
-        case 0x83: modrm = true; imm = 1; break;
-        case 0x81: modrm = true; imm = 4; break;
-        case 0x69: modrm = true; imm = 4; break;
-        case 0x6B: modrm = true; imm = 1; break;
-        case 0xC7: modrm = true; imm = 4; break;
+        case 0x80: kind = K_MODRM; imm = 1; break;  // grp1 r/m8, imm8
+        case 0x81: kind = K_MODRM; imm = 4; break;  // grp1 r/m,  imm32
+        case 0x83: kind = K_MODRM; imm = 1; break;  // grp1 r/m,  imm8
+        case 0x69: kind = K_MODRM; imm = 4; break;  // imul r, r/m, imm32
+        case 0x6B: kind = K_MODRM; imm = 1; break;  // imul r, r/m, imm8
+        case 0xC7: kind = K_MODRM; imm = 4; break;  // mov r/m, imm32
+        case 0xF6: kind = K_GRP3; imm = 1; allowRipRel = true; break;
+        case 0xF7: kind = K_GRP3; imm = 4; allowRipRel = true; break;
+        case 0xFF: kind = K_GRP5; break;
         case 0x0F: {
             if (i >= avail) return 0;
-            if (c[i] == 0x1F) {  // multi-byte nop (0F 1F /0)
+            uint8_t op2 = c[i];
+            if (op2 == 0x1F) {  // multi-byte nop (0F 1F /0)
                 i++;
-                modrm = true; allowRipRel = true;
+                kind = K_MODRM;
+                allowRipRel = true;
                 break;
             }
-            return 0;  // any other 0F opcode: bail
+            if (op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE || op2 == 0xBF ||
+                op2 == 0xAF) {  // movzx / movsx / imul r, r/m
+                i++;
+                kind = K_MODRM;
+                allowRipRel = true;
+                break;
+            }
+            return 0;  // all other 0F opcodes: bail
         }
         default:
-            return 0;  // unknown/control flow: bail
+            return 0;  // unknown or position-dependent control flow: bail
     }
 
-    if (i > 15) return 0;
+    if (kind == K_IMM_ONLY) {
+        if (i + imm > avail) return 0;
+        return i + imm;
+    }
 
-    if (!modrm) return i + imm;
-
-    if (i > 14) return 0;
-    if (i >= avail) return 0;
+    if (i > 14 || i >= avail) return 0;
     uint8_t mrm = c[i];
     i++;
     uint8_t mod = (uint8_t)(mrm >> 6);
+    uint8_t reg = (uint8_t)((mrm >> 3) & 7);
     uint8_t rm = (uint8_t)(mrm & 7);
+    bool isRipRel = (mod == 0 && rm == 5);
+
+    if (kind == K_GRP3 && reg > 1) imm = 0;  // NOT/NEG/MUL/DIV: no immediate
+    if (kind == K_GRP5) {
+        // reg 0 inc, 1 dec, 2 call, 4 jmp, 6 push: copyable (register or
+        // register-indirect operand; RIP-relative DATA access - inc/dec/push
+        // - relocates like any riprel). reg 3 call-far, 5 jmp-far, 7: bail.
+        if (reg == 3 || reg == 5 || reg == 7) return 0;
+        // call/jmp [rip+disp32]: position-dependent target: bail.
+        if (isRipRel && (reg == 2 || reg == 4)) return 0;
+        if (isRipRel) allowRipRel = true;
+    }
+
     if (mod == 3) {
-        // register form, nothing further
-    } else if (rm == 4) {
+        // register operand: nothing further
+    } else if (rm == 4) {  // SIB
         if (i >= avail) return 0;
         uint8_t sib = c[i];
         i++;
@@ -655,19 +721,18 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
         if (mod == 0) {
             if (base == 5) {
                 if (i + 4 > avail) return 0;
-                i += 4;  // disp32, absolute (no base) - no relocation
+                i += 4;  // [index*scale + disp32]: absolute, no relocation
             }
         } else {
             i += (mod == 1) ? 1 : 4;
+            if (i > avail) return 0;
         }
-    } else if (mod == 0 && rm == 5) {  // RIP-relative (mod 0 only)
+    } else if (isRipRel) {
         if (!allowRipRel) return 0;
         if (i + 4 > avail) return 0;
         *ripDispOff = (int)i;
         i += 4;
     } else {
-        // mod 1/2: disp8/disp32; mod 0 with rm 0-3, 6, 7: register indirect
-        // (no displacement)
         if (mod == 1) {
             if (i + 1 > avail) return 0;
             i += 1;
@@ -675,6 +740,7 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
             if (i + 4 > avail) return 0;
             i += 4;
         }
+        // mod 0, rm 0-3/6/7: register indirect, no displacement
     }
 
     if (i > 15) return 0;
@@ -686,15 +752,40 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
     return i;
 }
 
-// Copy the displaced instructions to the trampoline, relocating RIP-relative
-// disp32 operands, then append an absolute jump back to target+copied.
+// How many bytes from the start decode cleanly (stops at `want`, or at the
+// first undecodable instruction)? `fail` is filled only on an early stop.
+static size_t PasProbeDecodable(const uint8_t* target, size_t want, PasDecodeFail* fail) {
+    size_t copied = 0;
+    while (copied < want) {
+        int ripOff = -1;
+        size_t len = PasDecodeX64(target + copied, 16, &ripOff);
+        if (len == 0) {
+            FillFail(fail, target + copied, copied);
+            return copied;
+        }
+        copied += len;
+    }
+    return copied;
+}
+
+// Copy displaced instructions (RIP-relative disp32 operands relocated) into
+// the trampoline, then jump back with `jmp qword ptr [rip+0]` + an 8-byte
+// address literal - touches no registers. (The v2.7.2 jump-back
+// `movabs r11, addr; jmp r11` clobbered r11 after the displaced prologue
+// ran, corrupting any value the original code legitimately held there.)
+// `fail` (optional) is filled when decoding stops short of needBytes.
 static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
-                               uint8_t* tramp, size_t trampCap, size_t* copiedOut) {
+                               uint8_t* tramp, size_t trampCap, size_t* copiedOut,
+                               PasDecodeFail* fail) {
     size_t copied = 0;
     while (copied < needBytes) {
         int ripOff = -1;
         size_t len = PasDecodeX64(target + copied, 16, &ripOff);
-        if (len == 0 || copied + len + 13 > trampCap) return false;
+        if (len == 0) {
+            FillFail(fail, target + copied, copied);
+            return false;
+        }
+        if (copied + len + 14 > trampCap) return false;
         memcpy(tramp + copied, target + copied, len);
         if (ripOff >= 0) {
             // Relocate: newDisp = oldDisp + (origInsn - trampInsn)
@@ -709,21 +800,18 @@ static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
         }
         copied += len;
     }
-    // jump back: movabs r11, addr ; jmp r11
+    // jump back: jmp qword ptr [rip+0] ; <8-byte address>
     uintptr_t back = (uintptr_t)target + copied;
-    tramp[copied++] = 0x49;
-    tramp[copied++] = 0xBA;
+    tramp[copied++] = 0xFF;
+    tramp[copied++] = 0x25;
+    memset(tramp + copied, 0, 4);
+    copied += 4;
     memcpy(tramp + copied, &back, 8);
     copied += 8;
-    tramp[copied++] = 0x41;
-    tramp[copied++] = 0xFF;
-    tramp[copied++] = 0xE3;
     *copiedOut = copied;
     return true;
 }
 
-// Install an inline hook: target's first >=12 bytes become
-// `movabs rax, wrapper; jmp rax`; *origOut receives the trampoline.
 // Write strategy: mprotect+memcpy first; on hardened targets where adding W
 // to file-backed code is denied (TEXTREL/execmod protections), fall back to
 // a /proc/self/mem write, which the kernel performs via COW without any
@@ -757,12 +845,28 @@ static bool PasWriteCode(void* target, const void* data, size_t len) {
     return true;
 }
 
+// mmap one RWX page within rel32 range of `target` (16 MB steps, both
+// directions, up to ~2 GB). Returns nullptr when nothing can be placed.
+static uint8_t* FindNearPage(uintptr_t target) {
+    for (uintptr_t off = 0x1000000; off <= 0x7F000000; off += 0x1000000) {
+        for (int dir = 0; dir < 2; dir++) {
+            uintptr_t cand = (dir ? target + off : target - off) & ~(uintptr_t)0xFFF;
+            void* p = mmap((void*)cand, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
+                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+            if (p != MAP_FAILED) return (uint8_t*)p;
+        }
+    }
+    return nullptr;
+}
+
+// Strategy 1: 12-byte patch `movabs rax, wrapper; jmp rax` at the target;
+// *origOut receives the trampoline (displaced code + jump back).
 static bool PasInlineHookX64(void* target, void* wrapper, void** origOut) {
     uint8_t* tramp = (uint8_t*)mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (tramp == MAP_FAILED) return false;
     size_t copied = 0;
-    if (!PasBuildTrampoline((const uint8_t*)target, 12, tramp, 4096, &copied)) {
+    if (!PasBuildTrampoline((const uint8_t*)target, 12, tramp, 4096, &copied, nullptr)) {
         munmap(tramp, 4096);
         return false;
     }
@@ -782,6 +886,44 @@ static bool PasInlineHookX64(void* target, void* wrapper, void** origOut) {
     return true;
 }
 
+// Strategy 2: 5-byte patch `jmp rel32` at the target into a near page that
+// holds the entry thunk (movabs rax, wrapper; jmp rax) followed by the
+// displaced-code trampoline. Needs only >=5 decodable bytes - covers loader
+// dispatch bodies like `push rbp; mov rax,[rdi+8]; jmp [rax+0x18]`, whose
+// dispatch jump sits at byte 5+ and never needs to decode.
+static bool PasInlineHookE9(void* body, void* wrapper, void** origOut) {
+    uint8_t* page = FindNearPage((uintptr_t)body);
+    if (!page) return false;
+    size_t copied = 0;
+    if (!PasBuildTrampoline((const uint8_t*)body, 5, page + 12, 4096 - 12, &copied,
+                            nullptr)) {
+        munmap(page, 4096);
+        return false;
+    }
+    page[0] = 0x48;
+    page[1] = 0xB8;
+    memcpy(page + 2, &wrapper, 8);
+    page[10] = 0xFF;
+    page[11] = 0xE0;
+    __builtin___clear_cache((char*)page, (char*)page + 12 + copied);
+
+    int64_t rel = (int64_t)((uintptr_t)page - ((uintptr_t)body + 5));
+    if (rel < INT32_MIN || rel > INT32_MAX) {  // FindNearPage guarantees this
+        munmap(page, 4096);
+        return false;
+    }
+    uint8_t patch[5];
+    patch[0] = 0xE9;
+    int32_t r = (int32_t)rel;
+    memcpy(patch + 1, &r, 4);
+    if (!PasWriteCode(body, patch, sizeof(patch))) {
+        munmap(page, 4096);
+        return false;
+    }
+    *origOut = page + 12;
+    return true;
+}
+
 static void InlineVkGetPhysicalDeviceProperties(VkPhysicalDevice pd,
                                                 VkPhysicalDeviceProperties* out) {
     auto orig = (PFN_vkGetPhysicalDeviceProperties)g_inline_orig[VK_T_PROP];
@@ -795,14 +937,17 @@ static void InlineVkGetPhysicalDeviceProperties2(VkPhysicalDevice pd,
                                                  VkPhysicalDeviceProperties2* out) {
     auto orig = (PFN_vkGetPhysicalDeviceProperties2)g_inline_orig[VK_T_PROP2];
     if (orig) orig(pd, out);
-    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchProps2(out);
+    // v2.7.3: no pre-gate - PatchProps2 waits for the config and gates
+    // internally. The v2.7.2 pre-gate was evaluated before any wait, so
+    // pre-config identity queries on this path passed through raw.
+    PatchProps2(out);
 }
 
 static void InlineVkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice pd,
                                                     VkPhysicalDeviceProperties2* out) {
     auto orig = (PFN_vkGetPhysicalDeviceProperties2)g_inline_orig[VK_T_PROP2K];
     if (orig) orig(pd, out);
-    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchProps2(out);
+    PatchProps2(out);
 }
 
 static void InlineVkGetPhysicalDeviceFeatures(VkPhysicalDevice pd,
@@ -818,14 +963,14 @@ static void InlineVkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd,
                                                VkPhysicalDeviceFeatures2* out) {
     auto orig = (PFN_vkGetPhysicalDeviceFeatures2)g_inline_orig[VK_T_FEAT2];
     if (orig) orig(pd, out);
-    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchFeatures2(out);
+    if (out) PatchFeatures2(out);
 }
 
 static void InlineVkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice pd,
                                                   VkPhysicalDeviceFeatures2* out) {
     auto orig = (PFN_vkGetPhysicalDeviceFeatures2)g_inline_orig[VK_T_FEAT2K];
     if (orig) orig(pd, out);
-    if (out && GpuSpoofActive() && VulkanSpoofActive()) PatchFeatures2(out);
+    if (out) PatchFeatures2(out);
 }
 
 static VkResult InlineVkEnumerateDeviceExtensionProperties(VkPhysicalDevice pd,
@@ -919,88 +1064,98 @@ void InstallVulkanInlineBackstop() {
          (void*)InlineVkEnumerateInstanceExtensionProperties},
     };
 
-    int ok = 0;
+    int ok = 0, notExported = 0;
     for (int i = 0; i < VK_T_COUNT; i++) {
+        // Real addresses only: g_inline_resolving keeps our own dlsym chain
+        // hook from substituting proxies during installation.
+        g_inline_resolving = 1;
         void* target = dlsym(h, specs[i].sym);
+        g_inline_resolving = 0;
         if (!target) {
-            Log("native: vulkan inline: %s not found", specs[i].sym);
+            notExported++;
+            Log("native: vulkan inline: %s not exported (KHR name resolves via "
+                "gipa into the hooked core body)", specs[i].sym);
             continue;
         }
+
+        // Follow E9 thunk chains (export thunks, chained thunks) to the
+        // implementation body. Thunks are pure jumps - skipping them when
+        // calling orig is safe.
         const uint8_t* tb = (const uint8_t*)target;
-        if (tb[0] == 0xE9) {
-            // Export is a tail-call thunk: `jmp rel32` into the internal
-            // implementation. The wrapper (libpas.so) is usually outside
-            // rel32 range, so place a 12-byte near trampoline page within
-            // rel32 of the target (absolute jump to the wrapper), then
-            // rewrite the thunk's rel32 to point at it.
+        void* body = target;
+        bool thunk = false;
+        for (int hops = 0; ((const uint8_t*)body)[0] == 0xE9 && hops < 4; hops++) {
             int32_t rel;
-            memcpy(&rel, tb + 1, 4);
-            void* origDest = (void*)(tb + 5 + (int64_t)rel);
-            uint8_t* nearTramp = nullptr;
-            for (uintptr_t off = 0x1000000; off <= 0x7F000000; off += 0x1000000) {
-                // 16 MB steps in both directions, up to ~2 GB
-                for (int dir = 0; dir < 2; dir++) {
-                    uintptr_t cand = (dir ? (uintptr_t)target + off
-                                          : (uintptr_t)target - off) &
-                                     ~(uintptr_t)0xFFF;
-                    void* p = mmap((void*)cand, 4096,
-                                   PROT_READ | PROT_WRITE | PROT_EXEC,
-                                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
-                                   -1, 0);
-                    if (p != MAP_FAILED) {
-                        nearTramp = (uint8_t*)p;
-                        break;
-                    }
-                }
-                if (nearTramp) break;
-            }
-#ifndef MAP_FIXED_NOREPLACE
-#define MAP_FIXED_NOREPLACE 0x100000
-#endif
-            if (!nearTramp) {
-                Log("native: vulkan inline: %s no near page for thunk", specs[i].sym);
-                continue;
-            }
-            size_t o = 0;
-            nearTramp[o++] = 0x48;
-            nearTramp[o++] = 0xB8;
-            memcpy(nearTramp + o, &specs[i].fn, 8);
-            o += 8;
-            nearTramp[o++] = 0xFF;
-            nearTramp[o++] = 0xE0;
-            __builtin___clear_cache((char*)nearTramp, (char*)nearTramp + o);
-            int64_t newRel = (int64_t)((uintptr_t)nearTramp - (uintptr_t)target - 5);
-            if (newRel < INT32_MIN || newRel > INT32_MAX) {
-                Log("native: vulkan inline: %s near trampoline still out of range",
-                    specs[i].sym);
-                munmap(nearTramp, 4096);
-                continue;
-            }
-            int32_t nr = (int32_t)newRel;
-            if (!PasWriteCode((void*)(tb + 1), &nr, 4)) {
-                munmap(nearTramp, 4096);
-                continue;
-            }
-            g_inline_orig[specs[i].id] = origDest;
+            memcpy(&rel, (const uint8_t*)body + 1, 4);
+            body = (void*)((uintptr_t)body + 5 + (int64_t)rel);
+            thunk = true;
+        }
+
+        // Hook the BODY, never just the export: gipa hands out body pointers
+        // (loader-internal trampolines), so gipa-dispatched calls never
+        // execute the export thunk. A body hook covers every path: export
+        // entry, thunk jump, gipa-returned pointer, direct call.
+        PasDecodeFail fail = {};
+        size_t dec = PasProbeDecodable((const uint8_t*)body, 12, &fail);
+        if (dec >= 12 && PasInlineHookX64(body, specs[i].fn, &g_inline_orig[specs[i].id])) {
             ok++;
-            Log("native: vulkan inline: %s thunk hooked", specs[i].sym);
+            Log("native: vulkan inline: %s body hooked (12-byte%s)", specs[i].sym,
+                thunk ? ", thunk target" : "");
             continue;
         }
-        int ripOff = -1;
-        size_t firstLen = PasDecodeX64(tb, 16, &ripOff);
-        if (firstLen == 0) {
-            Log("native: vulkan inline: %s unsupported prologue bytes "
-                "%02x %02x %02x %02x %02x %02x %02x %02x",
-                specs[i].sym, tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7]);
+        if (dec >= 5 && PasInlineHookE9(body, specs[i].fn, &g_inline_orig[specs[i].id])) {
+            ok++;
+            Log("native: vulkan inline: %s body hooked (5-byte e9%s)", specs[i].sym,
+                thunk ? ", thunk target" : "");
             continue;
         }
-        if (PasInlineHookX64(target, specs[i].fn, &g_inline_orig[specs[i].id])) {
-            ok++;
-        } else {
-            Log("native: vulkan inline: %s write failed (see prior line)", specs[i].sym);
+        if (dec >= 5) {
+            // Enough bytes decodable; the failure was on the write/build side.
+            Log("native: vulkan inline: %s code write failed (%zu bytes decodable; "
+                "see PasWriteCode diagnostics)", specs[i].sym, dec);
+        } else if (fail.valid) {
+            Log("native: vulkan inline: %s body+%zu unsupported bytes "
+                "%02x %02x %02x %02x %02x %02x %02x %02x (first %zu bytes decodable)",
+                specs[i].sym, fail.offset, fail.bytes[0], fail.bytes[1], fail.bytes[2],
+                fail.bytes[3], fail.bytes[4], fail.bytes[5], fail.bytes[6], fail.bytes[7],
+                dec);
         }
+        if (!thunk) continue;
+
+        // Fallback (export-entry calls ONLY - gipa-dispatched calls bypass
+        // it): rewrite the export thunk's rel32 to a near page that jumps to
+        // the wrapper. orig = the final hop destination.
+        uint8_t* nearTramp = FindNearPage((uintptr_t)target);
+        if (!nearTramp) {
+            Log("native: vulkan inline: %s no near page for thunk fallback", specs[i].sym);
+            continue;
+        }
+        size_t o = 0;
+        nearTramp[o++] = 0x48;
+        nearTramp[o++] = 0xB8;
+        memcpy(nearTramp + o, &specs[i].fn, 8);
+        o += 8;
+        nearTramp[o++] = 0xFF;
+        nearTramp[o++] = 0xE0;
+        __builtin___clear_cache((char*)nearTramp, (char*)nearTramp + o);
+        int64_t newRel = (int64_t)((uintptr_t)nearTramp - (uintptr_t)target - 5);
+        if (newRel < INT32_MIN || newRel > INT32_MAX) {
+            munmap(nearTramp, 4096);
+            Log("native: vulkan inline: %s thunk fallback out of range", specs[i].sym);
+            continue;
+        }
+        int32_t nr = (int32_t)newRel;
+        if (!PasWriteCode((void*)(tb + 1), &nr, 4)) {
+            munmap(nearTramp, 4096);
+            continue;
+        }
+        g_inline_orig[specs[i].id] = body;
+        ok++;
+        Log("native: vulkan inline: %s thunk hooked (fallback: body not hookable - "
+            "gipa-dispatched calls NOT covered)", specs[i].sym);
     }
-    Log("native: vulkan inline hooks installed %d/%d (x86_64 backstop)", ok, VK_T_COUNT);
+    Log("native: vulkan inline hooks installed %d/%d (%d not exported; those are "
+        "covered via the core bodies) (x86_64 backstop)", ok, VK_T_COUNT, notExported);
 }
 
 #else
@@ -1022,7 +1177,6 @@ static void OnVkHooked(bytehook_stub_t stub, int status_code, const char* caller
 }
 
 void InstallVulkanHooks() {
-    LogVkHeaderProbes();
     struct HookSpec {
         const char* sym;
         void* fn;
