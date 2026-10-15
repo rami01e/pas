@@ -25,38 +25,46 @@ private fun looksHex16(s: String?): Boolean =
         s.any { it in 'a'..'f' || it in 'A'..'F' }
 
 /**
- * GSF ID (Google Services Framework android_id) spoof.
+ * GSF ID (Google Services Framework android_id) spoof - general layer stack.
  *
- * Covered read paths (all in the scoped app's process):
- *  1. ContentResolver.query(...) on the gservices authority:
- *     4-arg, Bundle and CancellationSignal overloads.
- *  2. Path-style URI (key in the URI path).
- *  3. ContentResolver.call() "getValue"-style, Uri and authority overloads.
- *  4. ContentProviderClient.query(...) and .call(...).
- *  5. acquire[Unstable]ContentProviderClient tagging (observation diag).
+ * Layer 1 - ContentResolver.query(...) on the gservices authority: 4-arg,
+ *           Bundle and CancellationSignal overloads; path-style URIs.
+ * Layer 2 - ContentResolver.call(...) "getValue"-style, Uri and authority
+ *           overloads.
+ * Layer 3 - ContentProviderClient.query(...) and .call(...);
+ *           acquire[Unstable]ContentProviderClient tagging (observation).
+ * Layer 4 - ContentProviderProxy.query(...): the binder-side choke point.
+ *           Every Java-side provider read - wrapper-based OR raw-interface
+ *           (an app holding the IContentProvider from the hidden
+ *           acquireProvider) - executes this method in the reading process,
+ *           so it catches readers that bypass every wrapper. JNI-invoked
+ *           queries are covered as well (ART-level hook entry). Unfiltered
+ *           full-table dumps are intercepted: the response mirrors ALL rows
+ *           and rewrites only the android_id row; queries filtered for
+ *           OTHER gservices keys pass raw.
  *
- * v2.7.4 RESPONSE MIRRORING: every matched query proceeds the REAL provider
- * read (the same binder call the app would have made unhooked), then returns
- * a copy with identical column names, per-cell types and rows - only the
- * android_id value cell is replaced, formatted with the same type and radix
- * as the real cell. The real value never reaches the app. The previous
- * static (_id,value) shape was parseable by index-based readers (Mantle
- * Verify) but not by TB Checker, whose read was intercepted at the Phase-4
- * expansion (real id shown before, "not found" after).
+ * RESPONSE MIRRORING (v2.7.4): every matched query proceeds the REAL
+ * provider read, then returns a copy with identical column names,
+ * per-cell types and rows - only the android_id value cell is replaced,
+ * formatted with the same type and radix as the real cell.
  *
- * One-shot diagnostics (all INFO, tag PerAppSpoofer):
- *  - "mirror shape cols=[...] types=[...] count=... radix=..."  -> observed
- *    real provider response shape (the reference for any residual mismatch)
- *  - "real call() result android_id=... keys=[...]"             -> call-path
- *    value type and key set (names the key if it is not "android_id")
- *  - "gsf query NOT spoofed: <shape>"                           -> uncovered
- *    read shape (cap 10, includes projection)
- *  - "gsf read while spoof inert" / "gsfId unparseable"         -> config
- *  - "ContentProviderClient acquired for gservices via ..."     -> client path
+ * Double-coverage suppression (v2.7.5): modern ContentResolver implements
+ * the classic query overloads by delegating to the Bundle variant, and
+ * every wrapper read eventually executes ContentProviderProxy.query - so a
+ * mirror's proceed re-enters lower hook layers. While the thread-local
+ * flag is set, every query-layer hook passes through: exactly one mirror,
+ * one binder read, one log line per app-level call. Attribution:
+ * "(mirrored...)" = wrapper path; "(proxy...)" = raw-interface reader.
  *
- * Not reachable from an in-process hook: reads performed by GMS inside its
- * own process, and reads issued over the raw IContentProvider binder
- * interface without passing through any Java entry point above.
+ * One-shot diagnostics (INFO, tag PerAppSpoofer): "mirror shape ...",
+ * "real call() result ...", "gsf query NOT spoofed: <shape>",
+ * "gsf read while spoof inert", "gsfId unparseable",
+ * "ContentProviderClient acquired ...",
+ * "ContentProviderProxy not resolvable ...".
+ *
+ * Documented structural limits: call() at the proxy level (signature
+ * carries no authority - cannot be attributed without receiver access),
+ * raw Parcel transacts, and reads performed inside GMS's own process.
  */
 class HookGsfId : XHook {
 
@@ -74,6 +82,12 @@ class HookGsfId : XHook {
     /** CPC instances handed out for the gservices authority. */
     private val gsfClients = Collections.synchronizedMap(WeakHashMap<Any, Boolean>())
 
+    /**
+     * True while a query-layer hook is proceeding a gservices read on this
+     * thread (see class doc: double-coverage suppression).
+     */
+    private val inWrapperGsf = ThreadLocal.withInitial { false }
+
     override fun injectHook(module: XposedModule) {
         diagModule = module
         hookQuery(module)
@@ -84,6 +98,7 @@ class HookGsfId : XHook {
         hookCpcQueryClassic(module)
         hookCpcQueryBundle(module)
         hookCpcCall(module)
+        hookProviderProxy(module)
         hookAcquireVariant(module, "acquireContentProviderClient", String::class.java)
         hookAcquireVariant(module, "acquireContentProviderClient", Uri::class.java)
         hookAcquireVariant(module, "acquireUnstableContentProviderClient", String::class.java)
@@ -192,17 +207,31 @@ class HookGsfId : XHook {
      * Build the spoofed response by MIRRORING the real provider's cursor:
      * identical columns, per-cell types and rows; only the android_id value
      * cell is replaced, with the same type and radix as the real cell.
-     * Returns null only when the configured gsfId is unparseable (caller
-     * then passes the real query through).
+     * When fullDump is true (no selection filter: the reader extracts
+     * android_id from the whole table) ALL rows are copied, uncapped up to
+     * 4096, and only the android_id row is rewritten. The proceed runs with
+     * the suppression flag set so lower hook layers pass through. Returns
+     * null only when the configured gsfId is unparseable (caller then
+     * passes the real query through).
      */
-    private fun spoofedQueryCursor(module: XposedModule, proceed: () -> Any?): Cursor? {
+    private fun spoofedQueryCursor(
+        module: XposedModule,
+        proceed: () -> Any?,
+        fullDump: Boolean = false
+    ): Cursor? {
         val spoof = gsfIdValue()
         if (spoof == null) {
             logUnparseableOnce(module)
             return null
         }
         val real: Cursor? = try {
-            proceed() as? Cursor
+            val prev = inWrapperGsf.get()
+            inWrapperGsf.set(true)
+            try {
+                proceed() as? Cursor
+            } finally {
+                inWrapperGsf.set(prev)
+            }
         } catch (t: Throwable) {
             null
         }
@@ -220,6 +249,7 @@ class HookGsfId : XHook {
             val valueCol = cols.indexOf("value").let { if (it >= 0) it else if (cols.size >= 2) 1 else -1 }
             val nameCol = cols.indexOf("name")
             val out = MatrixCursor(cols.toTypedArray())
+            val maxRows = if (fullDump) 4096 else 8
             var rowCount = 0
             var hex = false
             if (real.moveToFirst()) {
@@ -234,7 +264,7 @@ class HookGsfId : XHook {
                         if (nameMatches && valueCol >= 0) hex = looksHex16(row[valueCol] as? String)
                         logShapeOnce(module, "mirror shape cols=[${cols.joinToString(",")}] " +
                             "types=[$types] count=${real.count} valueCol=$valueCol nameCol=$nameCol " +
-                            "radix=${if (hex) "hex16" else "decimal"}")
+                            "radix=${if (hex) "hex16" else "decimal"}${if (fullDump) " fulldump" else ""}")
                     }
                     val isTargetRow = nameCol < 0 || (row[nameCol] as? String) == "android_id"
                     if (isTargetRow && valueCol >= 0) {
@@ -245,7 +275,7 @@ class HookGsfId : XHook {
                     }
                     out.addRow(row)
                     rowCount++
-                } while (real.moveToNext() && rowCount < 8)
+                } while (real.moveToNext() && rowCount < maxRows)
             } else {
                 logShapeOnce(module, "mirror shape cols=[${cols.joinToString(",")}] count=0 " +
                     "(real result empty - mirrored)")
@@ -274,6 +304,7 @@ class HookGsfId : XHook {
                 String::class.java
             )
             module.hook(method).intercept { chain ->
+                if (inWrapperGsf.get()) return@intercept chain.proceed()
                 val uri = chain.getArg(0) as? Uri
                 val projection = chain.getArg(1) as? Array<*>
                 val selection = chain.getArg(2) as? String
@@ -307,6 +338,7 @@ class HookGsfId : XHook {
                 CancellationSignal::class.java
             )
             module.hook(method).intercept { chain ->
+                if (inWrapperGsf.get()) return@intercept chain.proceed()
                 val uri = chain.getArg(0) as? Uri
                 val bundle = chain.getArg(2) as? Bundle
                 if (isGsfAuthority(uri) &&
@@ -341,6 +373,7 @@ class HookGsfId : XHook {
                 CancellationSignal::class.java
             )
             module.hook(method).intercept { chain ->
+                if (inWrapperGsf.get()) return@intercept chain.proceed()
                 val uri = chain.getArg(0) as? Uri
                 val projection = chain.getArg(1) as? Array<*>
                 val selection = chain.getArg(2) as? String
@@ -475,6 +508,7 @@ class HookGsfId : XHook {
                 String::class.java
             )
             module.hook(method).intercept { chain ->
+                if (inWrapperGsf.get()) return@intercept chain.proceed()
                 val uri = chain.getArg(0) as? Uri
                 val selection = chain.getArg(2) as? String
                 val args = chain.getArg(3) as? Array<*>
@@ -507,6 +541,7 @@ class HookGsfId : XHook {
                 CancellationSignal::class.java
             )
             module.hook(method).intercept { chain ->
+                if (inWrapperGsf.get()) return@intercept chain.proceed()
                 val uri = chain.getArg(0) as? Uri
                 val bundle = chain.getArg(2) as? Bundle
                 if (isGsfAuthority(uri) &&
@@ -520,6 +555,10 @@ class HookGsfId : XHook {
                         chain.proceed()
                     }
                 } else {
+                    if (isGsfAuthority(uri)) {
+                        logUnmatchedGsf(module, "providerclient-query-bundle uri=$uri " +
+                            "keys=${bundle?.keySet()?.joinToString()}")
+                    }
                     chain.proceed()
                 }
             }
@@ -550,6 +589,128 @@ class HookGsfId : XHook {
                 } else {
                     result
                 }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Layer 4: binder-proxy choke point (raw-interface readers)
+    // ------------------------------------------------------------------
+
+    /**
+     * Resolve the hidden ContentProviderProxy class: top-level since
+     * Android 12, inner class of ContentResolver before that, with a
+     * declaredClasses scan as the last resort.
+     */
+    private fun resolveProviderProxyClass(): Class<*>? {
+        for (name in listOf(
+            "android.content.ContentProviderProxy",
+            "android.content.ContentResolver\$ContentProviderProxy"
+        )) {
+            try {
+                return Class.forName(name)
+            } catch (_: Throwable) {
+            }
+        }
+        try {
+            for (c in ContentResolver::class.java.declaredClasses) {
+                if (c.simpleName == "ContentProviderProxy") return c
+            }
+        } catch (_: Throwable) {
+        }
+        return null
+    }
+
+    /**
+     * Hook every ContentProviderProxy.query overload. Known signature
+     * shapes (across versions):
+     *   legacy: (callingPkg, url, projection[], selection, selectionArgs[], sortOrder)
+     *   modern: (callingPkg | AttributionSource, url, projection[], queryArgs Bundle, cancellation)
+     * The Uri argument carries the authority, so gservices matching is
+     * exact. Keyed android_id reads and unfiltered full-table dumps are
+     * mirrored; queries filtered for OTHER gservices keys pass raw. A
+     * wrapper-layer proceed sets the suppression flag, and this layer then
+     * passes through (single mirror, single log line).
+     */
+    private fun hookProviderProxy(module: XposedModule) {
+        hookSafe(module, "ContentProviderProxy(gsf)") {
+            val clazz = resolveProviderProxyClass()
+            if (clazz == null) {
+                module.log(Log.INFO, TAG,
+                    "[PAS] GSF diag: ContentProviderProxy not resolvable " +
+                        "(tried android.content.ContentProviderProxy, " +
+                        "android.content.ContentResolver\$ContentProviderProxy, declaredClasses) " +
+                        "- raw-interface reads not covered")
+                return@hookSafe
+            }
+            var hooked = 0
+            for (m in clazz.declaredMethods) {
+                if (m.name != "query") continue
+                val sig = m.parameterTypes.joinToString(",") { it.simpleName }
+                hookSafe(module, "ContentProviderProxy.query($sig)") {
+                    module.hook(m).intercept { chain ->
+                        if (inWrapperGsf.get()) return@intercept chain.proceed()
+                        val n = m.parameterTypes.size
+                        var uriIdx = -1
+                        for (i in 0 until n) {
+                            if (chain.getArg(i) is Uri) {
+                                uriIdx = i
+                                break
+                            }
+                        }
+                        if (uriIdx < 0) return@intercept chain.proceed()
+                        val uri = chain.getArg(uriIdx) as Uri
+                        if (uri.authority != GSF_AUTHORITY || !gsfReadyOrDiag()) {
+                            return@intercept chain.proceed()
+                        }
+                        var refs = false
+                        for (i in 0 until n) {
+                            when (val a = chain.getArg(i)) {
+                                is String -> if (a.contains("android_id")) refs = true
+                                is Array<*> -> if (a.any { it == "android_id" }) refs = true
+                                is Bundle -> if (refsAndroidIdInBundle(a)) refs = true
+                            }
+                        }
+                        if (!refs) {
+                            // Unkeyed query: is there a selection filter for another key?
+                            val pt = m.parameterTypes
+                            var filtered = false
+                            if (uriIdx + 2 < n && pt[uriIdx + 2] == String::class.java) {
+                                val sel = chain.getArg(uriIdx + 2) as? String
+                                val argsA =
+                                    if (uriIdx + 3 < n) chain.getArg(uriIdx + 3) as? Array<*> else null
+                                filtered = (sel != null && sel.isNotBlank()) ||
+                                    (argsA != null && argsA.size > 0)
+                            } else if (uriIdx + 2 < n && pt[uriIdx + 2] == Bundle::class.java) {
+                                val b = chain.getArg(uriIdx + 2) as? Bundle
+                                if (b != null) {
+                                    val selArgs =
+                                        b.getStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS)
+                                    filtered =
+                                        b.getString(ContentResolver.QUERY_ARG_SQL_SELECTION) != null ||
+                                            (selArgs != null && selArgs.size > 0)
+                                }
+                            }
+                            if (filtered) return@intercept chain.proceed()
+                        }
+                        val fullDump = !refs
+                        val cursor = spoofedQueryCursor(module, { chain.proceed() }, fullDump)
+                        if (cursor != null) {
+                            module.log(Log.INFO, TAG,
+                                "[PAS] GSF android_id -> spoofed (proxy${if (fullDump) ",fulldump" else ""})")
+                            cursor
+                        } else {
+                            chain.proceed()
+                        }
+                    }
+                }
+                hooked++
+            }
+            module.log(Log.INFO, TAG,
+                "[PAS] GSF provider-proxy query hooks installed=$hooked (${clazz.name})")
+            if (hooked == 0) {
+                module.log(Log.INFO, TAG,
+                    "[PAS] GSF diag: ContentProviderProxy exposes no query methods - nothing hooked")
             }
         }
     }
