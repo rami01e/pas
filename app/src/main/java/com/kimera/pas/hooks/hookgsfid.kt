@@ -310,7 +310,7 @@ class HookGsfId : XHook {
                 val selection = chain.getArg(2) as? String
                 val args = chain.getArg(3) as? Array<*>
                 if (isGsfAuthority(uri) && refsAndroidId(uri, selection, args)) {
-                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    val cursor = spoofedQueryCursor(module, { chain.proceed() })
                     if (cursor != null) {
                         module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored)")
                         cursor
@@ -344,7 +344,7 @@ class HookGsfId : XHook {
                 if (isGsfAuthority(uri) &&
                     (refsAndroidIdInBundle(bundle) || refsAndroidId(uri, null, null))
                 ) {
-                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    val cursor = spoofedQueryCursor(module, { chain.proceed() })
                     if (cursor != null) {
                         module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,bundle)")
                         cursor
@@ -379,7 +379,7 @@ class HookGsfId : XHook {
                 val selection = chain.getArg(2) as? String
                 val args = chain.getArg(3) as? Array<*>
                 if (isGsfAuthority(uri) && refsAndroidId(uri, selection, args)) {
-                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    val cursor = spoofedQueryCursor(module, { chain.proceed() })
                     if (cursor != null) {
                         module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,cancellation)")
                         cursor
@@ -513,7 +513,7 @@ class HookGsfId : XHook {
                 val selection = chain.getArg(2) as? String
                 val args = chain.getArg(3) as? Array<*>
                 if (isGsfAuthority(uri) && refsAndroidId(uri, selection, args)) {
-                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    val cursor = spoofedQueryCursor(module, { chain.proceed() })
                     if (cursor != null) {
                         module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,providerclient)")
                         cursor
@@ -547,7 +547,7 @@ class HookGsfId : XHook {
                 if (isGsfAuthority(uri) &&
                     (refsAndroidIdInBundle(bundle) || refsAndroidId(uri, null, null))
                 ) {
-                    val cursor = spoofedQueryCursor(module) { chain.proceed() }
+                    val cursor = spoofedQueryCursor(module, { chain.proceed() })
                     if (cursor != null) {
                         module.log(Log.INFO, TAG, "[PAS] GSF android_id -> spoofed (mirrored,providerclient,bundle)")
                         cursor
