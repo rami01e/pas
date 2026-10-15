@@ -41,30 +41,40 @@ private fun looksHex16(s: String?): Boolean =
  *           queries are covered as well (ART-level hook entry). Unfiltered
  *           full-table dumps are intercepted: the response mirrors ALL rows
  *           and rewrites only the android_id row; queries filtered for
- *           OTHER gservices keys pass raw.
+ *           OTHER gservices keys pass raw (v2.7.6: their result feeds the
+ *           provider-schema diag, which doubles as the Layer-4 traffic
+ *           test on this ROM).
  *
  * RESPONSE MIRRORING (v2.7.4): every matched query proceeds the REAL
  * provider read, then returns a copy with identical column names,
  * per-cell types and rows - only the android_id value cell is replaced,
  * formatted with the same type and radix as the real cell.
  *
- * Double-coverage suppression (v2.7.5): modern ContentResolver implements
- * the classic query overloads by delegating to the Bundle variant, and
- * every wrapper read eventually executes ContentProviderProxy.query - so a
- * mirror's proceed re-enters lower hook layers. While the thread-local
- * flag is set, every query-layer hook passes through: exactly one mirror,
- * one binder read, one log line per app-level call. Attribution:
- * "(mirrored...)" = wrapper path; "(proxy...)" = raw-interface reader.
+ * v2.7.6 SYNTHESIS: when the real result carries no android_id row (empty
+ * result, or rows that are all other keys - the state of emulators whose
+ * GMS has never written the row, observed on MuMu), one android_id row is
+ * SYNTHESIZED in the provider's own column schema. Without this, mirroring
+ * returns an empty cursor and keyed readers regress to "not found" on such
+ * devices (the pre-mirroring static cursor always delivered a row).
+ *
+ * Double-coverage suppression (v2.7.5): while the thread-local flag is set,
+ * every query-layer hook passes through - exactly one mirror, one binder
+ * read, one log line per app-level call. Attribution: "(mirrored...)" =
+ * wrapper path; "(proxy...)" = raw-interface reader.
  *
  * One-shot diagnostics (INFO, tag PerAppSpoofer): "mirror shape ...",
- * "real call() result ...", "gsf query NOT spoofed: <shape>",
- * "gsf read while spoof inert", "gsfId unparseable",
- * "ContentProviderClient acquired ...",
+ * "provider schema ...", "synthesized ...", "real call() result ...",
+ * "gsf query NOT spoofed: <shape>", "gsf read while spoof inert",
+ * "gsfId unparseable", "ContentProviderClient acquired ...",
  * "ContentProviderProxy not resolvable ...".
  *
  * Documented structural limits: call() at the proxy level (signature
  * carries no authority - cannot be attributed without receiver access),
  * raw Parcel transacts, and reads performed inside GMS's own process.
+ * For a device whose gservices table has no android_id row at all, the
+ * complete "everywhere" answer is to write the row at the source with
+ * root (content insert / sqlite) - one value for every reader, including
+ * the ones no in-process hook can reach.
  */
 class HookGsfId : XHook {
 
@@ -75,6 +85,8 @@ class HookGsfId : XHook {
     private var inertLogged = false
     private var formatLogged = false
     private var shapeLogged = false
+    private var schemaLogged = false
+    private var synthLogged = false
     private var callPeeked = false
     private var cpcAcquireLogged = false
     private var diagModule: XposedModule? = null
@@ -174,7 +186,7 @@ class HookGsfId : XHook {
                 "- expected decimal or 16-char hex; matched reads passed through")
     }
 
-    /** Legacy static shape: last-resort when the real read fails or is empty. */
+    /** Legacy static shape: last-resort when the real read fails entirely. */
     private fun staticGsfCursor(spoof: Long): Cursor {
         val cursor = MatrixCursor(arrayOf("_id", "value"))
         cursor.addRow(arrayOf<Any?>(0L, spoof))
@@ -204,15 +216,68 @@ class HookGsfId : XHook {
     }
 
     /**
+     * v2.7.6 diag: one-shot log of the gservices provider's column schema,
+     * taken from the result of an other-key read (values never logged).
+     * Doubles as the Layer-4 traffic test: this line appearing proves
+     * ContentProviderProxy.query is in the live call path on this ROM.
+     */
+    private fun maybeLogGsfSchema(module: XposedModule, result: Any?) {
+        if (schemaLogged) return
+        val c = result as? Cursor ?: return
+        try {
+            val names = c.columnNames ?: return
+            if (names.isNotEmpty()) {
+                schemaLogged = true
+                module.log(Log.INFO, TAG,
+                    "[PAS] GSF diag: provider schema cols=[${names.joinToString(",")}] " +
+                        "(from an other-key read; values not logged)")
+            }
+        } catch (_: Throwable) {
+        }
+    }
+
+    /**
+     * v2.7.6: row synthesized when the real result contains no android_id
+     * row (empty result, or rows that are all other keys - the state of
+     * devices whose GMS has never written the row, observed on MuMu).
+     * Keeps the provider's column schema; the value is delivered exactly
+     * as configured (with no real cell to mirror, the radix is the user's
+     * choice - set it to the convention your readers expect).
+     */
+    private fun synthesizedRow(cols: List<String>, nameCol: Int, valueCol: Int): Array<Any?>? {
+        val raw = SpoofState.gsfId.trim().removePrefix("0x").removePrefix("0X")
+        if (raw.isEmpty()) return null
+        val vc: Int
+        val nc: Int
+        if (valueCol >= 0) {
+            vc = valueCol
+            nc = nameCol
+        } else if (cols.size == 1 && nameCol != 0) {
+            vc = 0
+            nc = -1
+        } else {
+            return null
+        }
+        val row = arrayOfNulls<Any?>(cols.size)
+        if (nc >= 0) row[nc] = "android_id"
+        row[vc] = raw
+        for (i in cols.indices) {
+            if (cols[i] == "_id") row[i] = 0L
+        }
+        return row
+    }
+
+    /**
      * Build the spoofed response by MIRRORING the real provider's cursor:
      * identical columns, per-cell types and rows; only the android_id value
      * cell is replaced, with the same type and radix as the real cell.
      * When fullDump is true (no selection filter: the reader extracts
      * android_id from the whole table) ALL rows are copied, uncapped up to
-     * 4096, and only the android_id row is rewritten. The proceed runs with
-     * the suppression flag set so lower hook layers pass through. Returns
-     * null only when the configured gsfId is unparseable (caller then
-     * passes the real query through).
+     * 4096, and only the android_id row is rewritten. When the real result
+     * carries no android_id row at all, one is synthesized in the provider's
+     * schema (v2.7.6). The proceed runs with the suppression flag set so
+     * lower hook layers pass through. Returns null only when the configured
+     * gsfId is unparseable (caller then passes the real query through).
      */
     private fun spoofedQueryCursor(
         module: XposedModule,
@@ -252,6 +317,7 @@ class HookGsfId : XHook {
             val maxRows = if (fullDump) 4096 else 8
             var rowCount = 0
             var hex = false
+            var rewroteAny = false
             if (real.moveToFirst()) {
                 var first = true
                 do {
@@ -268,6 +334,7 @@ class HookGsfId : XHook {
                     }
                     val isTargetRow = nameCol < 0 || (row[nameCol] as? String) == "android_id"
                     if (isTargetRow && valueCol >= 0) {
+                        rewroteAny = true
                         val orig = row[valueCol]
                         row[valueCol] = if (orig is Long) spoof
                             else if (hex) spoof.toString(16).padStart(16, '0')
@@ -278,7 +345,22 @@ class HookGsfId : XHook {
                 } while (real.moveToNext() && rowCount < maxRows)
             } else {
                 logShapeOnce(module, "mirror shape cols=[${cols.joinToString(",")}] count=0 " +
-                    "(real result empty - mirrored)")
+                    "(real result empty)")
+            }
+            // v2.7.6: the real result carries no android_id row - synthesize
+            // one so keyed readers and full-dump extractors still see the
+            // spoof (covers devices whose GMS has never written the row).
+            if (!rewroteAny) {
+                val row = synthesizedRow(cols, nameCol, valueCol)
+                if (row != null) {
+                    out.addRow(row)
+                    if (!synthLogged) {
+                        synthLogged = true
+                        module.log(Log.INFO, TAG,
+                            "[PAS] GSF diag: real result had no android_id row - " +
+                                "synthesized one (value as configured)")
+                    }
+                }
             }
             real.close()
             return out
@@ -628,9 +710,9 @@ class HookGsfId : XHook {
      *   modern: (callingPkg | AttributionSource, url, projection[], queryArgs Bundle, cancellation)
      * The Uri argument carries the authority, so gservices matching is
      * exact. Keyed android_id reads and unfiltered full-table dumps are
-     * mirrored; queries filtered for OTHER gservices keys pass raw. A
-     * wrapper-layer proceed sets the suppression flag, and this layer then
-     * passes through (single mirror, single log line).
+     * mirrored; queries filtered for OTHER gservices keys pass raw and
+     * feed the provider-schema diag (v2.7.6). A wrapper-layer proceed
+     * sets the suppression flag, and this layer then passes through.
      */
     private fun hookProviderProxy(module: XposedModule) {
         hookSafe(module, "ContentProviderProxy(gsf)") {
@@ -691,7 +773,14 @@ class HookGsfId : XHook {
                                             (selArgs != null && selArgs.size > 0)
                                 }
                             }
-                            if (filtered) return@intercept chain.proceed()
+                            if (filtered) {
+                                // v2.7.6: schema diag on other-key gservices
+                                // reads - also proves this layer is in the
+                                // live call path on this ROM.
+                                val r = chain.proceed()
+                                maybeLogGsfSchema(module, r)
+                                return@intercept r
+                            }
                         }
                         val fullDump = !refs
                         val cursor = spoofedQueryCursor(module, { chain.proceed() }, fullDump)
