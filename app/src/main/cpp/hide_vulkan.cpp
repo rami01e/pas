@@ -1,36 +1,17 @@
+// hide_vulkan.cpp v2.8.4
 // Vulkan identity spoof (GPU) for the scoped process.
 //
-// v2.4.5: VkPhysicalDeviceProperties now carries the spoofed core count and
-// L2 cache size so DevCheck's Vulkan path sees a coherent device.
-//
-// v2.7.3:
-//  - Inline backstop hooks the IMPLEMENTATION BODY (the thunk's jump target
-//    when the export is an E9 thunk), not the export entry.
-//  - Two patch strategies: 12-byte movabs+jmp when >=12 prologue bytes
-//    decode; 5-byte jmp rel32 -> near page otherwise.
-//  - Decode stops are logged with offset + bytes.
-//  - Trampoline jump-back is RIP-indirect (touches no registers).
-//  - WaitForGpuConfig race parity on the features2 path; VulkanSpoofActive
-//    is the single gate inside PatchProps2/PatchFeatures2.
-//  - LogVkHeaderProbes removed (enum constants are not macros - false alarm).
-//
-// v2.7.8 (diagnostics + ICD probe, nothing hooked speculatively):
-//  - Every core-props patch logs the DELIVERED strings (capped 6/process),
-//    including the previously-silent v1 vkGetPhysicalDeviceProperties calls.
-//  - The props2 diag line now carries the delivered deviceName + vendorID.
-//  - ICD-entry probe + ICD feasibility probe (dl_iterate_phdr + icd gipa).
-//
-// v2.7.8a: forward declaration of ProbeIcdFeasibility() - declaration
-// before use (the CI failure surfaced on arm64-v8a only because it is the
-// first ABI in ninja's build order; the bug was ABI-independent).
-//
-// v2.7.9: VkPhysicalDeviceIDProperties (sType 1000071004 - observed as the
-// FIRST node in DevInfo's props2 chain, every capture) is now patched:
-// deviceUUID/driverUUID are derived stably from the spoofed device/driver
-// names (FNV-based; same profile -> same UUIDs across processes and runs),
-// deviceLUID is zeroed and deviceLUIDValid=false - matching what real
-// Android drivers report. Previously the UUID node passed through raw: the
-// last unpatched node in the identity chain.
+// v2.8.4 (diagnostic + ICD coverage):
+//  - ProbeIcdFeasibility() now inline-hooks the vendor ICD's implementation
+//    bodies for the same eight targets already hooked on libvulkan.so. Apps
+//    that dlopen the ICD and dispatch through vk_icdGetInstanceProcAddr (or
+//    walk the ICD's dispatch table directly) are now covered.
+//  - MyDlsym logs every vk_* symbol that passes through with handle + real
+//    pointer (capped 120/process).
+//  - Every vkGetInstanceProcAddr / ICD gipa call logs the name and the real
+//    pointer it resolved to (capped 120/process).
+//  - Every proxy entry emits one line (capped 24/process) so a leaked path
+//    can be attributed.
 
 #include "pas.h"
 
@@ -55,9 +36,16 @@
 
 namespace pas {
 
+static volatile int g_ext_hidden_log = 0;
+
 static bool IsHiddenExtName(const char* name) {
     if (!name) return false;
     if (strstr(name, "NEMU") != nullptr) return true;
+    if (strstr(name, "VK_INTEL") != nullptr) return true;
+    if (strstr(name, "VK_QCOM") != nullptr) return true;
+    if (strstr(name, "VK_AMD") != nullptr) return true;
+    if (strstr(name, "VK_NV") != nullptr) return true;
+    if (strstr(name, "VK_MESA") != nullptr) return true;
     return false;
 }
 
@@ -68,12 +56,21 @@ static volatile int g_gpu_conf_patch = 0;
 static volatile int g_gpu_driver_id = 0;
 static volatile int g_gpu_desc_indexing = 0;
 static volatile int g_gpu_sparse_binding = 0;
-// v2.7.8 diagnostics.
 static volatile bool g_icd_entry_logged = false;
 static volatile int g_coreprops_calllog = 0;
 
-// v2.7.8a: declaration-before-use fix (see file header comment).
+// v2.8.4 diagnostics.
+static volatile int g_vk_dlsym_log = 0;
+static volatile int g_gipa_log = 0;
+static volatile int g_vk_proxy_calls = 0;
+
 void ProbeIcdFeasibility();
+
+#if defined(__x86_64__)
+// v2.8.4: forward declaration - defined further down; called from
+// ProbeIcdFeasibility to install inline body hooks on the vendor ICD.
+static void InstallInlineTargetsFor(void* h, const char* context);
+#endif
 
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
                    int driverId, bool descriptorIndexing, bool sparseBinding) {
@@ -90,12 +87,7 @@ void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
 
 static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
     if (!p) return;
-    // v2.5.9: early queries may precede the config thread; wait briefly so
-    // ANGLE/Chrome cannot cache the real GPU identity (same race as GL).
     WaitForGpuConfig(1500);
-    // v2.4.5: DevCheck reads the GPU core count and L2 cache from the
-    // device name / driver info for Mali. We build a coherent string that
-    // carries those values.
     char deviceName[256];
     snprintf(deviceName, sizeof(deviceName), "%s", GpuSpoofVkDeviceName().c_str());
     snprintf(p->deviceName, sizeof(p->deviceName), "%s", deviceName);
@@ -103,10 +95,6 @@ static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
     p->deviceID = (uint32_t)GpuSpoofDeviceId();
     p->driverVersion = (uint32_t)GpuSpoofDriverVersion();
     p->apiVersion = (uint32_t)GpuSpoofApiVersion();
-    // v2.7.8 diag (capped): the exact strings DELIVERED to the caller -
-    // covers the previously-silent v1 vkGetPhysicalDeviceProperties calls
-    // too. If a tool displays raw strings while these lines show Mali, the
-    // display reads from a source other than any loader-path call.
     if (g_coreprops_calllog < 6) {
         g_coreprops_calllog++;
         Log("native: vk diag: core props delivered dev='%s' vid=0x%x did=0x%x api=0x%x",
@@ -117,7 +105,6 @@ static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
 static volatile bool g_drvprops_logged = false;
 static volatile bool g_props2_node_diag = false;
 static volatile int g_props2_calllog = 0;
-// v2.7.9: deviceID-props node logging.
 static volatile bool g_devidprops_logged = false;
 
 static const uint32_t kPasDriverPropsSType = 1000196000u;
@@ -132,9 +119,6 @@ struct PasDriverProps {
     uint8_t conformance[4];
 };
 
-// v2.7.9: VkPhysicalDeviceIDProperties layout (spec: 16+16+8 bytes, mask,
-// VkBool32). Raw sType constant - no header dependency, same style as the
-// driver-props node above.
 struct PasDeviceIdProps {
     VkStructureType sType;
     void* pNext;
@@ -150,8 +134,6 @@ static void PatchDriverPropsNode(void* node) {
     auto* d = (PasDriverProps*)node;
     if (g_gpu_driver_id > 0) d->driverID = (uint32_t)g_gpu_driver_id;
     snprintf(d->driverName, sizeof(d->driverName), "%s", GpuSpoofDriverName().c_str());
-    // v2.4.5: append core count + L2 cache to the driver info so DevCheck's
-    // Vulkan path sees the same physical data as the sysfs path.
     char info[256];
     snprintf(info, sizeof(info), "%s | %d cores | L2: %d kB | %s",
              GpuSpoofDriverInfo().c_str(), GpuSpoofCores(), GpuSpoofL2CacheKb(),
@@ -168,9 +150,6 @@ static void PatchDriverPropsNode(void* node) {
     }
 }
 
-// v2.7.9: 16 stable bytes from a string - two independent FNV-1a 64-bit
-// chains. Deterministic: the same configured name yields the same UUID in
-// every process and every run, keeping the identity coherent.
 static void PasFnv1a128(const char* s, uint8_t* out) {
     uint64_t h1 = 1469598103934665603ULL;
     uint64_t h2 = 0x9E3779B97F4A7C15ULL;
@@ -182,10 +161,6 @@ static void PasFnv1a128(const char* s, uint8_t* out) {
     memcpy(out + 8, &h2, 8);
 }
 
-// v2.7.9: patch the ID node - deviceUUID from the spoofed device name,
-// driverUUID from the spoofed driver name, LUID invalidated (real Android
-// drivers report deviceLUIDValid=false; leaking host LUID bytes would be
-// both incoherent and a fingerprint).
 static void PatchDeviceIdPropsNode(void* node) {
     if (node == nullptr || !GpuSpoofActive()) return;
     auto* d = (PasDeviceIdProps*)node;
@@ -203,9 +178,6 @@ static void PatchDeviceIdPropsNode(void* node) {
 static void PatchProps2(VkPhysicalDeviceProperties2* out) {
     if (!out) return;
     WaitForGpuConfig(1500);
-    // v2.7.3: VulkanSpoofActive is the single gate for every patch path
-    // (PLT proxy, dlsym proxy, inline backstop) - the gpu options "vulkan"
-    // toggle is now respected uniformly.
     if (!GpuSpoofActive() || !VulkanSpoofActive()) return;
     PatchCoreProps(&out->properties);
     int guard = 0;
@@ -220,9 +192,6 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
             foundDriverProps = true;
         }
     }
-    // v2.6.5 diag (capped; v2.7.8: carries the delivered dev/vid): log the
-    // first properties2 calls that reach the proxy, with chain shape and
-    // delivered identity, so a tool showing raw driver data is attributable.
     if (g_props2_calllog < 12) {
         g_props2_calllog++;
         VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext;
@@ -248,7 +217,6 @@ static void PatchFeatures(VkPhysicalDeviceFeatures* f) {
 
 static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
     if (!out) return;
-    // v2.7.3: wait before gating (race parity with PatchProps2).
     WaitForGpuConfig(1500);
     if (!GpuSpoofActive() || !VulkanSpoofActive()) return;
     PatchFeatures(&out->features);
@@ -267,8 +235,16 @@ static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
     }
 }
 
+// v2.8.4: one-line proxy entry trace (capped) so we can confirm a patch
+// actually fires in the leaking process.
+static void VkProxyHit(const char* fn) {
+    int n = __sync_fetch_and_add(&g_vk_proxy_calls, 1);
+    if (n < 24) Log("native: vk proxy hit: %s (#%d)", fn, n + 1);
+}
+
 static void MyVkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties* out) {
     BYTEHOOK_STACK_SCOPE();
+    VkProxyHit("v1 props");
     BYTEHOOK_CALL_PREV(MyVkGetPhysicalDeviceProperties, pd, out);
     if (!out) return;
     WaitForGpuConfig(1500);
@@ -279,6 +255,7 @@ static void MyVkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDevic
 static void MyVkGetPhysicalDeviceProperties2(VkPhysicalDevice pd,
                                              VkPhysicalDeviceProperties2* out) {
     BYTEHOOK_STACK_SCOPE();
+    VkProxyHit("props2");
     BYTEHOOK_CALL_PREV(MyVkGetPhysicalDeviceProperties2, pd, out);
     PatchProps2(out);
 }
@@ -286,12 +263,14 @@ static void MyVkGetPhysicalDeviceProperties2(VkPhysicalDevice pd,
 static void MyVkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice pd,
                                                 VkPhysicalDeviceProperties2* out) {
     BYTEHOOK_STACK_SCOPE();
+    VkProxyHit("props2KHR");
     BYTEHOOK_CALL_PREV(MyVkGetPhysicalDeviceProperties2KHR, pd, out);
     PatchProps2(out);
 }
 
 static void MyVkGetPhysicalDeviceFeatures(VkPhysicalDevice pd, VkPhysicalDeviceFeatures* out) {
     BYTEHOOK_STACK_SCOPE();
+    VkProxyHit("features");
     BYTEHOOK_CALL_PREV(MyVkGetPhysicalDeviceFeatures, pd, out);
     if (!out || !GpuSpoofActive()) return;
     PatchFeatures(out);
@@ -299,12 +278,14 @@ static void MyVkGetPhysicalDeviceFeatures(VkPhysicalDevice pd, VkPhysicalDeviceF
 
 static void MyVkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* out) {
     BYTEHOOK_STACK_SCOPE();
+    VkProxyHit("features2");
     BYTEHOOK_CALL_PREV(MyVkGetPhysicalDeviceFeatures2, pd, out);
     PatchFeatures2(out);
 }
 
 static void MyVkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* out) {
     BYTEHOOK_STACK_SCOPE();
+    VkProxyHit("features2KHR");
     BYTEHOOK_CALL_PREV(MyVkGetPhysicalDeviceFeatures2KHR, pd, out);
     PatchFeatures2(out);
 }
@@ -314,7 +295,13 @@ static VkResult FilterExtList(uint32_t* count, VkExtensionProperties* props, VkR
     uint32_t got = *count;
     uint32_t kept = 0;
     for (uint32_t i = 0; i < got; i++) {
-        if (IsHiddenExtName(props[i].extensionName)) continue;
+        if (IsHiddenExtName(props[i].extensionName)) {
+            if (g_ext_hidden_log < 8) {
+                g_ext_hidden_log++;
+                Log("native: vk ext hidden: '%s'", props[i].extensionName);
+            }
+            continue;
+        }
         if (kept != i) props[kept] = props[i];
         kept++;
     }
@@ -374,8 +361,10 @@ static VkResult MyVkEnumerateInstanceExtensionProperties(const char* layer, uint
 }
 
 typedef void* (*PasGipaFn)(VkInstance instance, const char* name);
+typedef void* (*PasIcdGipaFn)(void* instance, const char* name);
 
 static void* g_real_gipa = nullptr;
+static PasIcdGipaFn g_real_icd_gipa = nullptr;
 static volatile unsigned g_chain_logged = 0;
 
 enum VkTargetId {
@@ -525,12 +514,36 @@ static void* const kVkProxies[VK_T_COUNT] = {
     (void*)VkExtDevPtr, (void*)VkExtInstPtr,
 };
 
+// v2.8.4: ICD gipa proxy.
+static void* MyVkIcdGetInstanceProcAddr(void* instance, const char* name) {
+    PasIcdGipaFn gipa = g_real_icd_gipa;
+    if (!gipa) return nullptr;
+    void* real = gipa(instance, name);
+    if (name != nullptr) {
+        int n = __sync_fetch_and_add(&g_gipa_log, 1);
+        if (n < 60) Log("native: icd gipa '%s' -> real=%p", name, real);
+    }
+    if (!real || !name) return real;
+    if (!GpuSpoofActive() || !VulkanSpoofActive()) return real;
+    int id = TargetIndex(name);
+    if (id >= 0) {
+        if (g_vk_real[id] == nullptr) {
+            g_vk_real[id] = real;
+            ChainLog(id, "icd");
+        }
+        if (g_vk_real[id] == real) return kVkProxies[id];
+    }
+    return real;
+}
+
 static void* MyVkGetInstanceProcAddrGOT(VkInstance instance, const char* name) {
     BYTEHOOK_STACK_SCOPE();
-    // v2.7.8: once any vk activity flows through here, the vendor ICD is
-    // loaded - run the (idempotent) feasibility probe.
     ProbeIcdFeasibility();
     void* real = BYTEHOOK_CALL_PREV(MyVkGetInstanceProcAddrGOT, instance, name);
+    if (name != nullptr) {
+        int n = __sync_fetch_and_add(&g_gipa_log, 1);
+        if (n < 60) Log("native: gipa '%s' -> real=%p", name, real);
+    }
     if (!GpuSpoofActive() || !VulkanSpoofActive() || !name || !real) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
@@ -542,10 +555,14 @@ static void* MyVkGetInstanceProcAddrGOT(VkInstance instance, const char* name) {
 }
 
 static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
-    ProbeIcdFeasibility();  // v2.7.8
+    ProbeIcdFeasibility();
     PasGipaFn gipa = (PasGipaFn)g_real_gipa;
     if (!gipa) return nullptr;
     void* real = gipa(instance, name);
+    if (name != nullptr) {
+        int n = __sync_fetch_and_add(&g_gipa_log, 1);
+        if (n < 60) Log("native: gipa(ptr) '%s' -> real=%p", name, real);
+    }
     if (!GpuSpoofActive() || !VulkanSpoofActive() || !name || !real) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
@@ -561,31 +578,8 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
 }
 
 static __thread int g_dlsym_depth = 0;
-// v2.7.3: set while the inline-backstop installer resolves hook targets via
-// dlsym; those calls must receive REAL addresses, never our substituted
-// proxies (otherwise we would inline-hook libpas' own wrapper functions).
-// Declared outside the __x86_64__ guard: MyDlsym exists on every ABI.
-// (CallerAllowDlsymChain already excludes libpas callers - this is a second,
-// order-independent line of defense.)
 static __thread int g_inline_resolving = 0;
 static volatile bool g_second_gipa_diag = false;
-
-// ---------------------------------------------------------------------------
-// v2.7.8: vendor-ICD feasibility probe. The one in-process path no
-// loader-level hook covers is an app bypassing the loader entirely:
-// dlopen the vendor ICD (vulkan.<chip>.so), resolve
-// vk_icdGetInstanceProcAddr, and dispatch through the ICD's own pointers -
-// receiving the RAW device identity (Adreno name / Intel vendor+driver on
-// MuMu). The probe determines (a) whether a vendor ICD is loaded here,
-// (b) whether the ICD's gipa resolves our 8 target functions with a NULL
-// instance. Pure lookup: nothing is hooked, nothing is spoofed; the
-// module's own dlsym calls run raw via g_inline_resolving.
-//
-// Observed on MuMu (v2.7.8 capture): the kona ICD loads in-process but
-// vk_icdGetInstanceProcAddr is NOT dlsym-resolvable - there is no standard
-// entry door for app-side ICD-direct dispatch on this ROM, and no app
-// vk_icd traffic was ever observed through the chain.
-// ---------------------------------------------------------------------------
 
 struct PasIcdFinder {
     char name[256];
@@ -597,26 +591,22 @@ static int PasIcdPhdrCb(struct dl_phdr_info* info, size_t size, void* data) {
     auto* f = (PasIcdFinder*)data;
     if (!info->dlpi_name) return 0;
     const char* n = info->dlpi_name;
-    // Match /vendor/lib64/hw/vulkan.<chip>.so (the ICD); exclude the loader
-    // (/system/lib64/libvulkan.so) and the ARM shim (/system/lib64/arm64/...)
-    // by requiring the /hw/ or vendor path markers.
     if (strstr(n, "vulkan.") == nullptr || strstr(n, ".so") == nullptr) return 0;
     if (strstr(n, "/hw/") == nullptr && strstr(n, "vendor") == nullptr) return 0;
     snprintf(f->name, sizeof(f->name), "%s", n);
     f->found = true;
-    return 1;  // stop iterating
+    return 1;
 }
 
 void ProbeIcdFeasibility() {
-    static volatile int state = 0;  // 0 = not run, 1 = deferred (no ICD yet), 2 = done
+    static volatile int state = 0;
     if (state == 2) return;
     PasIcdFinder f = {};
     dl_iterate_phdr(PasIcdPhdrCb, &f);
     if (!f.found) {
         if (state == 0) {
             state = 1;
-            Log("native: vk icd probe: no vendor ICD loaded yet - deferring "
-                "(re-probed on first vk activity)");
+            Log("native: vk icd probe: no vendor ICD loaded yet - deferring");
         }
         return;
     }
@@ -634,6 +624,21 @@ void ProbeIcdFeasibility() {
             f.name);
         return;
     }
+    if (g_real_icd_gipa == nullptr) g_real_icd_gipa = (PasIcdGipaFn)sym;
+    Log("native: vk icd probe: ICD '%s' loaded; real ICD gipa=%p",
+        f.name, (void*)g_real_icd_gipa);
+
+#if defined(__x86_64__)
+    // v2.8.4: install inline body hooks on the ICD's own implementation
+    // bodies. This is the deepest layer - it catches apps that bypass even
+    // vk_icdGetInstanceProcAddr (e.g. by walking the ICD's dispatch table
+    // or invoking the plain exported vkGetPhysicalDeviceProperties pointer
+    // from the ICD handle).
+    if (icd) {
+        InstallInlineTargetsFor(icd, f.name);
+    }
+#endif
+
     auto icdGipa = (void* (*)(void*, const char*))sym;
     int resolved = 0;
     char missing[320];
@@ -650,8 +655,8 @@ void ProbeIcdFeasibility() {
         if (n > 0) ml += (size_t)n;
         if (ml >= sizeof(missing) - 2) break;
     }
-    Log("native: vk icd probe: ICD '%s' loaded; icd gipa(NULL) resolves %d/8 targets%s%s",
-        f.name, resolved, missing[0] ? "; unresolved: " : "", missing);
+    Log("native: vk icd probe: icd gipa(NULL) resolves %d/8 targets%s%s",
+        resolved, missing[0] ? "; unresolved: " : "", missing);
 }
 
 static void* MyDlsym(void* handle, const char* symbol) {
@@ -662,23 +667,41 @@ static void* MyDlsym(void* handle, const char* symbol) {
     void* out = real;
     do {
         if (real == nullptr) break;
+
+        // v2.8.4: diagnostic - log every vk_* symbol that flows through the
+        // dlsym chain, so a leaked Vulkan path can be attributed to a
+        // specific handle + resolved real pointer.
+        if (symbol != nullptr && strncmp(symbol, "vk", 2) == 0) {
+            int n = __sync_fetch_and_add(&g_vk_dlsym_log, 1);
+            if (n < 120) Log("native: vk dlsym '%s' handle=%p real=%p",
+                             symbol, handle, real);
+        }
+
         void* sub = GpuChainResolveDlsym(symbol, real);
         if (sub != nullptr) {
             out = sub;
             break;
         }
         if (!symbol || symbol[0] != 'v' || symbol[1] != 'k') break;
-        // v2.7.8: ICD-direct dispatch probe. The loader itself is excluded
-        // from this dlsym chain (CallerAllowDlsymChain skips libvulkan.so
-        // callers), so a vk_icd* resolution seen HERE is app code bypassing
-        // the loader - the one in-process path no loader-level hook covers.
+
+        if (strcmp(symbol, "vk_icdGetInstanceProcAddr") == 0) {
+            if (g_real_icd_gipa == nullptr) {
+                g_real_icd_gipa = (PasIcdGipaFn)real;
+                if (!g_icd_entry_logged) {
+                    g_icd_entry_logged = true;
+                    Log("native: vk diag: vk_icdGetInstanceProcAddr resolved via dlsym - "
+                        "installing ICD gipa proxy");
+                }
+                ProbeIcdFeasibility();
+            }
+            out = (void*)MyVkIcdGetInstanceProcAddr;
+            break;
+        }
         if (strncmp(symbol, "vk_icd", 6) == 0) {
             if (!g_icd_entry_logged) {
                 g_icd_entry_logged = true;
-                Log("native: vk diag: vk_icd entry '%s' resolved via dlsym - "
-                    "app-side ICD dispatch bypassing every loader hook", symbol);
+                Log("native: vk diag: vk_icd entry '%s' resolved via dlsym", symbol);
             }
-            // The ICD is loaded now - probe immediately.
             ProbeIcdFeasibility();
         }
         if (!GpuSpoofActive() || !VulkanSpoofActive()) break;
@@ -686,8 +709,6 @@ static void* MyDlsym(void* handle, const char* symbol) {
             if (g_real_gipa == nullptr) {
                 g_real_gipa = real;
             } else if (g_real_gipa != real) {
-                // v2.6.5 diag; v2.7.3: inline body hooks close this hole
-                // structurally - the diag remains for attribution.
                 if (!g_second_gipa_diag) {
                     g_second_gipa_diag = true;
                     Log("native: vk diag: second gipa address seen - covered by inline body hooks");
@@ -713,24 +734,6 @@ static void* MyDlsym(void* handle, const char* symbol) {
 
 static volatile int g_vk_hooklog = 0;
 
-// ---------------------------------------------------------------------------
-// v2.7.3: x86_64 inline-hook backstop (hand-rolled, no dependencies).
-//
-// ARM-translated apps (MuMu/Houdini: arm64-only libraries executed through
-// the native bridge) resolve Vulkan symbols outside every PLT/GOT surface
-// the caller-side hooks can patch, and gipa-dispatched calls never execute
-// the export thunks. Every Vulkan call, translated or not, eventually
-// executes the real x86_64 libvulkan.so IMPLEMENTATION BODIES - inline-
-// hooking those intercepts execution itself and cannot be bypassed by any
-// resolution path. Patch helpers are idempotent, so double coverage (caller
-// PLT/dlsym proxy above, inline hook underneath) is safe.
-//
-// v2.7.8 note: the analogous ICD-level backstop (hooking the vendor ICD's
-// function bodies, covering apps that dispatch straight into the ICD) is
-// NOT installed - the v2.7.8 capture showed no app vk_icd traffic and no
-// dlsym-able ICD entry, so there is no evidence asking for it.
-// ---------------------------------------------------------------------------
-
 #if defined(__x86_64__)
 
 #ifndef MAP_FIXED_NOREPLACE
@@ -739,12 +742,10 @@ static volatile int g_vk_hooklog = 0;
 
 static void* g_inline_orig[VK_T_COUNT] = {nullptr};
 
-// Decode-stop description, for failure logging (v2.7.2 failed silently and
-// mislabeled decoder stops as "write failed").
 struct PasDecodeFail {
-    bool valid;       // bytes/offset describe a real decode stop
-    size_t offset;    // offset from function start of the undecodable insn
-    uint8_t bytes[8]; // the bytes there, for the log line
+    bool valid;
+    size_t offset;
+    uint8_t bytes[8];
 };
 
 static void FillFail(PasDecodeFail* fail, const uint8_t* at, size_t offset) {
@@ -754,33 +755,16 @@ static void FillFail(PasDecodeFail* fail, const uint8_t* at, size_t offset) {
     for (int k = 0; k < 8; k++) fail->bytes[k] = at[k];
 }
 
-// Conservative x86_64 instruction length decoder. Returns the instruction
-// length in bytes, or 0 to BAIL. `avail` = safely readable bytes at `c`.
-// On success *ripDispOff = byte offset of a [rip+disp32] operand within the
-// instruction (relocatable into a trampoline), else -1.
-//
-// Covers the instruction classes seen in Android -O2 prologues and loader
-// dispatch bodies: endbr64, REX push/pop, nop, mov r,imm (B8+r), ModRM
-// mov/lea/test/xchg/alu (byte and word forms, incl. adc/sbb), movsxd,
-// grp1 imm (80/81/83), imul imm (69/6B), mov r/m,imm (C7), grp3 test/not/
-// neg/mul/div (F6/F7), movzx/movsx/imul-rm (0F B6/B7/BE/BF/AF), multi-byte
-// nop (0F 1F), cmp/test al/eax,imm (3C/3D/A8/A9), segment-prefixed stack
-// canary loads, and register-indirect FF /0 /1 /2 /4 /6 (inc/dec/call/jmp/
-// push r/m) - the loader dispatch pattern `mov rax,[rdi+N]; jmp [rax+M]`.
-//
-// Everything else bails: position-dependent control flow (E8/E9/EB/7x/0F8x,
-// RIP-relative call/jmp [rip+disp32], FF /3 /5 /7), ret (C3/C2), shifts,
-// string ops, VEX/EVEX, legacy operand/address-size prefixes, unknown bytes.
 static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
     *ripDispOff = -1;
     if (avail < 1) return 0;
     if (avail >= 4 && c[0] == 0xF3 && c[1] == 0x0F && c[2] == 0x1E && c[3] == 0xFA)
-        return 4;  // endbr64
+        return 4;
 
     size_t i = 0;
     bool rexW = false;
     int segSkip = 0;
-    while (i < avail && (c[i] == 0x64 || c[i] == 0x65)) {  // fs/gs canary loads
+    while (i < avail && (c[i] == 0x64 || c[i] == 0x65)) {
         i++;
         if (++segSkip > 1) return 0;
     }
@@ -803,61 +787,61 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
         case 0x54: case 0x55: case 0x56: case 0x57:
         case 0x58: case 0x59: case 0x5A: case 0x5B:
         case 0x5C: case 0x5D: case 0x5E: case 0x5F:
-            return i;  // push/pop r
+            return i;
         case 0x90:
-            return i;  // nop
+            return i;
         case 0xB8: case 0xB9: case 0xBA: case 0xBB:
         case 0xBC: case 0xBD: case 0xBE: case 0xBF:
-            imm = rexW ? 8 : 4;  // mov r, imm32 / movabs r, imm64
+            imm = rexW ? 8 : 4;
             break;
-        case 0x3C: case 0xA8:  // cmp al,imm8 / test al,imm8
+        case 0x3C: case 0xA8:
             return i + 1;
-        case 0x3D: case 0xA9:  // cmp eax,imm32 / test eax,imm32
+        case 0x3D: case 0xA9:
             return i + 4;
         case 0x00: case 0x02: case 0x08: case 0x0A:
         case 0x10: case 0x12: case 0x18: case 0x1A:
         case 0x20: case 0x22: case 0x28: case 0x2A:
-        case 0x30: case 0x32: case 0x38: case 0x3A:  // byte-form alu
+        case 0x30: case 0x32: case 0x38: case 0x3A:
         case 0x01: case 0x03: case 0x09: case 0x0B:
         case 0x11: case 0x13: case 0x19: case 0x1B:
         case 0x21: case 0x23: case 0x29: case 0x2B:
-        case 0x31: case 0x33: case 0x39: case 0x3B:  // word-form alu
-        case 0x63:                                    // movsxd
-        case 0x84: case 0x85:                         // test r/m, r
-        case 0x86: case 0x87:                         // xchg
+        case 0x31: case 0x33: case 0x39: case 0x3B:
+        case 0x63:
+        case 0x84: case 0x85:
+        case 0x86: case 0x87:
         case 0x88: case 0x89: case 0x8A: case 0x8B: case 0x8D:
             kind = K_MODRM;
             allowRipRel = true;
             break;
-        case 0x80: kind = K_MODRM; imm = 1; break;  // grp1 r/m8, imm8
-        case 0x81: kind = K_MODRM; imm = 4; break;  // grp1 r/m,  imm32
-        case 0x83: kind = K_MODRM; imm = 1; break;  // grp1 r/m,  imm8
-        case 0x69: kind = K_MODRM; imm = 4; break;  // imul r, r/m, imm32
-        case 0x6B: kind = K_MODRM; imm = 1; break;  // imul r, r/m, imm8
-        case 0xC7: kind = K_MODRM; imm = 4; break;  // mov r/m, imm32
+        case 0x80: kind = K_MODRM; imm = 1; break;
+        case 0x81: kind = K_MODRM; imm = 4; break;
+        case 0x83: kind = K_MODRM; imm = 1; break;
+        case 0x69: kind = K_MODRM; imm = 4; break;
+        case 0x6B: kind = K_MODRM; imm = 1; break;
+        case 0xC7: kind = K_MODRM; imm = 4; break;
         case 0xF6: kind = K_GRP3; imm = 1; allowRipRel = true; break;
         case 0xF7: kind = K_GRP3; imm = 4; allowRipRel = true; break;
         case 0xFF: kind = K_GRP5; break;
         case 0x0F: {
             if (i >= avail) return 0;
             uint8_t op2 = c[i];
-            if (op2 == 0x1F) {  // multi-byte nop (0F 1F /0)
+            if (op2 == 0x1F) {
                 i++;
                 kind = K_MODRM;
                 allowRipRel = true;
                 break;
             }
             if (op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE || op2 == 0xBF ||
-                op2 == 0xAF) {  // movzx / movsx / imul r, r/m
+                op2 == 0xAF) {
                 i++;
                 kind = K_MODRM;
                 allowRipRel = true;
                 break;
             }
-            return 0;  // all other 0F opcodes: bail
+            return 0;
         }
         default:
-            return 0;  // unknown or position-dependent control flow: bail
+            return 0;
     }
 
     if (kind == K_IMM_ONLY) {
@@ -873,20 +857,15 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
     uint8_t rm = (uint8_t)(mrm & 7);
     bool isRipRel = (mod == 0 && rm == 5);
 
-    if (kind == K_GRP3 && reg > 1) imm = 0;  // NOT/NEG/MUL/DIV: no immediate
+    if (kind == K_GRP3 && reg > 1) imm = 0;
     if (kind == K_GRP5) {
-        // reg 0 inc, 1 dec, 2 call, 4 jmp, 6 push: copyable (register or
-        // register-indirect operand; RIP-relative DATA access - inc/dec/push
-        // - relocates like any riprel). reg 3 call-far, 5 jmp-far, 7: bail.
         if (reg == 3 || reg == 5 || reg == 7) return 0;
-        // call/jmp [rip+disp32]: position-dependent target: bail.
         if (isRipRel && (reg == 2 || reg == 4)) return 0;
         if (isRipRel) allowRipRel = true;
     }
 
     if (mod == 3) {
-        // register operand: nothing further
-    } else if (rm == 4) {  // SIB
+    } else if (rm == 4) {
         if (i >= avail) return 0;
         uint8_t sib = c[i];
         i++;
@@ -894,7 +873,7 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
         if (mod == 0) {
             if (base == 5) {
                 if (i + 4 > avail) return 0;
-                i += 4;  // [index*scale + disp32]: absolute, no relocation
+                i += 4;
             }
         } else {
             i += (mod == 1) ? 1 : 4;
@@ -913,7 +892,6 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
             if (i + 4 > avail) return 0;
             i += 4;
         }
-        // mod 0, rm 0-3/6/7: register indirect, no displacement
     }
 
     if (i > 15) return 0;
@@ -925,8 +903,6 @@ static size_t PasDecodeX64(const uint8_t* c, size_t avail, int* ripDispOff) {
     return i;
 }
 
-// How many bytes from the start decode cleanly (stops at `want`, or at the
-// first undecodable instruction)? `fail` is filled only on an early stop.
 static size_t PasProbeDecodable(const uint8_t* target, size_t want, PasDecodeFail* fail) {
     size_t copied = 0;
     while (copied < want) {
@@ -941,10 +917,6 @@ static size_t PasProbeDecodable(const uint8_t* target, size_t want, PasDecodeFai
     return copied;
 }
 
-// Copy displaced instructions (RIP-relative disp32 operands relocated) into
-// the trampoline, then jump back with `jmp qword ptr [rip+0]` + an 8-byte
-// address literal - touches no registers. `fail` (optional) is filled when
-// decoding stops short of needBytes.
 static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
                                uint8_t* tramp, size_t trampCap, size_t* copiedOut,
                                PasDecodeFail* fail) {
@@ -959,7 +931,6 @@ static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
         if (copied + len + 14 > trampCap) return false;
         memcpy(tramp + copied, target + copied, len);
         if (ripOff >= 0) {
-            // Relocate: newDisp = oldDisp + (origInsn - trampInsn)
             int64_t delta = (int64_t)((uintptr_t)(target + copied) -
                                       (uintptr_t)(tramp + copied));
             uint8_t* d = tramp + copied + (size_t)ripOff;
@@ -971,7 +942,6 @@ static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
         }
         copied += len;
     }
-    // jump back: jmp qword ptr [rip+0] ; <8-byte address>
     uintptr_t back = (uintptr_t)target + copied;
     tramp[copied++] = 0xFF;
     tramp[copied++] = 0x25;
@@ -983,10 +953,6 @@ static bool PasBuildTrampoline(const uint8_t* target, size_t needBytes,
     return true;
 }
 
-// Write strategy: mprotect+memcpy first; on hardened targets where adding W
-// to file-backed code is denied (TEXTREL/execmod protections), fall back to
-// a /proc/self/mem write, which the kernel performs via COW without any
-// page-protection change.
 static bool PasWriteCode(void* target, const void* data, size_t len) {
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) pageSize = 4096;
@@ -1016,8 +982,6 @@ static bool PasWriteCode(void* target, const void* data, size_t len) {
     return true;
 }
 
-// mmap one RWX page within rel32 range of `target` (16 MB steps, both
-// directions, up to ~2 GB). Returns nullptr when nothing can be placed.
 static uint8_t* FindNearPage(uintptr_t target) {
     for (uintptr_t off = 0x1000000; off <= 0x7F000000; off += 0x1000000) {
         for (int dir = 0; dir < 2; dir++) {
@@ -1030,8 +994,6 @@ static uint8_t* FindNearPage(uintptr_t target) {
     return nullptr;
 }
 
-// Strategy 1: 12-byte patch `movabs rax, wrapper; jmp rax` at the target;
-// *origOut receives the trampoline (displaced code + jump back).
 static bool PasInlineHookX64(void* target, void* wrapper, void** origOut) {
     uint8_t* tramp = (uint8_t*)mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC,
                                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -1057,9 +1019,6 @@ static bool PasInlineHookX64(void* target, void* wrapper, void** origOut) {
     return true;
 }
 
-// Strategy 2: 5-byte patch `jmp rel32` at the target into a near page that
-// holds the entry thunk (movabs rax, wrapper; jmp rax) followed by the
-// displaced-code trampoline. Needs only >=5 decodable bytes.
 static bool PasInlineHookE9(void* body, void* wrapper, void** origOut) {
     uint8_t* page = FindNearPage((uintptr_t)body);
     if (!page) return false;
@@ -1077,7 +1036,7 @@ static bool PasInlineHookE9(void* body, void* wrapper, void** origOut) {
     __builtin___clear_cache((char*)page, (char*)page + 12 + copied);
 
     int64_t rel = (int64_t)((uintptr_t)page - ((uintptr_t)body + 5));
-    if (rel < INT32_MIN || rel > INT32_MAX) {  // FindNearPage guarantees this
+    if (rel < INT32_MIN || rel > INT32_MAX) {
         munmap(page, 4096);
         return false;
     }
@@ -1106,8 +1065,6 @@ static void InlineVkGetPhysicalDeviceProperties2(VkPhysicalDevice pd,
                                                  VkPhysicalDeviceProperties2* out) {
     auto orig = (PFN_vkGetPhysicalDeviceProperties2)g_inline_orig[VK_T_PROP2];
     if (orig) orig(pd, out);
-    // v2.7.3: no pre-gate - PatchProps2 waits for the config and gates
-    // internally.
     PatchProps2(out);
 }
 
@@ -1151,7 +1108,6 @@ static VkResult InlineVkEnumerateDeviceExtensionProperties(VkPhysicalDevice pd,
     if (!count) return r;
     if (layer != nullptr && layer[0] != '\0') return r;
     if (props == nullptr) {
-        // Size query: report the count with hidden extensions subtracted.
         if (!GpuSpoofActive() || !VulkanSpoofActive() || *count == 0) return r;
         uint32_t total = *count;
         VkExtensionProperties* tmp =
@@ -1197,18 +1153,7 @@ static VkResult InlineVkEnumerateInstanceExtensionProperties(const char* layer,
     return FilterExtList(count, props, r);
 }
 
-void InstallVulkanInlineBackstop() {
-    static int g_inline_state = 0;  // 0 = not tried, 1 = installed/attempted
-    if (g_inline_state) return;
-    g_inline_state = 1;
-
-    void* h = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!h) {
-        Log("native: vulkan inline: libvulkan.so dlopen failed");
-        ProbeIcdFeasibility();
-        return;
-    }
-
+static void InstallInlineTargetsFor(void* h, const char* context) {
     struct InlineSpec {
         const char* sym;
         int id;
@@ -1235,21 +1180,21 @@ void InstallVulkanInlineBackstop() {
 
     int ok = 0, notExported = 0;
     for (int i = 0; i < VK_T_COUNT; i++) {
-        // Real addresses only: g_inline_resolving keeps our own dlsym chain
-        // hook from substituting proxies during installation.
+        // Only install once per target id. If libvulkan.so's body was
+        // hooked first, the ICD is normally a thin thunk into it and the
+        // existing hook is sufficient.
+        if (g_inline_orig[specs[i].id] != nullptr) {
+            ok++;
+            continue;
+        }
         g_inline_resolving = 1;
         void* target = dlsym(h, specs[i].sym);
         g_inline_resolving = 0;
         if (!target) {
             notExported++;
-            Log("native: vulkan inline: %s not exported (KHR name resolves via "
-                "gipa into the hooked core body)", specs[i].sym);
             continue;
         }
 
-        // Follow E9 thunk chains (export thunks, chained thunks) to the
-        // implementation body. Thunks are pure jumps - skipping them when
-        // calling orig is safe.
         const uint8_t* tb = (const uint8_t*)target;
         void* body = target;
         bool thunk = false;
@@ -1260,43 +1205,34 @@ void InstallVulkanInlineBackstop() {
             thunk = true;
         }
 
-        // Hook the BODY, never just the export: gipa hands out body pointers
-        // (loader-internal trampolines), so gipa-dispatched calls never
-        // execute the export thunk.
         PasDecodeFail fail = {};
         size_t dec = PasProbeDecodable((const uint8_t*)body, 12, &fail);
         if (dec >= 12 && PasInlineHookX64(body, specs[i].fn, &g_inline_orig[specs[i].id])) {
             ok++;
-            Log("native: vulkan inline: %s body hooked (12-byte%s)", specs[i].sym,
-                thunk ? ", thunk target" : "");
+            Log("native: vk inline [%s]: %s body hooked (12-byte%s)", context,
+                specs[i].sym, thunk ? ", thunk target" : "");
             continue;
         }
         if (dec >= 5 && PasInlineHookE9(body, specs[i].fn, &g_inline_orig[specs[i].id])) {
             ok++;
-            Log("native: vulkan inline: %s body hooked (5-byte e9%s)", specs[i].sym,
-                thunk ? ", thunk target" : "");
+            Log("native: vk inline [%s]: %s body hooked (5-byte e9%s)", context,
+                specs[i].sym, thunk ? ", thunk target" : "");
             continue;
         }
         if (dec >= 5) {
-            Log("native: vulkan inline: %s code write failed (%zu bytes decodable; "
-                "see PasWriteCode diagnostics)", specs[i].sym, dec);
+            Log("native: vk inline [%s]: %s code write failed (%zu bytes decodable)",
+                context, specs[i].sym, dec);
         } else if (fail.valid) {
-            Log("native: vulkan inline: %s body+%zu unsupported bytes "
-                "%02x %02x %02x %02x %02x %02x %02x %02x (first %zu bytes decodable)",
-                specs[i].sym, fail.offset, fail.bytes[0], fail.bytes[1], fail.bytes[2],
-                fail.bytes[3], fail.bytes[4], fail.bytes[5], fail.bytes[6], fail.bytes[7],
-                dec);
+            Log("native: vk inline [%s]: %s body+%zu unsupported bytes "
+                "%02x %02x %02x %02x %02x %02x %02x %02x",
+                context, specs[i].sym, fail.offset, fail.bytes[0], fail.bytes[1],
+                fail.bytes[2], fail.bytes[3], fail.bytes[4], fail.bytes[5],
+                fail.bytes[6], fail.bytes[7]);
         }
         if (!thunk) continue;
 
-        // Fallback (export-entry calls ONLY - gipa-dispatched calls bypass
-        // it): rewrite the export thunk's rel32 to a near page that jumps to
-        // the wrapper. orig = the final hop destination.
         uint8_t* nearTramp = FindNearPage((uintptr_t)target);
-        if (!nearTramp) {
-            Log("native: vulkan inline: %s no near page for thunk fallback", specs[i].sym);
-            continue;
-        }
+        if (!nearTramp) continue;
         size_t o = 0;
         nearTramp[o++] = 0x48;
         nearTramp[o++] = 0xB8;
@@ -1308,7 +1244,6 @@ void InstallVulkanInlineBackstop() {
         int64_t newRel = (int64_t)((uintptr_t)nearTramp - (uintptr_t)target - 5);
         if (newRel < INT32_MIN || newRel > INT32_MAX) {
             munmap(nearTramp, 4096);
-            Log("native: vulkan inline: %s thunk fallback out of range", specs[i].sym);
             continue;
         }
         int32_t nr = (int32_t)newRel;
@@ -1318,19 +1253,30 @@ void InstallVulkanInlineBackstop() {
         }
         g_inline_orig[specs[i].id] = body;
         ok++;
-        Log("native: vulkan inline: %s thunk hooked (fallback: body not hookable - "
-            "gipa-dispatched calls NOT covered)", specs[i].sym);
+        Log("native: vk inline [%s]: %s thunk hooked (fallback)", context, specs[i].sym);
     }
-    Log("native: vulkan inline hooks installed %d/%d (%d not exported; those are "
-        "covered via the core bodies) (x86_64 backstop)", ok, VK_T_COUNT, notExported);
-    // v2.7.8: gather the ICD feasibility facts now that Vulkan is live.
+    Log("native: vk inline [%s]: %d/%d hooked (%d not exported)",
+        context, ok, VK_T_COUNT, notExported);
+}
+
+void InstallVulkanInlineBackstop() {
+    static int g_inline_state = 0;
+    if (g_inline_state) return;
+    g_inline_state = 1;
+
+    void* h = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!h) {
+        Log("native: vulkan inline: libvulkan.so dlopen failed");
+        ProbeIcdFeasibility();
+        return;
+    }
+    InstallInlineTargetsFor(h, "libvulkan");
     ProbeIcdFeasibility();
 }
 
 #else
 
 void InstallVulkanInlineBackstop() {
-    // Inline backstop is x86_64-only; the ICD probe runs everywhere (diag).
     ProbeIcdFeasibility();
 }
 
@@ -1373,9 +1319,6 @@ void InstallVulkanHooks() {
 }
 
 void InstallGpuDlsymChain() {
-    // v2.6.5: use the broadened dlsym-chain filter so Houdini's forwarding
-    // machinery (resolving ARM public-library shims on MuMu-style emulators)
-    // receives spoofed GL/Vulkan pointers for ARM-translated apps.
     void* dStub = HookChainStubDlsymChain("libc.so", "dlsym", (void*)MyDlsym);
     Log("native: dlsym chain libc.so stub=%d", dStub != nullptr);
     void* dStub2 = HookChainStubDlsymChain("libdl.so", "dlsym", (void*)MyDlsym);
