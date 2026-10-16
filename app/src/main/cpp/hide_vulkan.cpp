@@ -1,17 +1,21 @@
-// hide_vulkan.cpp v2.8.4
-// Vulkan identity spoof (GPU) for the scoped process.
+// hide_vulkan.cpp v2.8.5
+// Vulkan identity spoof (GPU) + GPU sysfs guard for the scoped process.
 //
-// v2.8.4 (diagnostic + ICD coverage):
-//  - ProbeIcdFeasibility() now inline-hooks the vendor ICD's implementation
-//    bodies for the same eight targets already hooked on libvulkan.so. Apps
-//    that dlopen the ICD and dispatch through vk_icdGetInstanceProcAddr (or
-//    walk the ICD's dispatch table directly) are now covered.
-//  - MyDlsym logs every vk_* symbol that passes through with handle + real
-//    pointer (capped 120/process).
-//  - Every vkGetInstanceProcAddr / ICD gipa call logs the name and the real
-//    pointer it resolved to (capped 120/process).
-//  - Every proxy entry emits one line (capped 24/process) so a leaked path
-//    can be attributed.
+// v2.8.5 (kgsl/Adreno sysfs + device-node guard, runtime caller-filtered):
+//  - DevInfo (native x86_64) does not read Vulkan properties through the
+//    loader for its GPU model line. It reads sysfs directly:
+//      /sys/class/kgsl/**, /sys/devices/**/kgsl*/**, /sys/module/kgsl/**,
+//      /sys/kernel/debug/kgsl/**, /dev/kgsl-3d0, /sys/kernel/gpu/gpu_model
+//    Those paths exist on MuMu (Snapdragon "kona" emulation) and make any
+//    tool report "Adreno (TM) 640".
+//  - The guard answers ENOENT only when the CALLER is an app library. Any
+//    /system/, /vendor/, /apex/, /odm/ caller - in particular libEGL_kona,
+//    libOpenglSystemCommon_ext, gralloc.exynos2100, libhwui - keeps real
+//    access. That is exactly what the v2.8.0 install-time filter could not
+//    guarantee, and why every scoped app force-closed at start.
+//  - ICD export probe: dlsym every target name on the loaded ICD and log
+//    the pointer. MuMu's kona ICD returns null for vk_icdGetInstanceProcAddr
+//    on this ROM, but we still need to know what it DOES export.
 
 #include "pas.h"
 
@@ -25,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <string>
@@ -58,8 +63,6 @@ static volatile int g_gpu_desc_indexing = 0;
 static volatile int g_gpu_sparse_binding = 0;
 static volatile bool g_icd_entry_logged = false;
 static volatile int g_coreprops_calllog = 0;
-
-// v2.8.4 diagnostics.
 static volatile int g_vk_dlsym_log = 0;
 static volatile int g_gipa_log = 0;
 static volatile int g_vk_proxy_calls = 0;
@@ -67,8 +70,6 @@ static volatile int g_vk_proxy_calls = 0;
 void ProbeIcdFeasibility();
 
 #if defined(__x86_64__)
-// v2.8.4: forward declaration - defined further down; called from
-// ProbeIcdFeasibility to install inline body hooks on the vendor ICD.
 static void InstallInlineTargetsFor(void* h, const char* context);
 #endif
 
@@ -235,8 +236,6 @@ static void PatchFeatures2(VkPhysicalDeviceFeatures2* out) {
     }
 }
 
-// v2.8.4: one-line proxy entry trace (capped) so we can confirm a patch
-// actually fires in the leaking process.
 static void VkProxyHit(const char* fn) {
     int n = __sync_fetch_and_add(&g_vk_proxy_calls, 1);
     if (n < 24) Log("native: vk proxy hit: %s (#%d)", fn, n + 1);
@@ -514,7 +513,6 @@ static void* const kVkProxies[VK_T_COUNT] = {
     (void*)VkExtDevPtr, (void*)VkExtInstPtr,
 };
 
-// v2.8.4: ICD gipa proxy.
 static void* MyVkIcdGetInstanceProcAddr(void* instance, const char* name) {
     PasIcdGipaFn gipa = g_real_icd_gipa;
     if (!gipa) return nullptr;
@@ -614,14 +612,42 @@ void ProbeIcdFeasibility() {
     g_inline_resolving = 1;
     void* icd = dlopen(f.name, RTLD_NOW | RTLD_LOCAL);
     g_inline_resolving = 0;
+    if (!icd) {
+        Log("native: vk icd probe: ICD '%s' dlopen failed", f.name);
+        return;
+    }
+
+    // v2.8.5: report every symbol the ICD actually exports.
+    static const char* const kProbe[] = {
+        "vk_icdGetInstanceProcAddr",
+        "vk_icdNegotiateLoaderICDInterfaceVersion",
+        "vkGetInstanceProcAddr",
+        "vkCreateInstance",
+        "vkEnumeratePhysicalDevices",
+        "vkGetPhysicalDeviceProperties",
+        "vkGetPhysicalDeviceProperties2",
+        "vkGetPhysicalDeviceProperties2KHR",
+        "vkEnumerateDeviceExtensionProperties",
+        "vkEnumerateInstanceExtensionProperties",
+    };
+    for (const char* s : kProbe) {
+        void* p = dlsym(icd, s);
+        Log("native: vk icd export '%s' = %p", s, p);
+    }
+
     void* sym = nullptr;
     g_inline_resolving = 1;
-    if (icd) sym = dlsym(icd, "vk_icdGetInstanceProcAddr");
+    sym = dlsym(icd, "vk_icdGetInstanceProcAddr");
     if (!sym) sym = dlsym(RTLD_DEFAULT, "vk_icdGetInstanceProcAddr");
     g_inline_resolving = 0;
     if (!sym) {
         Log("native: vk icd probe: ICD '%s' loaded but vk_icdGetInstanceProcAddr unresolved",
             f.name);
+#if defined(__x86_64__)
+        // v2.8.5: still try the ICD bodies even without the gipa entry point -
+        // some MuMu images export the target functions directly.
+        InstallInlineTargetsFor(icd, f.name);
+#endif
         return;
     }
     if (g_real_icd_gipa == nullptr) g_real_icd_gipa = (PasIcdGipaFn)sym;
@@ -629,11 +655,6 @@ void ProbeIcdFeasibility() {
         f.name, (void*)g_real_icd_gipa);
 
 #if defined(__x86_64__)
-    // v2.8.4: install inline body hooks on the ICD's own implementation
-    // bodies. This is the deepest layer - it catches apps that bypass even
-    // vk_icdGetInstanceProcAddr (e.g. by walking the ICD's dispatch table
-    // or invoking the plain exported vkGetPhysicalDeviceProperties pointer
-    // from the ICD handle).
     if (icd) {
         InstallInlineTargetsFor(icd, f.name);
     }
@@ -668,9 +689,6 @@ static void* MyDlsym(void* handle, const char* symbol) {
     do {
         if (real == nullptr) break;
 
-        // v2.8.4: diagnostic - log every vk_* symbol that flows through the
-        // dlsym chain, so a leaked Vulkan path can be attributed to a
-        // specific handle + resolved real pointer.
         if (symbol != nullptr && strncmp(symbol, "vk", 2) == 0) {
             int n = __sync_fetch_and_add(&g_vk_dlsym_log, 1);
             if (n < 120) Log("native: vk dlsym '%s' handle=%p real=%p",
@@ -741,6 +759,24 @@ static volatile int g_vk_hooklog = 0;
 #endif
 
 static void* g_inline_orig[VK_T_COUNT] = {nullptr};
+
+// v2.8.5: remember every body we already inline-hooked. When we later resolve
+// the same address via the ICD handle (or via a chained thunk), we skip the
+// second patch. This is what makes dual coverage safe.
+static void* g_hooked_bodies[64] = {};
+static int g_hooked_bodies_count = 0;
+
+static bool IsBodyHooked(void* body) {
+    for (int i = 0; i < g_hooked_bodies_count; i++) {
+        if (g_hooked_bodies[i] == body) return true;
+    }
+    return false;
+}
+static void MarkBodyHooked(void* body) {
+    if (g_hooked_bodies_count < 64) {
+        g_hooked_bodies[g_hooked_bodies_count++] = body;
+    }
+}
 
 struct PasDecodeFail {
     bool valid;
@@ -1153,6 +1189,8 @@ static VkResult InlineVkEnumerateInstanceExtensionProperties(const char* layer,
     return FilterExtList(count, props, r);
 }
 
+// v2.8.5: per-target installer, works for libvulkan.so AND for the ICD handle.
+// Skips bodies already hooked (dual-coverage dedup by address).
 static void InstallInlineTargetsFor(void* h, const char* context) {
     struct InlineSpec {
         const char* sym;
@@ -1178,15 +1216,8 @@ static void InstallInlineTargetsFor(void* h, const char* context) {
          (void*)InlineVkEnumerateInstanceExtensionProperties},
     };
 
-    int ok = 0, notExported = 0;
+    int ok = 0, already = 0, notExported = 0;
     for (int i = 0; i < VK_T_COUNT; i++) {
-        // Only install once per target id. If libvulkan.so's body was
-        // hooked first, the ICD is normally a thin thunk into it and the
-        // existing hook is sufficient.
-        if (g_inline_orig[specs[i].id] != nullptr) {
-            ok++;
-            continue;
-        }
         g_inline_resolving = 1;
         void* target = dlsym(h, specs[i].sym);
         g_inline_resolving = 0;
@@ -1205,15 +1236,25 @@ static void InstallInlineTargetsFor(void* h, const char* context) {
             thunk = true;
         }
 
+        if (IsBodyHooked(body)) {
+            already++;
+            continue;
+        }
+
+        void* origSlot = nullptr;
         PasDecodeFail fail = {};
         size_t dec = PasProbeDecodable((const uint8_t*)body, 12, &fail);
-        if (dec >= 12 && PasInlineHookX64(body, specs[i].fn, &g_inline_orig[specs[i].id])) {
+        if (dec >= 12 && PasInlineHookX64(body, specs[i].fn, &origSlot)) {
+            if (g_inline_orig[specs[i].id] == nullptr) g_inline_orig[specs[i].id] = origSlot;
+            MarkBodyHooked(body);
             ok++;
             Log("native: vk inline [%s]: %s body hooked (12-byte%s)", context,
                 specs[i].sym, thunk ? ", thunk target" : "");
             continue;
         }
-        if (dec >= 5 && PasInlineHookE9(body, specs[i].fn, &g_inline_orig[specs[i].id])) {
+        if (dec >= 5 && PasInlineHookE9(body, specs[i].fn, &origSlot)) {
+            if (g_inline_orig[specs[i].id] == nullptr) g_inline_orig[specs[i].id] = origSlot;
+            MarkBodyHooked(body);
             ok++;
             Log("native: vk inline [%s]: %s body hooked (5-byte e9%s)", context,
                 specs[i].sym, thunk ? ", thunk target" : "");
@@ -1251,36 +1292,273 @@ static void InstallInlineTargetsFor(void* h, const char* context) {
             munmap(nearTramp, 4096);
             continue;
         }
-        g_inline_orig[specs[i].id] = body;
+        if (g_inline_orig[specs[i].id] == nullptr) g_inline_orig[specs[i].id] = body;
+        MarkBodyHooked(body);
         ok++;
         Log("native: vk inline [%s]: %s thunk hooked (fallback)", context, specs[i].sym);
     }
-    Log("native: vk inline [%s]: %d/%d hooked (%d not exported)",
-        context, ok, VK_T_COUNT, notExported);
+    Log("native: vk inline [%s]: %d newly hooked, %d already hooked, %d not exported",
+        context, ok, already, notExported);
 }
 
-void InstallVulkanInlineBackstop() {
-    static int g_inline_state = 0;
-    if (g_inline_state) return;
-    g_inline_state = 1;
+#endif  // __x86_64__
 
-    void* h = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
-    if (!h) {
-        Log("native: vulkan inline: libvulkan.so dlopen failed");
-        ProbeIcdFeasibility();
-        return;
+// ===========================================================================
+// v2.8.5: GPU sysfs guard with RUNTIME caller filter.
+//
+// Paths: /sys/class/kgsl/**, /sys/devices/**/kgsl*/**, /sys/module/kgsl/**,
+//        /sys/kernel/debug/kgsl/**, /dev/kgsl*, /sys/kernel/gpu/gpu_model.
+//
+// Answer ENOENT when the CALLER is an app library.
+// Pass through when the caller is /system/, /vendor/, /apex/, /odm/
+// (libEGL_kona, libOpenglSystemCommon_ext, gralloc.*, libhwui, libvulkan.so,
+//  and every system sidecar that reads kgsl during graphics init).
+//
+// The runtime check uses __builtin_return_address(0) + dladdr(). This is the
+// same pattern hide_iface.cpp uses for BrowserCallerHere(); with bytehook's
+// PLT hooking, the return address on the stack at entry to our wrapper is the
+// return into the CALLER's library, not libc.
+// ===========================================================================
+
+static volatile int g_kgsl_guard_diag = 0;
+
+static bool GpuSysfsHideActive() {
+    return GpuSpoofActive();
+}
+
+static bool IsKgslSysfsPath(const char* path) {
+    if (path == nullptr || path[0] != '/') return false;
+    if (strncmp(path, "/sys/class/kgsl/", 16) == 0) return true;
+    if (strncmp(path, "/sys/module/kgsl", 16) == 0) return true;
+    if (strncmp(path, "/sys/kernel/debug/kgsl", 22) == 0) return true;
+    if (strncmp(path, "/dev/kgsl", 9) == 0) return true;
+    if (strcmp(path, "/sys/kernel/gpu/gpu_model") == 0) return true;
+    if (strcmp(path, "/sys/kernel/gpu/gpu_clock") == 0) return true;
+    if (strncmp(path, "/sys/devices/", 13) == 0 && strstr(path, "kgsl") != nullptr) return true;
+    return false;
+}
+
+static bool IsSystemOrVendorCaller(void* ra) {
+    if (ra == nullptr) return false;
+    Dl_info info;
+    if (dladdr(ra, &info) == 0 || info.dli_fname == nullptr) return false;
+    const char* n = info.dli_fname;
+    if (strstr(n, "/system/") != nullptr) return true;
+    if (strstr(n, "/vendor/") != nullptr) return true;
+    if (strstr(n, "/apex/") != nullptr) return true;
+    if (strstr(n, "/odm/") != nullptr) return true;
+    // Belt-and-braces name matches for the ones we know are critical.
+    if (strstr(n, "libEGL") != nullptr) return true;
+    if (strstr(n, "libGLES") != nullptr) return true;
+    if (strstr(n, "libvulkan") != nullptr) return true;
+    if (strstr(n, "gralloc") != nullptr) return true;
+    if (strstr(n, "OpenglSystemCommon") != nullptr) return true;
+    if (strstr(n, "libhwui") != nullptr) return true;
+    if (strstr(n, "libgui.so") != nullptr) return true;
+    if (strstr(n, "libui.so") != nullptr) return true;
+    if (strstr(n, "libnativewindow") != nullptr) return true;
+    return false;
+}
+
+static bool ShouldHideKgsl(void* ra) {
+    if (!GpuSysfsHideActive()) return false;
+    if (IsSystemOrVendorCaller(ra)) return false;
+    return true;
+}
+
+static void KgslGuardLogOnce(const char* op, const char* path, void* ra) {
+    if (g_kgsl_guard_diag >= 8) return;
+    g_kgsl_guard_diag++;
+    Dl_info info;
+    const char* caller = (ra && dladdr(ra, &info) && info.dli_fname) ? info.dli_fname : "?";
+    Log("native: kgsl guard: %s '%s' hidden (caller=%s)", op, path, caller);
+}
+
+static int MyKgslOpen(const char* path, int flags, ...) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("open", path, ra);
+        errno = ENOENT;
+        return -1;
     }
-    InstallInlineTargetsFor(h, "libvulkan");
-    ProbeIcdFeasibility();
+    mode_t mode = 0;
+#ifdef O_TMPFILE
+    if (flags & (O_CREAT | O_TMPFILE)) {
+#else
+    if (flags & O_CREAT) {
+#endif
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslOpen, path, flags, mode);
 }
 
+static int MyKgslOpen2(const char* path, int flags) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("open2", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslOpen2, path, flags);
+}
+
+static int MyKgslOpenAt(int dirfd, const char* path, int flags, ...) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("openat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    mode_t mode = 0;
+#ifdef O_TMPFILE
+    if (flags & (O_CREAT | O_TMPFILE)) {
 #else
+    if (flags & O_CREAT) {
+#endif
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslOpenAt, dirfd, path, flags, mode);
+}
+
+static int MyKgslOpenAt2(int dirfd, const char* path, int flags) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("openat2", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslOpenAt2, dirfd, path, flags);
+}
+
+static FILE* MyKgslFopen(const char* path, const char* mode) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("fopen", path, ra);
+        errno = ENOENT;
+        return nullptr;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslFopen, path, mode);
+}
+
+static int MyKgslAccess(const char* path, int mode) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("access", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslAccess, path, mode);
+}
+
+static int MyKgslFAccessAt(int dirfd, const char* path, int mode, int flags) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("faccessat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslFAccessAt, dirfd, path, mode, flags);
+}
+
+static int MyKgslStat(const char* path, struct stat* buf) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("stat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslStat, path, buf);
+}
+
+static int MyKgslLstat(const char* path, struct stat* buf) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("lstat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslLstat, path, buf);
+}
+
+static int MyKgslFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
+    BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("fstatat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(MyKgslFStatAt, dirfd, path, buf, flags);
+}
+
+static void InstallGpuSysfsGuard() {
+    int ok = 0;
+    struct Spec { const char* sym; void* fn; };
+    static const Spec kSpecs[] = {
+        {"open",       (void*)MyKgslOpen},
+        {"__open_2",   (void*)MyKgslOpen2},
+        {"openat",     (void*)MyKgslOpenAt},
+        {"__openat_2", (void*)MyKgslOpenAt2},
+        {"fopen",      (void*)MyKgslFopen},
+        {"access",     (void*)MyKgslAccess},
+        {"faccessat",  (void*)MyKgslFAccessAt},
+        {"stat",       (void*)MyKgslStat},
+        {"lstat",      (void*)MyKgslLstat},
+        {"fstatat",    (void*)MyKgslFStatAt},
+    };
+    for (const Spec& s : kSpecs) {
+        // Hook every normal caller; the runtime dladdr() filter decides at
+        // call time whether the guard acts.
+        bytehook_stub_t st = bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so",
+                                                   s.sym, s.fn, nullptr, nullptr);
+        if (st) ok++;
+    }
+    Log("native: kgsl runtime guard installed %d/%d",
+        ok, (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
+}
+
+// ---------------------------------------------------------------------------
+// Public install / entry points
+// ---------------------------------------------------------------------------
 
 void InstallVulkanInlineBackstop() {
+#if defined(__x86_64__)
+    static int g_inline_state = 0;
+    if (!g_inline_state) {
+        g_inline_state = 1;
+        void* h = dlopen("libvulkan.so", RTLD_NOW | RTLD_GLOBAL);
+        if (!h) {
+            Log("native: vulkan inline: libvulkan.so dlopen failed");
+        } else {
+            InstallInlineTargetsFor(h, "libvulkan");
+        }
+    }
+#endif
+    // v2.8.5: install the kgsl runtime guard as part of the "early GPU" stage
+    // so it is in place before any app lib does its first probe. It is
+    // independent of Vulkan being present.
+    static int g_kgsl_state = 0;
+    if (!g_kgsl_state) {
+        g_kgsl_state = 1;
+        InstallGpuSysfsGuard();
+    }
     ProbeIcdFeasibility();
 }
-
-#endif
 
 static void OnVkHooked(bytehook_stub_t stub, int status_code, const char* caller_path_name,
                        const char* sym_name, void* new_func, void* prev_func, void* arg) {
@@ -1293,10 +1571,7 @@ static void OnVkHooked(bytehook_stub_t stub, int status_code, const char* caller
 }
 
 void InstallVulkanHooks() {
-    struct HookSpec {
-        const char* sym;
-        void* fn;
-    };
+    struct HookSpec { const char* sym; void* fn; };
     static const HookSpec kSpecs[] = {
         {"vkGetPhysicalDeviceProperties", (void*)MyVkGetPhysicalDeviceProperties},
         {"vkGetPhysicalDeviceProperties2", (void*)MyVkGetPhysicalDeviceProperties2},
