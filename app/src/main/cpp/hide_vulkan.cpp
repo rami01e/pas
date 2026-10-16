@@ -1,5 +1,20 @@
-// hide_vulkan.cpp v2.8.5
-// Vulkan identity spoof (GPU) + GPU sysfs guard for the scoped process.
+// hide_vulkan.cpp v2.9.3
+// Vulkan identity spoof (GPU) for the scoped process.
+//
+// v2.9.3 (CPU spoofing regression fix):
+//  - The v2.8.5 kgsl sysfs guard is REMOVED from this file. It stacked a
+//    second bytehook layer on the SHARED libc open/openat/fopen/access/stat
+//    family - the same symbols hide_fs.cpp hooks for the CPU profile engine -
+//    so every fall-through open() in every caller library gained an extra
+//    hop and the process-wide hook topology diverged from the proven 2.8.4
+//    layout. The kgsl ENOENT behavior now lives INSIDE hide_fs.cpp's
+//    existing wrappers (single hook layer, exactly like 2.8.4).
+//  - ProbeIcdFeasibility() restores the v2.8.4 gate: the ICD's vk bodies are
+//    inline-hooked ONLY when vk_icdGetInstanceProcAddr actually resolves.
+//    v2.8.5 dropped the gate, so on MuMu (kona ICD resolves no gipa) it
+//    began executing an inline-patch pass over emulator-internal code at
+//    stage0 that the proven-stable 2.8.4 build never ran. The read-only
+//    export probe stays.
 //
 // v2.8.5 (kgsl/Adreno sysfs + device-node guard, runtime caller-filtered):
 //  - DevInfo (native x86_64) does not read Vulkan properties through the
@@ -29,7 +44,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 #include <string>
@@ -640,13 +654,14 @@ void ProbeIcdFeasibility() {
     if (!sym) sym = dlsym(RTLD_DEFAULT, "vk_icdGetInstanceProcAddr");
     g_inline_resolving = 0;
     if (!sym) {
+        // v2.9.3: v2.8.5 inline-hooked the ICD bodies here even without the
+        // gipa entry point. That pass never ran on 2.8.4 (early return), and
+        // on MuMu the kona ICD resolves no gipa, so 2.8.5 began executing an
+        // inline-patch pass over emulator-internal code at stage0 that the
+        // stable 2.8.4 build never did. The gate is restored: ICD bodies are
+        // hooked only when vk_icdGetInstanceProcAddr resolves.
         Log("native: vk icd probe: ICD '%s' loaded but vk_icdGetInstanceProcAddr unresolved",
             f.name);
-#if defined(__x86_64__)
-        // v2.8.5: still try the ICD bodies even without the gipa entry point -
-        // some MuMu images export the target functions directly.
-        InstallInlineTargetsFor(icd, f.name);
-#endif
         return;
     }
     if (g_real_icd_gipa == nullptr) g_real_icd_gipa = (PasIcdGipaFn)sym;
@@ -1302,235 +1317,6 @@ static void InstallInlineTargetsFor(void* h, const char* context) {
 
 #endif  // __x86_64__
 
-// ===========================================================================
-// v2.8.5: GPU sysfs guard with RUNTIME caller filter.
-//
-// Paths: /sys/class/kgsl/**, /sys/devices/**/kgsl*/**, /sys/module/kgsl/**,
-//        /sys/kernel/debug/kgsl/**, /dev/kgsl*, /sys/kernel/gpu/gpu_model.
-//
-// Answer ENOENT when the CALLER is an app library.
-// Pass through when the caller is /system/, /vendor/, /apex/, /odm/
-// (libEGL_kona, libOpenglSystemCommon_ext, gralloc.*, libhwui, libvulkan.so,
-//  and every system sidecar that reads kgsl during graphics init).
-//
-// The runtime check uses __builtin_return_address(0) + dladdr(). This is the
-// same pattern hide_iface.cpp uses for BrowserCallerHere(); with bytehook's
-// PLT hooking, the return address on the stack at entry to our wrapper is the
-// return into the CALLER's library, not libc.
-// ===========================================================================
-
-static volatile int g_kgsl_guard_diag = 0;
-
-static bool GpuSysfsHideActive() {
-    return GpuSpoofActive();
-}
-
-static bool IsKgslSysfsPath(const char* path) {
-    if (path == nullptr || path[0] != '/') return false;
-    if (strncmp(path, "/sys/class/kgsl/", 16) == 0) return true;
-    if (strncmp(path, "/sys/module/kgsl", 16) == 0) return true;
-    if (strncmp(path, "/sys/kernel/debug/kgsl", 22) == 0) return true;
-    if (strncmp(path, "/dev/kgsl", 9) == 0) return true;
-    if (strcmp(path, "/sys/kernel/gpu/gpu_model") == 0) return true;
-    if (strcmp(path, "/sys/kernel/gpu/gpu_clock") == 0) return true;
-    if (strncmp(path, "/sys/devices/", 13) == 0 && strstr(path, "kgsl") != nullptr) return true;
-    return false;
-}
-
-static bool IsSystemOrVendorCaller(void* ra) {
-    if (ra == nullptr) return false;
-    Dl_info info;
-    if (dladdr(ra, &info) == 0 || info.dli_fname == nullptr) return false;
-    const char* n = info.dli_fname;
-    if (strstr(n, "/system/") != nullptr) return true;
-    if (strstr(n, "/vendor/") != nullptr) return true;
-    if (strstr(n, "/apex/") != nullptr) return true;
-    if (strstr(n, "/odm/") != nullptr) return true;
-    // Belt-and-braces name matches for the ones we know are critical.
-    if (strstr(n, "libEGL") != nullptr) return true;
-    if (strstr(n, "libGLES") != nullptr) return true;
-    if (strstr(n, "libvulkan") != nullptr) return true;
-    if (strstr(n, "gralloc") != nullptr) return true;
-    if (strstr(n, "OpenglSystemCommon") != nullptr) return true;
-    if (strstr(n, "libhwui") != nullptr) return true;
-    if (strstr(n, "libgui.so") != nullptr) return true;
-    if (strstr(n, "libui.so") != nullptr) return true;
-    if (strstr(n, "libnativewindow") != nullptr) return true;
-    return false;
-}
-
-static bool ShouldHideKgsl(void* ra) {
-    if (!GpuSysfsHideActive()) return false;
-    if (IsSystemOrVendorCaller(ra)) return false;
-    return true;
-}
-
-static void KgslGuardLogOnce(const char* op, const char* path, void* ra) {
-    if (g_kgsl_guard_diag >= 8) return;
-    g_kgsl_guard_diag++;
-    Dl_info info;
-    const char* caller = (ra && dladdr(ra, &info) && info.dli_fname) ? info.dli_fname : "?";
-    Log("native: kgsl guard: %s '%s' hidden (caller=%s)", op, path, caller);
-}
-
-static int MyKgslOpen(const char* path, int flags, ...) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("open", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    mode_t mode = 0;
-#ifdef O_TMPFILE
-    if (flags & (O_CREAT | O_TMPFILE)) {
-#else
-    if (flags & O_CREAT) {
-#endif
-        va_list ap;
-        va_start(ap, flags);
-        mode = (mode_t)va_arg(ap, int);
-        va_end(ap);
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpen, path, flags, mode);
-}
-
-static int MyKgslOpen2(const char* path, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("open2", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpen2, path, flags);
-}
-
-static int MyKgslOpenAt(int dirfd, const char* path, int flags, ...) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("openat", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    mode_t mode = 0;
-#ifdef O_TMPFILE
-    if (flags & (O_CREAT | O_TMPFILE)) {
-#else
-    if (flags & O_CREAT) {
-#endif
-        va_list ap;
-        va_start(ap, flags);
-        mode = (mode_t)va_arg(ap, int);
-        va_end(ap);
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpenAt, dirfd, path, flags, mode);
-}
-
-static int MyKgslOpenAt2(int dirfd, const char* path, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("openat2", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpenAt2, dirfd, path, flags);
-}
-
-static FILE* MyKgslFopen(const char* path, const char* mode) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("fopen", path, ra);
-        errno = ENOENT;
-        return nullptr;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslFopen, path, mode);
-}
-
-static int MyKgslAccess(const char* path, int mode) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("access", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslAccess, path, mode);
-}
-
-static int MyKgslFAccessAt(int dirfd, const char* path, int mode, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("faccessat", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslFAccessAt, dirfd, path, mode, flags);
-}
-
-static int MyKgslStat(const char* path, struct stat* buf) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("stat", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslStat, path, buf);
-}
-
-static int MyKgslLstat(const char* path, struct stat* buf) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("lstat", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslLstat, path, buf);
-}
-
-static int MyKgslFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    void* ra = __builtin_return_address(0);
-    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
-        KgslGuardLogOnce("fstatat", path, ra);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslFStatAt, dirfd, path, buf, flags);
-}
-
-static void InstallGpuSysfsGuard() {
-    int ok = 0;
-    struct Spec { const char* sym; void* fn; };
-    static const Spec kSpecs[] = {
-        {"open",       (void*)MyKgslOpen},
-        {"__open_2",   (void*)MyKgslOpen2},
-        {"openat",     (void*)MyKgslOpenAt},
-        {"__openat_2", (void*)MyKgslOpenAt2},
-        {"fopen",      (void*)MyKgslFopen},
-        {"access",     (void*)MyKgslAccess},
-        {"faccessat",  (void*)MyKgslFAccessAt},
-        {"stat",       (void*)MyKgslStat},
-        {"lstat",      (void*)MyKgslLstat},
-        {"fstatat",    (void*)MyKgslFStatAt},
-    };
-    for (const Spec& s : kSpecs) {
-        // Hook every normal caller; the runtime dladdr() filter decides at
-        // call time whether the guard acts.
-        bytehook_stub_t st = bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so",
-                                                   s.sym, s.fn, nullptr, nullptr);
-        if (st) ok++;
-    }
-    Log("native: kgsl runtime guard installed %d/%d",
-        ok, (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
-}
-
 // ---------------------------------------------------------------------------
 // Public install / entry points
 // ---------------------------------------------------------------------------
@@ -1548,14 +1334,6 @@ void InstallVulkanInlineBackstop() {
         }
     }
 #endif
-    // v2.8.5: install the kgsl runtime guard as part of the "early GPU" stage
-    // so it is in place before any app lib does its first probe. It is
-    // independent of Vulkan being present.
-    static int g_kgsl_state = 0;
-    if (!g_kgsl_state) {
-        g_kgsl_state = 1;
-        InstallGpuSysfsGuard();
-    }
     ProbeIcdFeasibility();
 }
 

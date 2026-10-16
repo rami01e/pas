@@ -5,6 +5,7 @@
 #include "pas.h"
 
 #include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <jni.h>
@@ -25,6 +26,71 @@ namespace pas {
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
 #endif
+
+// ---------------------------------------------------------------------------
+// v2.9.3: kgsl/Adreno sysfs + device-node guard (relocated from
+// hide_vulkan.cpp). The ENOENT check runs INSIDE the wrappers below - i.e.
+// inside the existing single bytehook layer on open/openat/fopen/access/stat
+// - so the process-wide hook topology stays exactly the proven 2.8.4 one.
+// There is deliberately NO second stacked hook set on the shared libc
+// symbols anymore.
+//
+// Paths: /sys/class/kgsl/**, /sys/devices/**/kgsl*/**, /sys/module/kgsl/**,
+//        /sys/kernel/debug/kgsl/**, /dev/kgsl*, /sys/kernel/gpu/gpu_model.
+// ENOENT only when the CALLER is an app library; /system/, /vendor/, /apex/,
+// /odm/ callers (libEGL_kona, gralloc.*, libhwui, ...) keep real access.
+// Runtime-gated on GpuSpoofActive(); dladdr runs only for kgsl-matching
+// paths, so the hot open() path is unchanged for everything else.
+// ---------------------------------------------------------------------------
+
+static volatile int g_kgsl_guard_diag = 0;
+
+static bool IsKgslSysfsPath(const char* path) {
+    if (path == nullptr || path[0] != '/') return false;
+    if (strncmp(path, "/sys/class/kgsl/", 16) == 0) return true;
+    if (strncmp(path, "/sys/module/kgsl", 16) == 0) return true;
+    if (strncmp(path, "/sys/kernel/debug/kgsl", 22) == 0) return true;
+    if (strncmp(path, "/dev/kgsl", 9) == 0) return true;
+    if (strcmp(path, "/sys/kernel/gpu/gpu_model") == 0) return true;
+    if (strcmp(path, "/sys/kernel/gpu/gpu_clock") == 0) return true;
+    if (strncmp(path, "/sys/devices/", 13) == 0 && strstr(path, "kgsl") != nullptr) return true;
+    return false;
+}
+
+static bool IsSystemOrVendorCaller(void* ra) {
+    if (ra == nullptr) return false;
+    Dl_info info;
+    if (dladdr(ra, &info) == 0 || info.dli_fname == nullptr) return false;
+    const char* n = info.dli_fname;
+    if (strstr(n, "/system/") != nullptr) return true;
+    if (strstr(n, "/vendor/") != nullptr) return true;
+    if (strstr(n, "/apex/") != nullptr) return true;
+    if (strstr(n, "/odm/") != nullptr) return true;
+    if (strstr(n, "libEGL") != nullptr) return true;
+    if (strstr(n, "libGLES") != nullptr) return true;
+    if (strstr(n, "libvulkan") != nullptr) return true;
+    if (strstr(n, "gralloc") != nullptr) return true;
+    if (strstr(n, "OpenglSystemCommon") != nullptr) return true;
+    if (strstr(n, "libhwui") != nullptr) return true;
+    if (strstr(n, "libgui.so") != nullptr) return true;
+    if (strstr(n, "libui.so") != nullptr) return true;
+    if (strstr(n, "libnativewindow") != nullptr) return true;
+    return false;
+}
+
+static bool ShouldHideKgsl(void* ra) {
+    if (!GpuSpoofActive()) return false;
+    if (IsSystemOrVendorCaller(ra)) return false;
+    return true;
+}
+
+static void KgslGuardLogOnce(const char* op, const char* path, void* ra) {
+    if (g_kgsl_guard_diag >= 8) return;
+    g_kgsl_guard_diag++;
+    Dl_info info;
+    const char* caller = (ra && dladdr(ra, &info) && info.dli_fname) ? info.dli_fname : "?";
+    Log("native: kgsl guard: %s '%s' hidden (caller=%s)", op, path, caller);
+}
 
 enum class WatchedFile {
     None,
@@ -1016,6 +1082,12 @@ static int CreateFilteredFd(const char* path, int flags) {
 
 int HideOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("open", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("open", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
@@ -1043,6 +1115,12 @@ int HideOpen(const char* path, int flags, ...) {
 
 int HideOpen64(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("open64", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("open", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
@@ -1070,6 +1148,12 @@ int HideOpen64(const char* path, int flags, ...) {
 
 int HideOpen2(const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("open2", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("open", path, (long)flags);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
@@ -1086,6 +1170,12 @@ int HideOpen2(const char* path, int flags) {
 
 int HideOpenAt(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("openat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("openat", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
@@ -1115,6 +1205,12 @@ int HideOpenAt(int dirfd, const char* path, int flags, ...) {
 
 int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("openat64", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("openat", path, (long)flags);
     mode_t mode = 0;
 #ifdef O_TMPFILE
@@ -1144,6 +1240,12 @@ int HideOpenAt64(int dirfd, const char* path, int flags, ...) {
 
 int HideOpenAt2(int dirfd, const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("openat2", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("openat", path, (long)flags);
     if (path && path[0] == '/') {
         if (IsHiddenPath(path)) {
@@ -1162,6 +1264,12 @@ int HideOpenAt2(int dirfd, const char* path, int flags) {
 
 FILE* HideFopen(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("fopen", path, ra);
+        errno = ENOENT;
+        return nullptr;
+    }
     ReconNote("fopen", path, 0);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
@@ -1189,6 +1297,12 @@ FILE* HideFopen(const char* path, const char* mode) {
 
 FILE* HideFopen64(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("fopen64", path, ra);
+        errno = ENOENT;
+        return nullptr;
+    }
     ReconNote("fopen", path, 0);
     if (IsHiddenPath(path)) {
         errno = ENOENT;
@@ -1246,6 +1360,12 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
 
 int HideAccess(const char* path, int mode) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("access", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("access", path, (long)mode);
     if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
@@ -1256,6 +1376,12 @@ int HideAccess(const char* path, int mode) {
 
 int HideFAccessAt(int dirfd, const char* path, int mode, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("faccessat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("faccessat", path, (long)mode);
     if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
@@ -1266,6 +1392,12 @@ int HideFAccessAt(int dirfd, const char* path, int mode, int flags) {
 
 int HideStat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("stat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("stat", path, 0);
     if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
@@ -1276,6 +1408,12 @@ int HideStat(const char* path, struct stat* buf) {
 
 int HideLstat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("lstat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("lstat", path, 0);
     if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
@@ -1286,6 +1424,12 @@ int HideLstat(const char* path, struct stat* buf) {
 
 int HideFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    void* ra = __builtin_return_address(0);
+    if (path && path[0] == '/' && IsKgslSysfsPath(path) && ShouldHideKgsl(ra)) {
+        KgslGuardLogOnce("fstatat", path, ra);
+        errno = ENOENT;
+        return -1;
+    }
     ReconNote("fstatat", path, 0);
     if (IsHiddenPath(path) || IsHiddenPolicyPath(path)) {
         errno = ENOENT;
