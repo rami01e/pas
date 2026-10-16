@@ -29,7 +29,8 @@ object SpoofSettings {
         "gsf_enabled", "gsf_id",
         "recon_enabled", "webrtc_mode", "webrtc_localip", "gpu_chain", "gpu_vulkan",
         "ssl_unpin_enabled", "ssl_unpin_mode",
-        "net_cellular"
+        "net_cellular",
+        "anti_emu_enabled"
     )
 
     @Volatile

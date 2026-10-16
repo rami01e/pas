@@ -17,6 +17,7 @@ add_library(pas SHARED
     hide_gpu.cpp
     hide_vulkan.cpp
     hide_ssl.cpp
+    hide_antiemu.cpp
     hook_ssl_arm64.cpp)
 
 target_compile_options(pas PRIVATE -Wall -Wextra -Wno-unused-parameter -fvisibility=hidden)

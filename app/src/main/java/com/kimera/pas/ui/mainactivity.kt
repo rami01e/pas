@@ -118,6 +118,7 @@ class MainActivity : Activity() {
     private lateinit var netValue: TextView
     private var netCellularSel = false
     private lateinit var sdkJavaSw: SwitchView
+    private lateinit var antiEmuSw: SwitchView
 
 
     private lateinit var scopeChip: TextView
@@ -374,6 +375,13 @@ class MainActivity : Activity() {
         toggleRow(
             advBody, false, sdkJavaSw, "SDK (Java)",
             "Patch Build.VERSION.SDK_INT in-app (may break modern WebView apps)", null
+        )
+
+        antiEmuSw = SwitchView(this)
+        toggleRow(
+            advBody, false, antiEmuSw, "ANTI-EMU",
+            "Hide emulator identity from the target app (Build.* patched, qemu / DMI / nemu paths and props masked)",
+            null
         )
 
         // Net type: per-app WIFI / CELLULAR source selection.
@@ -1275,6 +1283,7 @@ class MainActivity : Activity() {
         lightSw.checked = sp.getBoolean("recon_enabled", false)
         compatSw.checked = sp.getBoolean("safe_mode", false)
         sdkJavaSw.checked = sp.getBoolean("sdk_java_enabled", false)
+        antiEmuSw.checked = sp.getBoolean("anti_emu_enabled", false)
         sdkSw.checked = sp.getBoolean("sdk_enabled", false)
         sdkSel = sdkIndexFor(sp.getInt("sdk_value", currentSdk))
         updateSdkValue()
@@ -1326,6 +1335,7 @@ class MainActivity : Activity() {
         "native_enabled" to nativeSw.checked,
         "safe_mode" to compatSw.checked,
         "sdk_enabled" to sdkSw.checked,
+        "anti_emu_enabled" to antiEmuSw.checked,
         "sdk_value" to sdkValueSelected(),
         "abi_enabled" to abiSw.checked,
         "abi_value" to when (abiModeSel) {
@@ -1367,6 +1377,7 @@ class MainActivity : Activity() {
             "native_enabled" to sp.getBoolean("native_enabled", true),
             "safe_mode" to sp.getBoolean("safe_mode", false),
             "sdk_enabled" to sp.getBoolean("sdk_enabled", false),
+            "anti_emu_enabled" to sp.getBoolean("anti_emu_enabled", false),
             "sdk_value" to sp.getInt("sdk_value", currentSdk),
             "abi_enabled" to sp.getBoolean("abi_enabled", false),
             "abi_value" to (sp.getString("abi_value", "x86_64") ?: "x86_64"),
@@ -1459,6 +1470,7 @@ class MainActivity : Activity() {
         }
         netSw.onToggle = toggle
         sdkJavaSw.onToggle = toggle
+        antiEmuSw.onToggle = toggle
     }
 
     private fun saveSpoof() {

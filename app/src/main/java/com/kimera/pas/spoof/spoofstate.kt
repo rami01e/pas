@@ -86,4 +86,14 @@ object SpoofState {
     @Volatile
     var bootloader: String = ""
 
+    /**
+     * ANTI-EMU (v2.9.0): when ON, patches Build.DEVICE / FINGERPRINT /
+     * MODEL / BRAND / MANUFACTURER / PRODUCT / HARDWARE / BOARD to the
+     * same values the ROM-level properties already report, and enables the
+     * native emulator-path mask (qemu pipes, DMI tree, nemu/mumu props).
+     * Every isRunningOnEmulator() / isEmulator() check in the bundled ad
+     * SDKs returns false as a result.
+     */
+    @Volatile
+    var antiEmuOn: Boolean = false
 }

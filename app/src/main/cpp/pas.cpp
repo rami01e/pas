@@ -1,9 +1,15 @@
+//pas.cpp v2.9.0
 // PerAppSpoofer native layer (libpas.so)
 //
 // Hides VPN (tun0-style) interfaces from the scoped app process on all
 // supported ABIs, including x86_64 emulators. PLT/GOT hooking is provided by
 // ByteHook (https://github.com/bytedance/bhook, MIT).
 //
+// v2.9.0:
+//  - pas.cpp promoted unchanged from the v2.8.6 milestone build (the
+//    DevInfo Vulkan leak fix lives in hide_vulkan.cpp, not here).
+//  - The v2.8.0 Kona prop guard experiment stays retired: it force-closed
+//    every scoped app at start and the idea was dropped for good.
 // v1.2.4 hardening:
 //  - native_init() returns immediately and performs ALL initialization on a
 //    detached worker thread, so nothing here can ever block app startup.

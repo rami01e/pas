@@ -88,6 +88,8 @@ object SpoofCore {
 
     external fun nativeSetSslArm64(on: Boolean)
 
+    external fun nativeSetAntiEmu(on: Boolean)
+
     fun init(module: XposedModule) {
         Thread({
             val prefs: SharedPreferences? = try {
@@ -130,6 +132,7 @@ object SpoofCore {
         SpoofState.gsfOn = prefs.getBoolean("gsf_enabled", false)
         SpoofState.gsfId = (prefs.getString("gsf_id", "") ?: "").trim()
         SpoofState.netCellular = prefs.getBoolean("net_cellular", false)
+        SpoofState.antiEmuOn = prefs.getBoolean("anti_emu_enabled", false)
 
         val reconOn = prefs.getBoolean("recon_enabled", false)
         SpoofState.reconOn = reconOn
@@ -157,6 +160,7 @@ object SpoofCore {
         }
         SpoofState.netCellularNative = SpoofState.netCellular
         runCatching { nativeSetNetCellular(SpoofState.netCellular) }
+        runCatching { nativeSetAntiEmu(SpoofState.antiEmuOn) }
 
         val procName = try {
             java.io.File("/proc/self/cmdline").readText().replace('\u0000', ' ')

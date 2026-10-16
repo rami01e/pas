@@ -133,6 +133,12 @@ void InstallVulkanHooks();
 void InstallVulkanInlineBackstop();
 void InstallCpuDeepHooks();
 
+// v2.9.0: ANTI-EMU native layer (hide_antiemu.cpp). Installed early, gated
+// at runtime on g_anti_emu set from Kotlin via nativeSetAntiEmu().
+void InstallAntiEmuHooks();
+void SetAntiEmu(bool on);
+bool AntiEmuEnabled();
+
 void SetRecon(bool on);
 bool ReconEnabled();
 int WebRtcMode();
