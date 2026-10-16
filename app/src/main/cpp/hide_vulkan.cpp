@@ -31,6 +31,17 @@
 // deviceLUID is zeroed and deviceLUIDValid=false - matching what real
 // Android drivers report. Previously the UUID node passed through raw: the
 // last unpatched node in the identity chain.
+//
+// v2.7.10: host-GPU vendor extensions are hidden from the device/instance
+// extension lists (VK_INTEL_*, VK_QCOM_*, VK_AMD_*, VK_NV*, VK_MESA_*).
+// The kona ICD passes host-side values through (proven: the raw vendorID
+// is the HOST's 0x8086) - the extension list was the last host-derived data
+// our own enumerators delivered raw. A Mali device does not expose other
+// vendors' extensions; hiding them keeps the list coherent with the spoofed
+// identity and removes the remaining strings an app can key a "driver
+// vendor" line on. The one-shot catch log names everything filtered. Apps
+// that functionally use a VK_QCOM_*/VK_INTEL_* feature lose it - identical
+// to a real Mali device, so games fall back as they would on real hardware.
 
 #include "pas.h"
 
@@ -55,9 +66,19 @@
 
 namespace pas {
 
+// v2.7.10: one-shot catch log for hidden host-vendor extensions.
+static volatile int g_ext_hidden_log = 0;
+
 static bool IsHiddenExtName(const char* name) {
     if (!name) return false;
+    // Emulator tells.
     if (strstr(name, "NEMU") != nullptr) return true;
+    // v2.7.10: host-GPU vendor extensions (see file header).
+    if (strstr(name, "VK_INTEL") != nullptr) return true;
+    if (strstr(name, "VK_QCOM") != nullptr) return true;
+    if (strstr(name, "VK_AMD") != nullptr) return true;
+    if (strstr(name, "VK_NV") != nullptr) return true;  // also covers VK_NVX
+    if (strstr(name, "VK_MESA") != nullptr) return true;
     return false;
 }
 
@@ -309,12 +330,19 @@ static void MyVkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice pd, VkPhysicalDev
     PatchFeatures2(out);
 }
 
+// v2.7.10: filter + one-shot catch log naming every hidden extension.
 static VkResult FilterExtList(uint32_t* count, VkExtensionProperties* props, VkResult r) {
     if (!GpuSpoofActive() || !count || !props) return r;
     uint32_t got = *count;
     uint32_t kept = 0;
     for (uint32_t i = 0; i < got; i++) {
-        if (IsHiddenExtName(props[i].extensionName)) continue;
+        if (IsHiddenExtName(props[i].extensionName)) {
+            if (g_ext_hidden_log < 8) {
+                g_ext_hidden_log++;
+                Log("native: vk ext hidden: '%s'", props[i].extensionName);
+            }
+            continue;
+        }
         if (kept != i) props[kept] = props[i];
         kept++;
     }
