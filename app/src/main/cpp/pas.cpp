@@ -12,37 +12,6 @@
 //    own context while loading the module library).
 //  - The hidden-interface list is read directly from /proc/net/dev (plus
 //    /sys/class/net/<name>/ifindex) via raw syscalls.
-//
-// v2.8.0: stage0p guards (caller-filtered, runtime-gated) for the two
-// PROVEN non-Vulkan leaks behind the "Adreno (TM) 640" / Intel strings:
-//  1. Kona/emulator PROPERTIES. The app's scan threads read ro.arch and
-//     ro.hardware.egl and receive the RAW MuMu values ("kona") - hide_props's
-//     target lists (verified against its source) cover ro.hardware /
-//     ro.soc.* / sdk / abi but NOT these. "kona" is the Snapdragon 865
-//     codename: every chipset database answers "Snapdragon 865", whose GPU
-//     is, literally, "Adreno (TM) 640" - the exact string device-info tools
-//     display next to our spoofed Exynos CPU. The guard answers "property
-//     not found" (what a real Exynos device says for these Qualcomm-isms)
-//     for ro.arch, ro.hardware.egl, ro.kernel.qemu and every nemu*/mumu*
-//     property (init.svc_debug_pid.nemuhotd is a pure emulator tell).
-//  2. kgsl GPU paths. The app successfully probes /sys/class/kgsl/**,
-//     /sys/devices/**/kgsl*/** and /dev/kgsl-3d0 - Adreno's driver
-//     signature. They now answer ENOENT; /dev/mali0 stays visible so the
-//     surviving signature is Mali, matching every other layer.
-//
-// MuMu SAFETY (the standing constraint): both guards are caller-filtered at
-// the GOT level - MuMu's GPU machinery (libEGL/libGLES, vendor egl/ and hw/
-// libraries, libvulkan, gralloc, libhardware, the UI stack) keeps reading
-// the REAL values because their GOTs are never patched by this layer. The
-// emulator's graphics stack - and every game - is untouched. The guards
-// also chain BENEATH hide_props / hide_fs (installed later, hence
-// outermost): their outer hooks pass non-target keys/paths down to the
-// guard, which answers.
-//
-// Known limit (documented): ARM-translated app libraries' direct native
-// reads stay raw - bytehook never patches translated GOTs (the same
-// exclusion every other layer uses). The Java layer is covered via
-// libandroid_runtime (not excluded by the guard filter).
 
 #include "pas.h"
 
@@ -52,13 +21,9 @@
 #include <jni.h>
 #include <net/if.h>
 #include <pthread.h>
-#include <stdarg.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
-#include <sys/system_properties.h>
 #include <time.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -522,7 +487,7 @@ static bool CallerAllow(const char* caller_path_name, void* arg) {
     (void)arg;
     if (!caller_path_name) return true;
     static const char* const kSkip[] = {
-        "!/lib/arm",        // base.apk!lib/arm64-v8a/... / armeabi-v7a / armeabi
+        "!/lib/arm",        // base.apk!/lib/arm64-v8a/... / armeabi-v7a / armeabi
         "/libnb.so",        // emulator native bridge executor
         "libnativebridge",  // ART native-bridge client
         "libhoudini",       // other emulator translators
@@ -663,296 +628,6 @@ bool WaitSpoofConfigReady(int timeoutMs, bool* compatOut, bool* nativeOut) {
     return ready;
 }
 
-// ---------------------------------------------------------------------------
-// v2.8.0: stage0p guards - kona/emulator properties + kgsl GPU paths.
-//
-// Both are caller-filtered (KonaGuardAllow): baseline exclusions, MINUS the
-// libraries that functionally consume the kona stack - so MuMu's GPU
-// machinery keeps the REAL values and games are untouched, while the app's
-// own libraries and the Java layer (libandroid_runtime) get the hidden
-// view. Both chain beneath hide_props / hide_fs (installed later, hence
-// outermost): the outer hooks pass non-target keys/paths down to these
-// guards. Runtime-gated per call; an absent / compat / addon-off config
-// leaves everything passthrough.
-// ---------------------------------------------------------------------------
-
-static volatile int g_kona_diag = 0;
-
-static bool PropGuardActive() {
-    // Mirrors the prop layer's own gating: active only when a real,
-    // non-compat config has landed with the native addon enabled.
-    return g_cfg_ready && g_cfg_native && !g_cfg_compat;
-}
-
-static bool KonaKeyHidden(const char* name) {
-    if (name == nullptr) return false;
-    if (strcmp(name, "ro.arch") == 0) return true;          // QCOM-ism; raw "kona" -> chipset DB -> "Adreno (TM) 640"
-    if (strcmp(name, "ro.hardware.egl") == 0) return true;  // raw "kona"; incoherent next to spoofed Samsung values
-    if (strcmp(name, "ro.kernel.qemu") == 0) return true;   // classic emulator tell; real devices don't set it
-    if (strstr(name, "nemu") != nullptr) return true;       // init.svc_debug_pid.nemuhotd & friends
-    if (strstr(name, "mumu") != nullptr) return true;       // MuMu-specific properties
-    return false;
-}
-
-static void KonaGuardLog(const char* name, const char* via, const char* raw) {
-    if (g_kona_diag >= 8) return;
-    g_kona_diag++;
-    if (raw != nullptr) {
-        Log("native: kona prop guard: '%s' hidden (%s, raw='%s')", name, via, raw);
-    } else {
-        Log("native: kona prop guard: '%s' hidden (%s)", name, via);
-    }
-}
-
-// Caller filter: baseline exclusions, minus the libraries that FUNCTIONALLY
-// consume the kona stack. Substring markers are deliberately broad - a rare
-// false negative (an app lib that happens to match a marker and keeps the
-// raw value) is harmless, while a false positive (a functional consumer
-// seeing a hidden value) could break the emulator's graphics stack.
-static bool KonaGuardAllow(const char* caller_path_name, void* arg) {
-    if (!CallerAllowHooks(caller_path_name, arg)) return false;
-    if (caller_path_name == nullptr) return true;  // unknown caller: guard it
-    static const char* const kFunctional[] = {
-        "/libEGL",           "/egl/",     "libGLES",         "libvulkan",
-        "vulkan.",            "/hw/",      "gralloc",         "libhardware",
-        "OpenglSystemCommon", "libgui",    "libui",           "libnativewindow",
-        "libhwui",            "libRS",
-    };
-    for (size_t i = 0; i < sizeof(kFunctional) / sizeof(kFunctional[0]); i++) {
-        if (strstr(caller_path_name, kFunctional[i]) != nullptr) return false;
-    }
-    return true;
-}
-
-static int MyPropGet(const char* name, char* value) {
-    BYTEHOOK_STACK_SCOPE();
-    if (PropGuardActive() && KonaKeyHidden(name)) {
-        char raw[PROP_VALUE_MAX] = {0};
-        (void)BYTEHOOK_CALL_PREV(MyPropGet, name, raw);  // diag only: what was leaking
-        if (value != nullptr) value[0] = '\0';
-        KonaGuardLog(name, "get", raw);
-        return 0;  // property not found
-    }
-    return BYTEHOOK_CALL_PREV(MyPropGet, name, value);
-}
-
-static const prop_info* MyPropFind(const char* name) {
-    BYTEHOOK_STACK_SCOPE();
-    if (PropGuardActive() && KonaKeyHidden(name)) {
-        KonaGuardLog(name, "find", nullptr);
-        return nullptr;  // property not found
-    }
-    return BYTEHOOK_CALL_PREV(MyPropFind, name);
-}
-
-static int MyPropertyGetLegacy(const char* name, char* value, const char* def) {
-    BYTEHOOK_STACK_SCOPE();
-    if (PropGuardActive() && KonaKeyHidden(name)) {
-        KonaGuardLog(name, "property_get", nullptr);
-        if (value == nullptr) return 0;
-        value[0] = '\0';
-        if (def != nullptr && def[0] != '\0') {
-            size_t dl = strlen(def);
-            if (dl >= PROP_VALUE_MAX) dl = PROP_VALUE_MAX - 1;
-            memcpy(value, def, dl);
-            value[dl] = '\0';
-            return (int)dl;
-        }
-        return 0;
-    }
-    return BYTEHOOK_CALL_PREV(MyPropertyGetLegacy, name, value, def);
-}
-
-// --- kgsl GPU path guard ---------------------------------------------------
-// Adreno's driver signature, recon-proven as successfully probed by scoped
-// apps: /sys/class/kgsl/**, /sys/devices/**/kgsl*/** (platform, fdb00000.qcom,
-// soc.0 variants), /dev/kgsl-3d0. All answer ENOENT; /dev/mali0 stays
-// visible so the surviving signature is Mali (matching every spoofed layer).
-// Gated on the GPU identity spoof being active.
-
-static bool KgslHideActive() {
-    return GpuSpoofActive();
-}
-
-static bool IsKgslGpuPath(const char* path) {
-    if (path == nullptr || path[0] != '/') return false;
-    if (strncmp(path, "/sys/class/kgsl/", 17) == 0) return true;
-    if (strncmp(path, "/dev/kgsl", 9) == 0) return true;
-    if (strncmp(path, "/sys/devices/", 13) == 0 && strstr(path, "kgsl") != nullptr) return true;
-    return false;
-}
-
-static void KgslGuardLog(const char* path) {
-    if (g_kona_diag >= 8) return;
-    g_kona_diag++;
-    Log("native: kgsl gpu path hidden: '%s' (caller-filtered)", path);
-}
-
-static int MyKgslOpen(const char* path, int flags, ...) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    mode_t mode = 0;
-#ifdef O_TMPFILE
-    if (flags & (O_CREAT | O_TMPFILE)) {
-#else
-    if (flags & O_CREAT) {
-#endif
-        va_list ap;
-        va_start(ap, flags);
-        mode = (mode_t)va_arg(ap, int);
-        va_end(ap);
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpen, path, flags, mode);
-}
-
-// __open_2: the FORTIFY variant used by hardened callers (fixed signature).
-static int MyKgslOpen2(const char* path, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpen2, path, flags);
-}
-
-static int MyKgslOpenAt(int dirfd, const char* path, int flags, ...) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    mode_t mode = 0;
-#ifdef O_TMPFILE
-    if (flags & (O_CREAT | O_TMPFILE)) {
-#else
-    if (flags & O_CREAT) {
-#endif
-        va_list ap;
-        va_start(ap, flags);
-        mode = (mode_t)va_arg(ap, int);
-        va_end(ap);
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpenAt, dirfd, path, flags, mode);
-}
-
-// __openat_2: FORTIFY variant (fixed signature).
-static int MyKgslOpenAt2(int dirfd, const char* path, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslOpenAt2, dirfd, path, flags);
-}
-
-static FILE* MyKgslFopen(const char* path, const char* mode) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return nullptr;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslFopen, path, mode);
-}
-
-static int MyKgslAccess(const char* path, int mode) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslAccess, path, mode);
-}
-
-static int MyKgslFAccessAt(int dirfd, const char* path, int mode, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslFAccessAt, dirfd, path, mode, flags);
-}
-
-static int MyKgslStat(const char* path, struct stat* buf) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslStat, path, buf);
-}
-
-static int MyKgslLstat(const char* path, struct stat* buf) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslLstat, path, buf);
-}
-
-static int MyKgslFStatAt(int dirfd, const char* path, struct stat* buf, int flags) {
-    BYTEHOOK_STACK_SCOPE();
-    if (IsKgslGpuPath(path) && KgslHideActive()) {
-        KgslGuardLog(path);
-        errno = ENOENT;
-        return -1;
-    }
-    return BYTEHOOK_CALL_PREV(MyKgslFStatAt, dirfd, path, buf, flags);
-}
-
-static void InstallKonaPropGuard() {
-    bytehook_stub_t s1 = bytehook_hook_partial(KonaGuardAllow, nullptr, "libc.so",
-                                               "__system_property_get", (void*)MyPropGet,
-                                               OnHooked, nullptr);
-    bytehook_stub_t s2 = bytehook_hook_partial(KonaGuardAllow, nullptr, "libc.so",
-                                               "__system_property_find", (void*)MyPropFind,
-                                               OnHooked, nullptr);
-    bytehook_stub_t s3 = bytehook_hook_partial(KonaGuardAllow, nullptr, "libc.so",
-                                               "property_get", (void*)MyPropertyGetLegacy,
-                                               OnHooked, nullptr);
-    Log("native: kona prop guard installed get=%d find=%d legacy=%d",
-        s1 != nullptr, s2 != nullptr, s3 != nullptr);
-}
-
-static void InstallKgslGuard() {
-    int ok = 0;
-    struct Spec {
-        const char* sym;
-        void* fn;
-    };
-    static const Spec kSpecs[] = {
-        {"open", (void*)MyKgslOpen},
-        {"__open_2", (void*)MyKgslOpen2},
-        {"openat", (void*)MyKgslOpenAt},
-        {"__openat_2", (void*)MyKgslOpenAt2},
-        {"fopen", (void*)MyKgslFopen},
-        {"access", (void*)MyKgslAccess},
-        {"faccessat", (void*)MyKgslFAccessAt},
-        {"stat", (void*)MyKgslStat},
-        {"lstat", (void*)MyKgslLstat},
-        {"fstatat", (void*)MyKgslFStatAt},
-    };
-    for (const Spec& s : kSpecs) {
-        bytehook_stub_t st = bytehook_hook_partial(KonaGuardAllow, nullptr, "libc.so", s.sym,
-                                                   s.fn, OnHooked, nullptr);
-        if (st) ok++;
-    }
-    Log("native: kgsl gpu path guard installed %d/%d (caller-filtered)",
-        ok, (int)(sizeof(kSpecs) / sizeof(kSpecs[0])));
-}
-
 static std::string ProcName() {
     char buf[256];
     int fd = (int)syscall(__NR_openat, AT_FDCWD, "/proc/self/cmdline", O_RDONLY | O_CLOEXEC, 0);
@@ -998,14 +673,6 @@ static void* InitWorker(void* arg) {
     int rc = bytehook_init(BYTEHOOK_MODE_AUTOMATIC, false);
     Log("native: stage0 bytehook rc=%d version=%s mode=%d", rc, bytehook_get_version(),
         bytehook_get_mode());
-    // v2.8.0: the stage0p guards install FIRST - UNDER hide_props's prop
-    // hooks and hide_fs's file hooks (which install much later, below) - so
-    // the layers chain: the outer hooks pass non-target keys/paths down to
-    // these guards, which answer for the kona/nemu keys and kgsl paths.
-    // Caller-filtered: MuMu's GPU machinery never sees these hooks.
-    InstallKonaPropGuard();
-    InstallKgslGuard();
-    Log("native: stage0p kona prop + kgsl guards installed (caller-filtered, runtime-gated)");
     InstallGpuHooks();
     InstallGpuDlsymChain();
     InstallVulkanHooks();
