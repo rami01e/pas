@@ -18,22 +18,19 @@
 //  - Every core-props patch logs the DELIVERED strings (capped 6/process),
 //    including the previously-silent v1 vkGetPhysicalDeviceProperties calls.
 //  - The props2 diag line now carries the delivered deviceName + vendorID.
-//  - ICD-entry probe: a vk_icd* symbol resolved through the dlsym chain
-//    (the loader itself is excluded from this chain) means APP code is
-//    dispatching directly into the vendor ICD - the one in-process path no
-//    loader-level hook covers, receiving the RAW identity (Adreno/Intel on
-//    MuMu). One-shot diag names it.
-//  - ICD feasibility probe: finds the loaded vendor ICD
-//    (vulkan.<chip>.so) via dl_iterate_phdr, resolves
-//    vk_icdGetInstanceProcAddr, and reports how many of the 8 target
-//    functions its gipa returns with a NULL instance - the fact that
-//    decides the ICD inline-hook layer's design (next step). Pure lookup.
+//  - ICD-entry probe + ICD feasibility probe (dl_iterate_phdr + icd gipa).
 //
-// v2.7.8a: forward declaration of ProbeIcdFeasibility() - the probe is
-// defined later in this file but called from the gipa wrappers above the
-// definition; C++ requires declaration before use. (The CI failure
-// surfaced on arm64-v8a only because it is the first ABI in ninja's build
-// order - the bug is ABI-independent.)
+// v2.7.8a: forward declaration of ProbeIcdFeasibility() - declaration
+// before use (the CI failure surfaced on arm64-v8a only because it is the
+// first ABI in ninja's build order; the bug was ABI-independent).
+//
+// v2.7.9: VkPhysicalDeviceIDProperties (sType 1000071004 - observed as the
+// FIRST node in DevInfo's props2 chain, every capture) is now patched:
+// deviceUUID/driverUUID are derived stably from the spoofed device/driver
+// names (FNV-based; same profile -> same UUIDs across processes and runs),
+// deviceLUID is zeroed and deviceLUIDValid=false - matching what real
+// Android drivers report. Previously the UUID node passed through raw: the
+// last unpatched node in the identity chain.
 
 #include "pas.h"
 
@@ -120,8 +117,11 @@ static void PatchCoreProps(VkPhysicalDeviceProperties* p) {
 static volatile bool g_drvprops_logged = false;
 static volatile bool g_props2_node_diag = false;
 static volatile int g_props2_calllog = 0;
+// v2.7.9: deviceID-props node logging.
+static volatile bool g_devidprops_logged = false;
 
 static const uint32_t kPasDriverPropsSType = 1000196000u;
+static const uint32_t kPasDeviceIdPropsSType = 1000071004u;
 
 struct PasDriverProps {
     VkStructureType sType;
@@ -130,6 +130,19 @@ struct PasDriverProps {
     char driverName[256];
     char driverInfo[256];
     uint8_t conformance[4];
+};
+
+// v2.7.9: VkPhysicalDeviceIDProperties layout (spec: 16+16+8 bytes, mask,
+// VkBool32). Raw sType constant - no header dependency, same style as the
+// driver-props node above.
+struct PasDeviceIdProps {
+    VkStructureType sType;
+    void* pNext;
+    uint8_t deviceUUID[16];
+    uint8_t driverUUID[16];
+    uint8_t deviceLUID[8];
+    uint32_t deviceNodeMask;
+    VkBool32 deviceLUIDValid;
 };
 
 static void PatchDriverPropsNode(void* node) {
@@ -150,10 +163,40 @@ static void PatchDriverPropsNode(void* node) {
     d->conformance[3] = (uint8_t)g_gpu_conf_patch;
     if (!g_drvprops_logged) {
         g_drvprops_logged = true;
-        // v2.7.3: name the exact strings delivered, so a capture can prove
-        // the node was patched with the spoofed values (not merely reached).
         Log("native: vulkan driverprops patched (name='%s' info='%s')",
             d->driverName, d->driverInfo);
+    }
+}
+
+// v2.7.9: 16 stable bytes from a string - two independent FNV-1a 64-bit
+// chains. Deterministic: the same configured name yields the same UUID in
+// every process and every run, keeping the identity coherent.
+static void PasFnv1a128(const char* s, uint8_t* out) {
+    uint64_t h1 = 1469598103934665603ULL;
+    uint64_t h2 = 0x9E3779B97F4A7C15ULL;
+    for (const char* p = s; p != nullptr && *p != '\0'; p++) {
+        h1 = (h1 ^ (uint64_t)(uint8_t)*p) * 1099511628211ULL;
+        h2 = (h2 ^ (uint64_t)(uint8_t)*p) * 0xC2B2AE3D27D4EB4FULL;
+    }
+    memcpy(out, &h1, 8);
+    memcpy(out + 8, &h2, 8);
+}
+
+// v2.7.9: patch the ID node - deviceUUID from the spoofed device name,
+// driverUUID from the spoofed driver name, LUID invalidated (real Android
+// drivers report deviceLUIDValid=false; leaking host LUID bytes would be
+// both incoherent and a fingerprint).
+static void PatchDeviceIdPropsNode(void* node) {
+    if (node == nullptr || !GpuSpoofActive()) return;
+    auto* d = (PasDeviceIdProps*)node;
+    PasFnv1a128(GpuSpoofVkDeviceName().c_str(), d->deviceUUID);
+    PasFnv1a128(GpuSpoofDriverName().c_str(), d->driverUUID);
+    memset(d->deviceLUID, 0, sizeof(d->deviceLUID));
+    d->deviceNodeMask = 0;
+    d->deviceLUIDValid = VK_FALSE;
+    if (!g_devidprops_logged) {
+        g_devidprops_logged = true;
+        Log("native: vulkan deviceid props patched (uuids derived, luid invalid)");
     }
 }
 
@@ -169,6 +212,9 @@ static void PatchProps2(VkPhysicalDeviceProperties2* out) {
     bool foundDriverProps = false;
     for (VkBaseOutStructure* s = (VkBaseOutStructure*)out->pNext;
          s != nullptr && guard < 32; s = s->pNext, guard++) {
+        if ((uint32_t)s->sType == kPasDeviceIdPropsSType) {
+            PatchDeviceIdPropsNode((void*)s);
+        }
         if ((uint32_t)s->sType == kPasDriverPropsSType) {
             PatchDriverPropsNode((void*)s);
             foundDriverProps = true;
@@ -532,9 +578,13 @@ static volatile bool g_second_gipa_diag = false;
 // receiving the RAW device identity (Adreno name / Intel vendor+driver on
 // MuMu). The probe determines (a) whether a vendor ICD is loaded here,
 // (b) whether the ICD's gipa resolves our 8 target functions with a NULL
-// instance - the feasibility fact for the ICD inline-hook layer that gets
-// built on this evidence. Pure lookup: nothing is hooked, nothing is
-// spoofed; the module's own dlsym calls run raw via g_inline_resolving.
+// instance. Pure lookup: nothing is hooked, nothing is spoofed; the
+// module's own dlsym calls run raw via g_inline_resolving.
+//
+// Observed on MuMu (v2.7.8 capture): the kona ICD loads in-process but
+// vk_icdGetInstanceProcAddr is NOT dlsym-resolvable - there is no standard
+// entry door for app-side ICD-direct dispatch on this ROM, and no app
+// vk_icd traffic was ever observed through the chain.
 // ---------------------------------------------------------------------------
 
 struct PasIcdFinder {
@@ -677,9 +727,8 @@ static volatile int g_vk_hooklog = 0;
 //
 // v2.7.8 note: the analogous ICD-level backstop (hooking the vendor ICD's
 // function bodies, covering apps that dispatch straight into the ICD) is
-// NOT installed yet - ProbeIcdFeasibility() gathers the facts it needs
-// (which functions the ICD's gipa resolves with a NULL instance), and the
-// layer lands on that evidence.
+// NOT installed - the v2.7.8 capture showed no app vk_icd traffic and no
+// dlsym-able ICD entry, so there is no evidence asking for it.
 // ---------------------------------------------------------------------------
 
 #if defined(__x86_64__)
