@@ -1,3 +1,4 @@
+// hide_vulkan.cpp v2.8.2
 // Vulkan identity spoof (GPU) for the scoped process.
 //
 // v2.4.5: VkPhysicalDeviceProperties now carries the spoofed core count and
@@ -31,6 +32,22 @@
 // deviceLUID is zeroed and deviceLUIDValid=false - matching what real
 // Android drivers report. Previously the UUID node passed through raw: the
 // last unpatched node in the identity chain.
+//
+// v2.7.10: host-GPU vendor extensions are hidden from the device/instance
+// extension lists (VK_INTEL_*, VK_QCOM_*, VK_AMD_*, VK_NV*, VK_MESA_*).
+// The kona ICD passes host-side values through (proven: the raw vendorID
+// is the HOST's 0x8086) - the extension list was the last host-derived data
+// our own enumerators delivered raw. A Mali device does not expose other
+// vendors' extensions; hiding them keeps the list coherent with the spoofed
+// identity and removes the remaining strings an app can key a "driver
+// vendor" line on. The one-shot catch log names everything filtered. Apps
+// that functionally use a VK_QCOM_*/VK_INTEL_* feature lose it - identical
+// to a real Mali device, so games fall back as they would on real hardware.
+//
+// v2.8.2: MyVkGetInstanceProcAddrGOT now returns the spoofed proxies for the
+// eight target functions instead of the raw pointers. This covers native
+// x86_64 apps that obtain Vulkan entry points via vkGetInstanceProcAddr
+// (e.g. DevInfo) and closes the Intel host-GPU driver leak.
 
 #include "pas.h"
 
@@ -55,9 +72,19 @@
 
 namespace pas {
 
+// v2.7.10: one-shot catch log for hidden host-vendor extensions.
+static volatile int g_ext_hidden_log = 0;
+
 static bool IsHiddenExtName(const char* name) {
     if (!name) return false;
+    // Emulator tells.
     if (strstr(name, "NEMU") != nullptr) return true;
+    // v2.7.10: host-GPU vendor extensions (see file header).
+    if (strstr(name, "VK_INTEL") != nullptr) return true;
+    if (strstr(name, "VK_QCOM") != nullptr) return true;
+    if (strstr(name, "VK_AMD") != nullptr) return true;
+    if (strstr(name, "VK_NV") != nullptr) return true;  // also covers VK_NVX
+    if (strstr(name, "VK_MESA") != nullptr) return true;
     return false;
 }
 
@@ -309,12 +336,19 @@ static void MyVkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice pd, VkPhysicalDev
     PatchFeatures2(out);
 }
 
+// v2.7.10: filter + one-shot catch log naming every hidden extension.
 static VkResult FilterExtList(uint32_t* count, VkExtensionProperties* props, VkResult r) {
     if (!GpuSpoofActive() || !count || !props) return r;
     uint32_t got = *count;
     uint32_t kept = 0;
     for (uint32_t i = 0; i < got; i++) {
-        if (IsHiddenExtName(props[i].extensionName)) continue;
+        if (IsHiddenExtName(props[i].extensionName)) {
+            if (g_ext_hidden_log < 8) {
+                g_ext_hidden_log++;
+                Log("native: vk ext hidden: '%s'", props[i].extensionName);
+            }
+            continue;
+        }
         if (kept != i) props[kept] = props[i];
         kept++;
     }
@@ -525,18 +559,24 @@ static void* const kVkProxies[VK_T_COUNT] = {
     (void*)VkExtDevPtr, (void*)VkExtInstPtr,
 };
 
+// v2.8.2: return our proxies from vkGetInstanceProcAddr so native x86_64
+// apps (which never use dlsym) still receive spoofed entry points.
 static void* MyVkGetInstanceProcAddrGOT(VkInstance instance, const char* name) {
     BYTEHOOK_STACK_SCOPE();
-    // v2.7.8: once any vk activity flows through here, the vendor ICD is
-    // loaded - run the (idempotent) feasibility probe.
     ProbeIcdFeasibility();
     void* real = BYTEHOOK_CALL_PREV(MyVkGetInstanceProcAddrGOT, instance, name);
     if (!GpuSpoofActive() || !VulkanSpoofActive() || !name || !real) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
-        g_vk_real[id] = real;
-        ChainLog(id, "hit");
-        return kVkProxies[id];
+        if (g_vk_real[id] == nullptr) {
+            g_vk_real[id] = real;
+            ChainLog(id, "gipa");
+            return kVkProxies[id];
+        } else if (g_vk_real[id] == real) {
+            return kVkProxies[id];
+        }
+        // If the pointer differs, return the real one to avoid mixing
+        // implementations. This should be rare.
     }
     return real;
 }
