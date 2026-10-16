@@ -1,3 +1,5 @@
+// spoofcore.kt v2.9.1
+
 package com.kimera.pas.spoof
 
 import android.content.SharedPreferences
@@ -11,6 +13,13 @@ import java.lang.reflect.Field
  *
  * v2.4.5: GPU profile now carries core count, L2 cache and architecture so
  * DevCheck's Mali probe sees a fully coherent device.
+ *
+ * v2.9.1: ANTI-EMU does NOT duplicate the ABI spoof. The "abi_enabled"
+ * toggle stays the single owner of Build.CPU_ABI / CPU_ABI2 /
+ * SUPPORTED_*_ABIS / os.arch. The anti-emu Java layer only masks what no
+ * other toggle covers (os.version / os.name). For a coherent arm64 story
+ * run with BOTH toggles ON: anti-emu owns the native side (props, /proc
+ * content, uname), the abi toggle owns the Java Build fields.
  */
 object SpoofCore {
 
@@ -88,6 +97,10 @@ object SpoofCore {
 
     external fun nativeSetSslArm64(on: Boolean)
 
+    // v2.9.0: master switch for the native ANTI-EMU layer (hide_antiemu.cpp).
+    // Java-side extras live in applyAntiEmuJavaExtras(); there is deliberately
+    // no second ABI toggle here - the abiOn block in apply() remains the only
+    // owner of the Java ABI fields.
     external fun nativeSetAntiEmu(on: Boolean)
 
     fun init(module: XposedModule) {
@@ -100,6 +113,7 @@ object SpoofCore {
             }
             if (prefs == null) {
                 runCatching { nativeSetConfig(false, 0, false, 0, true, false) }
+                runCatching { nativeSetAntiEmu(false) }
             } else {
                 apply(prefs)
                 try {
@@ -161,6 +175,7 @@ object SpoofCore {
         SpoofState.netCellularNative = SpoofState.netCellular
         runCatching { nativeSetNetCellular(SpoofState.netCellular) }
         runCatching { nativeSetAntiEmu(SpoofState.antiEmuOn) }
+        if (SpoofState.antiEmuOn) applyAntiEmuJavaExtras()
 
         val procName = try {
             java.io.File("/proc/self/cmdline").readText().replace('\u0000', ' ')
@@ -304,7 +319,26 @@ object SpoofCore {
             patch(Build::class.java, "SUPPORTED_32_BIT_ABIS", a32, "SUPPORTED_32_BIT_ABIS")
             runCatching { System.setProperty("os.arch", if (abiMode == 0) "x86_64" else "aarch64") }
         }
-        Log.i(TAG, "[PAS] spoof applied: sdk=$useSdk/$sdkEff abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat java ok=$ok fail=$fail")
+        Log.i(TAG, "[PAS] spoof applied: sdk=$useSdk/$sdkEff abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat antiEmu=${SpoofState.antiEmuOn} java ok=$ok fail=$fail")
+    }
+
+    /**
+     * v2.9.1 ANTI-EMU Java extras. Deliberately does NOT touch
+     * Build.CPU_ABI / CPU_ABI2 / SUPPORTED_*_ABIS / os.arch - those already
+     * have a single owner (the abiOn block above, driven by its own toggle).
+     * Only the uname-derived java.lang.System properties, which no other
+     * feature covers, are masked here so MuMu's real x86-host kernel string
+     * (6.1.90-perf+) never reaches Java-side probes. System properties are
+     * read live via System.getProperty, so a late set is still effective for
+     * anything that reads them after module init.
+     */
+    private fun applyAntiEmuJavaExtras() {
+        runCatching {
+            System.setProperty("os.version", "5.4.163-perf+")
+            System.setProperty("os.name", "Linux")
+        }.onFailure {
+            Log.w(TAG, "[PAS] spoof: anti-emu java extras failed: ${it.message}")
+        }
     }
 
     private val unsafe: Any? by lazy {

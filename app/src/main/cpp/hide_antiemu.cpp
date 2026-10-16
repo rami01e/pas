@@ -1,36 +1,52 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.0).
+// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.1).
 //
-// Masks the emulator fingerprints the bundled ad SDKs probe outside the
-// Java Build.* surface:
+// Masks the emulator fingerprints that bundled ad SDKs - and AppDome-grade
+// RASP inside protected games - probe outside the Java Build.* surface.
 //
-//   - qemu pipes:    /dev/qemu_pipe, /dev/socket/qemud, /dev/socket/genyd,
-//                    /sys/qemu_trace, /system/bin/qemu-props,
-//                    /system/lib[64]/libc_malloc_debug_qemu.so
-//   - DMI tree:      /sys/class/dmi/**, /sys/devices/virtual/dmi/**
-//                    (a real phone has no DMI at all, so returning ENOENT
-//                    is what stock Android does)
-//   - MuMu dirs:     /data/system/etc/mumu-configs/** - the ROM config tree
-//                    sg.bigo-style detectors scan for
-//   - emulator props: ro.kernel.qemu, ro.boot.qemu*, ro.chipname,
-//                    ro.dalvik.vm.native.bridge, persist.sys.nativebridge,
-//                    ro.enable.native.bridge.exec, dalvik.vm.isa.x86.features,
-//                    and any key containing nemu / mumu / qemu / goldfish /
-//                    ranchu / vbox / geny
+// Evidence base (MuMu 15 / MUMU15, June's Journey 4.15.6):
+//   - the ROM's own cpuinfo bind-mount FAILS in the game process:
+//     "nativebridge: Failed to bind-mount /system/etc/cpuinfo.x86_64.txt as
+//     /proc/cpuinfo" -> every reader sees real Intel cpuinfo
+//   - HP (MuMu game hook): "mAbi = x86_64"; ART: "Unexpected CPU variant
+//     for x86: x86_64" -> uname/abilist/isa props all say x86
+//   - 60 nemu*/nemud* props enumerate through __system_property_foreach
+//     even with get/find hooked (v2.9.0 gap)
+//   - com.mumu.* priv-app tmpfs mounts and houdini/libnb lines are visible
+//     in /proc/{self,<pid>}/{mounts,mountinfo} and {maps,smaps}
+//   - VMOSCloud (real ARM) passes AppDome because none of the above exist
+//     there; v2.9.1 closes exactly that delta.
+//
+// v2.9.1 additions over v2.9.0:
+//   - /proc CONTENT spoof engine: /proc/cpuinfo is served from a generated
+//     kona (SM8350) AArch64 cpuinfo; /proc/{self,<pid>}/{maps,smaps} and
+//     /proc/mounts, /proc/{self,<pid>}/{mounts,mountinfo,mountstats} are
+//     re-served line-filtered (nemu/mumu/houdini/xposed/magisk/frida/...).
+//     Both are delivered as a memfd returned by the open() family, so
+//     fopen/fread, read, pread, lseek, mmap and std::ifstream all see the
+//     clean content with zero per-read overhead and no fd bookkeeping.
+//   - ABI props are REWRITTEN, not blanked: ro.*.product.cpu.abi(list),
+//     ro.bionic.arch, ro.bionic.2nd_arch, ro.bionic.cpu_variant,
+//     ro.dalvik.vm.isa.arm{,64}, ro.board.platform, ro.hardware now answer
+//     with genuine kona values (blank = "prop missing" reads as tampering).
+//   - __system_property_foreach: emulator props vanish from enumeration.
+//   - __system_property_read_callback: sanitized too, so code holding a
+//     cached prop_info* cannot bypass the get/find hooks.
+//   - uname(2): machine x86_64/i386/i686 -> aarch64.
+//   - File-existence rules extended: houdini / ndk_translation / libnb /
+//     /system/lib{,64}/{arm,arm64,x86_64} trees + /com.mumu /com.nemu
+//     priv-app trees. x86/arm64 ENOENT rules apply ONLY under /system,
+//     /vendor, /apex, /odm, /product - never under /data/app/**, because
+//     the game's own lib/x86_64/*.so files must stay visible or integrity
+//     checks would flag the app itself as tampered.
+//
+// v2.9.0 history (kept): #include <jni.h> fix; MyFstatAt CALL_PREV casing;
+// O_TMPFILE varargs composite test; dmi/goldfish/ranchu/vbox/geny/nemu/mumu
+// path trees and prop substrings.
 //
 // Runtime-gated on g_anti_emu; the toggle is delivered from Kotlin via
 // nativeSetAntiEmu(). Caller filter is the standard module one
-// (CallerAllowHooks), which excludes Houdini / native-bridge libs so
-// their own property reads stay raw.
-//
-// v2.9.0 CI fixes (the first draft failed the GitHub Actions build):
-//  - #include <jni.h> added: JNIEnv/JNICALL were unknown type names.
-//  - BYTEHOOK_CALL_PREV(MyFStatAt, ...) corrected to MyFstatAt. The macro
-//    pastes the hook-function name (decltype(&func) +
-//    bytehook_get_prev_func((void*)(&func))), so a case typo is a hard
-//    "use of undeclared identifier" error, twice per site.
-//  - Coverage: the bare /sys/class/dmi and /sys/devices/virtual/dmi dirs
-//    (the prefix rules only matched children), plus goldfish / ranchu /
-//    vbox / geny / nemu / mumu path trees and prop-name substrings.
+// (CallerAllowHooks), which excludes Houdini / native-bridge libs so their
+// own property reads stay raw and MuMu's injected helpers keep working.
 
 #include "pas.h"
 
@@ -40,8 +56,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <string>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/system_properties.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #include "bytehook.h"
@@ -77,6 +96,20 @@ static bool IsAntiEmuPath(const char* path) {
         "/system/lib64/libc_malloc_debug_qemu.so",
         "/sys/class/dmi",             // the DMI dir itself, not only children
         "/sys/devices/virtual/dmi",
+        // Houdini / NDK translation / native-bridge artifacts (real ARM
+        // phones ship none of these)
+        "/system/lib/libhoudini.so",
+        "/system/lib64/libhoudini.so",
+        "/system/lib/libndk_translation.so",
+        "/system/lib64/libndk_translation.so",
+        "/system/lib64/libnb.so",
+        "/system/lib/arm",
+        "/system/lib64/arm",
+        "/system/lib/arm64",
+        "/system/lib64/arm64",
+        "/system/lib/x86_64",
+        "/system/lib64/x86_64",
+        "/system/etc/cpuinfo.x86_64.txt",
     };
     for (const char* p : kExact) {
         if (strcmp(path, p) == 0) return true;
@@ -85,6 +118,8 @@ static bool IsAntiEmuPath(const char* path) {
     // Basename patterns (some ROMs relocate these or symlink them)
     if (strstr(path, "qemu_pipe") != nullptr) return true;
     if (strstr(path, "/libc_malloc_debug_qemu") != nullptr) return true;
+    if (strstr(path, "houdini") != nullptr) return true;
+    if (strstr(path, "ndk_translation") != nullptr) return true;
 
     // DMI tree (real phones have no DMI; hidden as ENOENT)
     if (strncmp(path, "/sys/class/dmi/", 15) == 0) return true;
@@ -92,23 +127,245 @@ static bool IsAntiEmuPath(const char* path) {
 
     // Emulator ROM trees. Slash-prefixed on purpose: a path segment must
     // START with the token, so an app whose own data dir merely contains
-    // the token mid-segment (com.mumu.game) is not caught.
+    // the token mid-segment is not caught.
     if (strstr(path, "/goldfish") != nullptr) return true;  // /dev/goldfish_pipe
     if (strstr(path, "/ranchu") != nullptr) return true;
     if (strstr(path, "/vbox") != nullptr) return true;      // VirtualBox ROMs
     if (strstr(path, "/geny") != nullptr) return true;
     if (strstr(path, "/nemu") != nullptr) return true;      // MuMu nemu daemons
     if (strstr(path, "/mumu") != nullptr) return true;      // /data/system/etc/mumu-configs/**
+    if (strstr(path, "/com.mumu") != nullptr) return true;  // tmpfs-mounted priv-apps
+    if (strstr(path, "/com.nemu") != nullptr) return true;
+
+    // x86 / bridge artifacts only under system trees. NEVER under
+    // /data/app/** - the game's own lib/x86_64/*.so files must stay visible
+    // or integrity checks would flag the app itself as tampered.
+    if (strncmp(path, "/system/", 8) == 0 || strncmp(path, "/vendor/", 8) == 0 ||
+        strncmp(path, "/apex/", 6) == 0 || strncmp(path, "/odm/", 5) == 0 ||
+        strncmp(path, "/product/", 9) == 0) {
+        if (strstr(path, "/x86") != nullptr) return true;
+        if (strstr(path, "/arm64/") != nullptr) return true;
+        if (strstr(path, "/arm/") != nullptr) return true;
+        if (strstr(path, "/libnb") != nullptr) return true;
+    }
 
     return false;
 }
 
 // ---------------------------------------------------------------------------
-// open family - every entry point the SDKs use for File.exists() / FileInputStream
+// /proc content spoof - detectors read the raw files, not only the props
+// ---------------------------------------------------------------------------
+
+enum ProcSpoofKind {
+    kProcNone = 0,
+    kProcCpuInfo = 1,
+    kProcMaps = 2,
+    kProcMounts = 3,
+};
+
+// /proc/self/<leaf> or /proc/<pid-of-self>/<leaf>
+static bool ProcSelfPath(const char* path, const char* leaf) {
+    if (strncmp(path, "/proc/self/", 11) == 0) return strcmp(path + 11, leaf) == 0;
+    if (strncmp(path, "/proc/", 6) == 0) {
+        const char* p = path + 6;
+        if (*p < '0' || *p > '9') return false;
+        long v = 0;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); ++p; }
+        return v == (long)getpid() && *p == '/' && strcmp(p + 1, leaf) == 0;
+    }
+    return false;
+}
+
+// /proc/self/task/<tid>/<leaf> or /proc/<pid-of-self>/task/<tid>/<leaf>
+// (any thread of this process shows this process' view)
+static bool ProcTaskSelfLeaf(const char* path, const char* leaf) {
+    const char* p = nullptr;
+    if (strncmp(path, "/proc/self/task/", 16) == 0) {
+        p = path + 16;
+    } else if (strncmp(path, "/proc/", 6) == 0) {
+        const char* q = path + 6;
+        long v = 0;
+        bool any = false;
+        while (*q >= '0' && *q <= '9') { v = v * 10 + (*q - '0'); ++q; any = true; }
+        if (!any || v != (long)getpid() || strncmp(q, "/task/", 6) != 0) return false;
+        p = q + 6;
+    } else {
+        return false;
+    }
+    bool anyTid = false;
+    while (*p >= '0' && *p <= '9') { ++p; anyTid = true; }
+    if (!anyTid || *p != '/') return false;
+    return strcmp(p + 1, leaf) == 0;
+}
+
+static ProcSpoofKind ClassifyProcPath(const char* path) {
+    if (!g_anti_emu || path == nullptr) return kProcNone;
+    if (strcmp(path, "/proc/cpuinfo") == 0) return kProcCpuInfo;
+    if (strcmp(path, "/proc/mounts") == 0) return kProcMounts;
+    if (ProcSelfPath(path, "maps") || ProcSelfPath(path, "smaps") ||
+        ProcTaskSelfLeaf(path, "maps") || ProcTaskSelfLeaf(path, "smaps")) {
+        return kProcMaps;
+    }
+    if (ProcSelfPath(path, "mounts") || ProcSelfPath(path, "mountinfo") ||
+        ProcSelfPath(path, "mountstats")) {
+        return kProcMounts;
+    }
+    return kProcNone;
+}
+
+// Raw syscalls for internal work: no PLT, no re-entry, invisible to every
+// other hook (ours included).
+static int RawOpenRo(const char* path) {
+#if defined(__NR_openat)
+    return (int)syscall(__NR_openat, (int)AT_FDCWD, path, O_RDONLY, 0);
+#else
+    (void)path;
+    return -1;
+#endif
+}
+
+static int RawMemFd(const char* name) {
+#if defined(__NR_memfd_create)
+    return (int)syscall(__NR_memfd_create, name, 0x0001U /* MFD_CLOEXEC */);
+#else
+    (void)name;
+    return -1;
+#endif
+}
+
+// Line-level token filter for maps/smaps/mounts content. Deliberately NOT
+// the same list as IsAntiEmuPath: content must never drop the app's own
+// /data/app/** lib lines (no bare "x86" token here), while still hiding
+// MuMu, houdini and every hooking-framework artifact AppDome scans for.
+static bool LineHasToken(const char* line, size_t len) {
+    static const char* const kTokens[] = {
+        "nemu", "mumu", "houdini", "libnb", "ndk_translation",
+        "goldfish", "ranchu", "vbox", "geny", "qemu",
+        "xposed", "edxposed", "lsposed", "zygisk", "magisk", "riru",
+        "frida", "gadget", "dobby", "sandhook", "whale",
+        "kimera", "libpas", "lspd", "/data/adb",
+        "/system/lib64/arm64/", "/system/lib/arm64/",
+        "/system/lib64/arm/", "/system/lib/arm/",
+        "/system/lib64/x86", "/system/lib/x86",
+        "/vendor/arm64", "/vendor/x86",
+    };
+    for (const char* t : kTokens) {
+        size_t tl = strlen(t);
+        if (tl <= len && memmem(line, len, t, tl) != nullptr) return true;
+    }
+    return false;
+}
+
+static bool BuildFiltered(const char* path, std::string& out) {
+    int fd = RawOpenRo(path);
+    if (fd < 0) return false;
+    std::string all;
+    char buf[16384];
+    for (;;) {
+#if defined(__NR_read)
+        ssize_t n = syscall(__NR_read, fd, buf, sizeof(buf));
+#else
+        ssize_t n = -1;
+#endif
+        if (n <= 0) break;
+        all.append(buf, (size_t)n);
+        if (all.size() > (16u << 20)) break;  // 16 MB sanity cap
+    }
+#if defined(__NR_close)
+    syscall(__NR_close, fd);
+#endif
+    out.clear();
+    size_t start = 0;
+    while (start < all.size()) {
+        size_t nl = all.find('\n', start);
+        size_t next = (nl == std::string::npos) ? all.size() : nl + 1;
+        if (!LineHasToken(all.c_str() + start, next - start)) {
+            out.append(all, start, next - start);
+        }
+        start = next;
+    }
+    return !out.empty();
+}
+
+// Genuine kona (Samsung SM-G991B, Snapdragon 888) style AArch64 cpuinfo.
+static const std::string& CpuInfoText() {
+    static const std::string kText = [] {
+        std::string s;
+        char b[192];
+        s += "Processor\t: AArch64 Processor rev 14 (aarch64)\n";
+        for (int i = 0; i < 8; ++i) {
+            snprintf(b, sizeof(b), "processor\t: %d\n", i);
+            s += b;
+            s += "BogoMIPS\t: 38.40\n";
+            s += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm lrcpc dcpop asimddp\n";
+            s += "CPU implementer\t: 0x51\n";
+            s += "CPU architecture: 8\n";
+            s += "CPU variant\t: 0x2\n";
+            snprintf(b, sizeof(b), "CPU part\t: 0x%x\n", (i < 4) ? 0x802 : 0x805);
+            s += b;
+            s += "CPU revision\t: 14\n\n";
+        }
+        s += "Hardware\t: Qualcomm Technologies, Inc SM8350\n";
+        return s;
+    }();
+    return kText;
+}
+
+// Returns a memfd holding the spoofed content, or -1 (caller falls through
+// to the real open). The fd behaves exactly like a regular file fd for
+// read/pread/lseek/mmap/fdopen, so no other hook is needed downstream.
+static int ServeProcFd(ProcSpoofKind kind, const char* path) {
+    std::string content;
+    if (kind == kProcCpuInfo) {
+        content = CpuInfoText();
+    } else {
+        if (!BuildFiltered(path, content)) return -1;
+    }
+    int mfd = RawMemFd("pas_proc_spoof");
+    if (mfd < 0) return -1;
+    const char* p = content.data();
+    size_t left = content.size();
+    while (left > 0) {
+#if defined(__NR_write)
+        ssize_t w = syscall(__NR_write, mfd, p, left);
+#else
+        ssize_t w = -1;
+#endif
+        if (w <= 0) {
+#if defined(__NR_close)
+            syscall(__NR_close, mfd);
+#endif
+            return -1;
+        }
+        p += w;
+        left -= (size_t)w;
+    }
+#if defined(__NR_lseek)
+    syscall(__NR_lseek, mfd, 0, SEEK_SET);
+#endif
+    static bool s_logged[4] = {false, false, false, false};
+    if (kind >= kProcCpuInfo && kind <= kProcMounts && !s_logged[kind]) {
+        s_logged[kind] = true;
+        Log("native: anti-emu proc spoof kind=%d path=%s (%u bytes)",
+            (int)kind, path, (unsigned)content.size());
+    }
+    return mfd;
+}
+
+// ---------------------------------------------------------------------------
+// open family - every entry point the SDKs use for File.exists() /
+// FileInputStream / fopen / ifstream
 // ---------------------------------------------------------------------------
 
 static int MyOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    if (path != nullptr && (flags & O_ACCMODE) == O_RDONLY) {
+        ProcSpoofKind k = ClassifyProcPath(path);
+        if (k != kProcNone) {
+            int fd = ServeProcFd(k, path);
+            if (fd >= 0) return fd;
+        }
+    }
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0;
 #if defined(O_TMPFILE)
@@ -127,12 +384,26 @@ static int MyOpen(const char* path, int flags, ...) {
 
 static int MyOpen2(const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    if (path != nullptr && (flags & O_ACCMODE) == O_RDONLY) {
+        ProcSpoofKind k = ClassifyProcPath(path);
+        if (k != kProcNone) {
+            int fd = ServeProcFd(k, path);
+            if (fd >= 0) return fd;
+        }
+    }
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     return BYTEHOOK_CALL_PREV(MyOpen2, path, flags);
 }
 
 static int MyOpenAt(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    if (path != nullptr && path[0] == '/' && (flags & O_ACCMODE) == O_RDONLY) {
+        ProcSpoofKind k = ClassifyProcPath(path);
+        if (k != kProcNone) {
+            int fd = ServeProcFd(k, path);
+            if (fd >= 0) return fd;
+        }
+    }
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0;
 #if defined(O_TMPFILE)
@@ -149,12 +420,30 @@ static int MyOpenAt(int dirfd, const char* path, int flags, ...) {
 
 static int MyOpenAt2(int dirfd, const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    if (path != nullptr && path[0] == '/' && (flags & O_ACCMODE) == O_RDONLY) {
+        ProcSpoofKind k = ClassifyProcPath(path);
+        if (k != kProcNone) {
+            int fd = ServeProcFd(k, path);
+            if (fd >= 0) return fd;
+        }
+    }
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     return BYTEHOOK_CALL_PREV(MyOpenAt2, dirfd, path, flags);
 }
 
 static FILE* MyFopen(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
+    if (path != nullptr && mode != nullptr && mode[0] == 'r') {
+        ProcSpoofKind k = ClassifyProcPath(path);
+        if (k != kProcNone) {
+            int fd = ServeProcFd(k, path);
+            if (fd >= 0) {
+                FILE* f = fdopen(fd, mode);
+                if (f != nullptr) return f;
+                close(fd);
+            }
+        }
+    }
     if (IsAntiEmuPath(path)) { errno = ENOENT; return nullptr; }
     return BYTEHOOK_CALL_PREV(MyFopen, path, mode);
 }
@@ -190,8 +479,35 @@ static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 }
 
 // ---------------------------------------------------------------------------
-// property filter - Appsflyer / Mintegral / generic emulator probes
+// property filter - Appsflyer / Mintegral / AppDome-grade probes
 // ---------------------------------------------------------------------------
+
+// Props whose value on MuMu is x86 but whose value on a genuine kona
+// (SM-G991B) device is ARM. Rewritten, not blanked: a blank reads as
+// "property missing", which is itself tamper evidence on a Samsung build.
+static const char* ArmAbiValue(const char* name) {
+    static const char kAbi64[] = "arm64-v8a";
+    static const char kAbiList[] = "arm64-v8a,armeabi-v7a,armeabi";
+    static const char kAbiList32[] = "armeabi-v7a,armeabi";
+    const size_t n = strlen(name);
+    if (n <= 3 || strncmp(name, "ro.", 3) != 0) return nullptr;
+    auto suffixIs = [&](const char* s) {
+        size_t l = strlen(s);
+        return n >= l && strcmp(name + (n - l), s) == 0;
+    };
+    if (suffixIs(".cpu.abi")) return kAbi64;
+    if (suffixIs(".cpu.abilist64")) return kAbi64;
+    if (suffixIs(".cpu.abilist32")) return kAbiList32;
+    if (suffixIs(".cpu.abilist")) return kAbiList;
+    if (strcmp(name, "ro.bionic.arch") == 0) return "arm64";
+    if (strcmp(name, "ro.bionic.2nd_arch") == 0) return "arm";
+    if (strcmp(name, "ro.bionic.cpu_variant") == 0) return "kryo";
+    if (strcmp(name, "ro.dalvik.vm.isa.arm") == 0) return "arm";
+    if (strcmp(name, "ro.dalvik.vm.isa.arm64") == 0) return "arm64";
+    if (strcmp(name, "ro.board.platform") == 0) return "kona";
+    if (strcmp(name, "ro.hardware") == 0) return "qcom";
+    return nullptr;
+}
 
 static bool IsAntiEmuProp(const char* name) {
     if (!g_anti_emu || name == nullptr) return false;
@@ -205,18 +521,22 @@ static bool IsAntiEmuProp(const char* name) {
         "ro.dalvik.vm.native.bridge",      // Houdini indicator (app-level read only;
                                            // native-bridge libs are excluded by
                                            // the caller filter so ART is unaffected)
-        "persist.sys.nativebridge",
         "ro.enable.native.bridge.exec",
+        "ro.vendor.enable.native.bridge.exec64",
+        "persist.sys.nativebridge",
+        "ro.kernel.ndk.translation",
         "dalvik.vm.isa.x86.features",
+        "dalvik.vm.isa.x86_64.features",
     };
     for (const char* p : kProps) {
         if (strcmp(name, p) == 0) return true;
     }
     // Substring catches: every ro.kernel.qemu.* / ro.boot.qemu.* variant,
-    // MuMu / Nemu (init.svc_debug_pid.nemuhotd & friends), goldfish / ranchu
-    // (AOSP emulators), vbox86 (VirtualBox ROMs), Genymotion (genyd).
+    // MuMu / Nemu (init.svc_debug_pid.nemuhotd, ro.build.version.nemux,
+    // nemud.player_* & friends), goldfish / ranchu (AOSP emulators),
+    // vbox86 (VirtualBox ROMs), Genymotion (genyd), x86 isa props.
     static const char* const kPropSubstr[] = {
-        "qemu", "goldfish", "ranchu", "vbox", "geny", "nemu", "mumu",
+        "qemu", "goldfish", "ranchu", "vbox", "geny", "nemu", "mumu", "x86",
     };
     for (const char* s : kPropSubstr) {
         if (strstr(name, s) != nullptr) return true;
@@ -227,6 +547,15 @@ static bool IsAntiEmuProp(const char* name) {
 
 static int MyPropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
+    if (name != nullptr && value != nullptr) {
+        if (const char* v = ArmAbiValue(name)) {
+            size_t l = strlen(v);
+            if (l >= PROP_VALUE_MAX) l = PROP_VALUE_MAX - 1;
+            memcpy(value, v, l);
+            value[l] = '\0';
+            return (int)l;
+        }
+    }
     if (IsAntiEmuProp(name)) {
         if (value != nullptr) value[0] = '\0';
         return 0;
@@ -237,7 +566,93 @@ static int MyPropGet(const char* name, char* value) {
 static const prop_info* MyPropFind(const char* name) {
     BYTEHOOK_STACK_SCOPE();
     if (IsAntiEmuProp(name)) return nullptr;
+    // ABI props fall through on purpose: find() succeeds, and the value is
+    // sanitized at read time (both in MyPropGet and MyPropReadCallback).
     return BYTEHOOK_CALL_PREV(MyPropFind, name);
+}
+
+struct PropGrab {
+    const char* name;
+    uint32_t serial;
+};
+
+static void PropGrabCb(void* cookie, const char* name, const char* value, uint32_t serial) {
+    PropGrab* g = static_cast<PropGrab*>(cookie);
+    (void)value;
+    g->name = name;
+    g->serial = serial;
+}
+
+static void MyPropReadCallback(const prop_info* pi,
+                               void (*cb)(void*, const char*, const char*, uint32_t),
+                               void* cookie) {
+    BYTEHOOK_STACK_SCOPE();
+    if (g_anti_emu && pi != nullptr && cb != nullptr) {
+        PropGrab g;
+        g.name = nullptr;
+        g.serial = 0;
+        BYTEHOOK_CALL_PREV(MyPropReadCallback, pi, &PropGrabCb, &g);
+        if (g.name != nullptr) {
+            if (const char* v = ArmAbiValue(g.name)) {
+                cb(cookie, g.name, v, g.serial);
+                return;
+            }
+            if (IsAntiEmuProp(g.name)) {
+                cb(cookie, g.name, "", g.serial);
+                return;
+            }
+        }
+    }
+    BYTEHOOK_CALL_PREV(MyPropReadCallback, pi, cb, cookie);
+}
+
+struct PropForeachFwd {
+    void (*cb)(const prop_info*, void*);
+    void* cookie;
+};
+
+static void PropForeachShim(const prop_info* pi, void* cookie) {
+    PropForeachFwd* fwd = static_cast<PropForeachFwd*>(cookie);
+    if (pi == nullptr) return;
+    PropGrab g;
+    g.name = nullptr;
+    g.serial = 0;
+    __system_property_read_callback(pi, &PropGrabCb, &g);
+    if (g.name == nullptr) return;
+    if (IsAntiEmuProp(g.name)) return;  // vanish from getprop-style sweeps
+    fwd->cb(pi, fwd->cookie);
+}
+
+static int MyPropForeach(void (*cb)(const prop_info*, void*), void* cookie) {
+    BYTEHOOK_STACK_SCOPE();
+    if (g_anti_emu && cb != nullptr) {
+        PropForeachFwd fwd;
+        fwd.cb = cb;
+        fwd.cookie = cookie;
+        return BYTEHOOK_CALL_PREV(MyPropForeach, &PropForeachShim, &fwd);
+    }
+    return BYTEHOOK_CALL_PREV(MyPropForeach, cb, cookie);
+}
+
+// ---------------------------------------------------------------------------
+// uname - utsname.machine is a one-line check for x86_64 / i386 / i686
+// ---------------------------------------------------------------------------
+
+static int MyUname(struct utsname* u) {
+    int r = BYTEHOOK_CALL_PREV(MyUname, u);
+    if (r == 0 && g_anti_emu && u != nullptr) {
+        if (strstr(u->machine, "x86") != nullptr || strstr(u->machine, "i386") != nullptr ||
+            strstr(u->machine, "i686") != nullptr) {
+            memset(u->machine, 0, sizeof(u->machine));
+            snprintf(u->machine, sizeof(u->machine), "%s", "aarch64");
+            static bool s_logged = false;
+            if (!s_logged) {
+                s_logged = true;
+                Log("native: anti-emu uname machine -> aarch64");
+            }
+        }
+    }
+    return r;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,6 +671,7 @@ void InstallAntiEmuHooks() {
         {"stat",       (void*)MyStat},
         {"lstat",      (void*)MyLstat},
         {"fstatat",    (void*)MyFstatAt},
+        {"uname",      (void*)MyUname},
     };
     for (const Spec& s : kFsSpecs) {
         bytehook_stub_t st = bytehook_hook_partial(
@@ -268,8 +684,13 @@ void InstallAntiEmuHooks() {
                               (void*)MyPropGet, nullptr, nullptr)) okProp++;
     if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so", "__system_property_find",
                               (void*)MyPropFind, nullptr, nullptr)) okProp++;
+    if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so",
+                              "__system_property_read_callback",
+                              (void*)MyPropReadCallback, nullptr, nullptr)) okProp++;
+    if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so", "__system_property_foreach",
+                              (void*)MyPropForeach, nullptr, nullptr)) okProp++;
 
-    Log("native: anti-emu hooks installed fs=%d/%d prop=%d/2 (runtime-gated)",
+    Log("native: anti-emu hooks installed fs=%d/%d prop=%d/4 (runtime-gated)",
         okFs, (int)(sizeof(kFsSpecs) / sizeof(kFsSpecs[0])), okProp);
 }
 
