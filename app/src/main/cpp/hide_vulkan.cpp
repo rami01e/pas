@@ -525,11 +525,9 @@ static void* MyVkIcdGetInstanceProcAddr(void* instance, const char* name) {
     if (!GpuSpoofActive() || !VulkanSpoofActive()) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
-        if (g_vk_real[id] == nullptr) {
-            g_vk_real[id] = real;
-            ChainLog(id, "icd");
-        }
-        if (g_vk_real[id] == real) return kVkProxies[id];
+        g_vk_real[id] = real;
+        ChainLog(id, "icd");
+        return kVkProxies[id];
     }
     return real;
 }
@@ -564,12 +562,13 @@ static void* MyVkGetInstanceProcAddrPtr(VkInstance instance, const char* name) {
     if (!GpuSpoofActive() || !VulkanSpoofActive() || !name || !real) return real;
     int id = TargetIndex(name);
     if (id >= 0) {
-        if (g_vk_real[id] == nullptr) {
-            g_vk_real[id] = real;
-            ChainLog(id, "dlsym hit");
-            return kVkProxies[id];
-        }
-        if (g_vk_real[id] != real) return real;
+        // v2.8.6: the loader legitimately returns DIFFERENT pointers for the
+        // same target name depending on how it was queried (loader trampoline
+        // via dlsym vs. ICD body via vkGetInstanceProcAddr). Always trust the
+        // freshest pointer and always return our proxy - our proxy internally
+        // resolves via ResolveRealTarget() which now reads this freshest one.
+        g_vk_real[id] = real;
+        ChainLog(id, "gipa");
         return kVkProxies[id];
     }
     return real;
