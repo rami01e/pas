@@ -14,17 +14,29 @@
 //   - emulator props: ro.kernel.qemu, ro.boot.qemu*, ro.chipname,
 //                    ro.dalvik.vm.native.bridge, persist.sys.nativebridge,
 //                    ro.enable.native.bridge.exec, dalvik.vm.isa.x86.features,
-//                    and any key containing "nemu" or "mumu"
+//                    and any key containing nemu / mumu / qemu / goldfish /
+//                    ranchu / vbox / geny
 //
 // Runtime-gated on g_anti_emu; the toggle is delivered from Kotlin via
 // nativeSetAntiEmu(). Caller filter is the standard module one
 // (CallerAllowHooks), which excludes Houdini / native-bridge libs so
 // their own property reads stay raw.
+//
+// v2.9.0 CI fixes (the first draft failed the GitHub Actions build):
+//  - #include <jni.h> added: JNIEnv/JNICALL were unknown type names.
+//  - BYTEHOOK_CALL_PREV(MyFStatAt, ...) corrected to MyFstatAt. The macro
+//    pastes the hook-function name (decltype(&func) +
+//    bytehook_get_prev_func((void*)(&func))), so a case typo is a hard
+//    "use of undeclared identifier" error, twice per site.
+//  - Coverage: the bare /sys/class/dmi and /sys/devices/virtual/dmi dirs
+//    (the prefix rules only matched children), plus goldfish / ranchu /
+//    vbox / geny / nemu / mumu path trees and prop-name substrings.
 
 #include "pas.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <jni.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -63,6 +75,8 @@ static bool IsAntiEmuPath(const char* path) {
         "/system/bin/qemu-props",
         "/system/lib/libc_malloc_debug_qemu.so",
         "/system/lib64/libc_malloc_debug_qemu.so",
+        "/sys/class/dmi",             // the DMI dir itself, not only children
+        "/sys/devices/virtual/dmi",
     };
     for (const char* p : kExact) {
         if (strcmp(path, p) == 0) return true;
@@ -76,8 +90,15 @@ static bool IsAntiEmuPath(const char* path) {
     if (strncmp(path, "/sys/class/dmi/", 15) == 0) return true;
     if (strncmp(path, "/sys/devices/virtual/dmi/", 25) == 0) return true;
 
-    // MuMu ROM config tree
-    if (strstr(path, "/mumu-configs") != nullptr) return true;
+    // Emulator ROM trees. Slash-prefixed on purpose: a path segment must
+    // START with the token, so an app whose own data dir merely contains
+    // the token mid-segment (com.mumu.game) is not caught.
+    if (strstr(path, "/goldfish") != nullptr) return true;  // /dev/goldfish_pipe
+    if (strstr(path, "/ranchu") != nullptr) return true;
+    if (strstr(path, "/vbox") != nullptr) return true;      // VirtualBox ROMs
+    if (strstr(path, "/geny") != nullptr) return true;
+    if (strstr(path, "/nemu") != nullptr) return true;      // MuMu nemu daemons
+    if (strstr(path, "/mumu") != nullptr) return true;      // /data/system/etc/mumu-configs/**
 
     return false;
 }
@@ -90,8 +111,10 @@ static int MyOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0;
-#ifdef O_TMPFILE
-    if (flags & (O_CREAT | O_TMPFILE)) {
+#if defined(O_TMPFILE)
+    // O_TMPFILE is (__O_TMPFILE | O_DIRECTORY); testing the full composite
+    // keeps plain O_DIRECTORY opens out of the varargs branch.
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
 #else
     if (flags & O_CREAT) {
 #endif
@@ -112,8 +135,8 @@ static int MyOpenAt(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0;
-#ifdef O_TMPFILE
-    if (flags & (O_CREAT | O_TMPFILE)) {
+#if defined(O_TMPFILE)
+    if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
 #else
     if (flags & O_CREAT) {
 #endif
@@ -163,7 +186,7 @@ static int MyLstat(const char* path, struct stat* buf) {
 static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     BYTEHOOK_STACK_SCOPE();
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
-    return BYTEHOOK_CALL_PREV(MyFStatAt, dirfd, path, buf, flags);
+    return BYTEHOOK_CALL_PREV(MyFstatAt, dirfd, path, buf, flags);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,9 +212,15 @@ static bool IsAntiEmuProp(const char* name) {
     for (const char* p : kProps) {
         if (strcmp(name, p) == 0) return true;
     }
-    // MuMu / Nemu properties (init.svc_debug_pid.nemuhotd & friends)
-    if (strstr(name, "nemu") != nullptr) return true;
-    if (strstr(name, "mumu") != nullptr) return true;
+    // Substring catches: every ro.kernel.qemu.* / ro.boot.qemu.* variant,
+    // MuMu / Nemu (init.svc_debug_pid.nemuhotd & friends), goldfish / ranchu
+    // (AOSP emulators), vbox86 (VirtualBox ROMs), Genymotion (genyd).
+    static const char* const kPropSubstr[] = {
+        "qemu", "goldfish", "ranchu", "vbox", "geny", "nemu", "mumu",
+    };
+    for (const char* s : kPropSubstr) {
+        if (strstr(name, s) != nullptr) return true;
+    }
 
     return false;
 }
@@ -226,7 +255,7 @@ void InstallAntiEmuHooks() {
         {"faccessat",  (void*)MyFAccessAt},
         {"stat",       (void*)MyStat},
         {"lstat",      (void*)MyLstat},
-        {"fstatat",    (void*)MyFStatAt},
+        {"fstatat",    (void*)MyFstatAt},
     };
     for (const Spec& s : kFsSpecs) {
         bytehook_stub_t st = bytehook_hook_partial(

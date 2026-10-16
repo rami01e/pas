@@ -6,8 +6,10 @@
 // ByteHook (https://github.com/bytedance/bhook, MIT).
 //
 // v2.9.0:
-//  - pas.cpp promoted unchanged from the v2.8.6 milestone build (the
-//    DevInfo Vulkan leak fix lives in hide_vulkan.cpp, not here).
+//  - ANTI-EMU ships: hide_antiemu.cpp carries the native layer and
+//    InitWorker installs its hooks (runtime-gated on the Kotlin
+//    nativeSetAntiEmu toggle). The DevInfo Vulkan leak fix stays in
+//    hide_vulkan.cpp.
 //  - The v2.8.0 Kona prop guard experiment stays retired: it force-closed
 //    every scoped app at start and the idea was dropped for good.
 // v1.2.4 hardening:
@@ -756,6 +758,12 @@ static void* InitWorker(void* arg) {
     } else {
         Log("native: compat mode - extended hooks skipped (netlink/ioctl/props)");
     }
+    // v2.9.0: ANTI-EMU (hide_antiemu.cpp) - runtime-gated on the Kotlin
+    // toggle (SpoofCore.nativeSetAntiEmu), so they stay inert until the
+    // per-app config turns them on. Installed in every mode, like the net
+    // hooks: the toggle is the switch, not compat mode.
+    InstallAntiEmuHooks();
+    Log("native: stage5b anti-emu hooks (runtime-gated)");
     Log("native: all hooks installed");
     return nullptr;
 }
