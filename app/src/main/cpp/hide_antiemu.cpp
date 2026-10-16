@@ -1,4 +1,18 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.2).
+// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.4).
+//
+// v2.9.4 additions over v2.9.2 (AppDome hardening, evidence JJ capture):
+//  - ROOT-PATH ENOENT: the target access()-probed /system/xbin/su FOUR
+//    times in its first second (classic root check; MuMu ships su in
+//    /system/xbin). The standard root/artifact paths now answer ENOENT
+//    while ANTI-EMU is on. System callers never reach these wrappers
+//    (the bytehook caller filter excludes them), so nothing outside the
+//    scoped process is affected.
+//  - /proc/self/status (+ /proc/<own-pid>/status, task variants) is served
+//    with TracerPid zeroed - the standard anti-debug check.
+//  - /sys/fs/selinux/enforce is served as "1" - MuMu boots permissive and
+//    the enforcing state is a first-line RASP check.
+//  - /proc maps/mounts content filter tokens += kernelsu, trustme, hp15,
+//    javahelper (KernelSU manager, injected SSL module, MuMu sidecars).
 //
 // Masks the emulator fingerprints that bundled ad SDKs - and AppDome-grade
 // RASP inside protected games - probe outside the Java Build.* surface.
@@ -132,6 +146,30 @@ static bool IsAntiEmuPath(const char* path) {
         "/system/lib/x86_64",
         "/system/lib64/x86_64",
         "/system/etc/cpuinfo.x86_64.txt",
+
+        // v2.9.4: root / privilege artifacts. ENOENT while ANTI-EMU is on.
+        "/system/bin/su",
+        "/system/xbin/su",
+        "/sbin/su",
+        "/system/sd/xbin/su",
+        "/vendor/bin/su",
+        "/su/bin/su",
+        "/su/bin",
+        "/data/local/su",
+        "/data/local/bin/su",
+        "/data/local/xbin/su",
+        "/system/app/Superuser.apk",
+        "/system/app/Superuser",
+        "/system/xbin/busybox",
+        "/system/bin/busybox",
+        "/data/local/tmp/busybox",
+        "/system/bin/magisk",
+        "/sbin/magisk",
+        "/data/adb",
+        "/data/adb/magisk",
+        "/data/adb/ksu",
+        "/system/bin/ksud",
+        "/cache/magisk.log",
     };
     for (const char* p : kExact) {
         if (strcmp(path, p) == 0) return true;
@@ -183,6 +221,8 @@ enum ProcSpoofKind {
     kProcCpuInfo = 1,
     kProcMaps = 2,
     kProcMounts = 3,
+    kProcStatus = 4,          // v2.9.4: /proc self status, TracerPid zeroed
+    kProcSelinuxEnforce = 5,  // v2.9.4: /sys/fs/selinux/enforce -> "1"
 };
 
 // /proc/self/<leaf> or /proc/<pid-of-self>/<leaf>
@@ -234,6 +274,13 @@ static ProcSpoofKind ClassifyProcPath(const char* path) {
         return kProcCpuInfo;
     }
     if (strcmp(path, "/proc/mounts") == 0) return kProcMounts;
+    // v2.9.4: own-process status (anti-debug TracerPid) and SELinux state.
+    if (ProcSelfPath(path, "status") || ProcTaskSelfLeaf(path, "status")) {
+        return kProcStatus;
+    }
+    if (strcmp(path, "/sys/fs/selinux/enforce") == 0) {
+        return kProcSelinuxEnforce;
+    }
     if (ProcSelfPath(path, "maps") || ProcSelfPath(path, "smaps") ||
         ProcTaskSelfLeaf(path, "maps") || ProcTaskSelfLeaf(path, "smaps")) {
         return kProcMaps;
@@ -276,6 +323,7 @@ static bool LineHasToken(const char* line, size_t len) {
         "xposed", "edxposed", "lsposed", "zygisk", "magisk", "riru",
         "frida", "gadget", "dobby", "sandhook", "whale",
         "kimera", "libpas", "lspd", "/data/adb",
+        "kernelsu", "trustme", "hp15", "javahelper",
         "/system/lib64/arm64/", "/system/lib/arm64/",
         "/system/lib64/arm/", "/system/lib/arm/",
         "/system/lib64/x86", "/system/lib/x86",
@@ -288,10 +336,11 @@ static bool LineHasToken(const char* line, size_t len) {
     return false;
 }
 
-static bool BuildFiltered(const char* path, std::string& out) {
+// v2.9.4: raw full-file read for internal work (no PLT, no re-entry).
+static bool RawReadAll(const char* path, std::string& out) {
     int fd = RawOpenRo(path);
     if (fd < 0) return false;
-    std::string all;
+    out.clear();
     char buf[16384];
     for (;;) {
 #if defined(__NR_read)
@@ -300,12 +349,32 @@ static bool BuildFiltered(const char* path, std::string& out) {
         ssize_t n = -1;
 #endif
         if (n <= 0) break;
-        all.append(buf, (size_t)n);
-        if (all.size() > (16u << 20)) break;  // 16 MB sanity cap
+        out.append(buf, (size_t)n);
+        if (out.size() > (16u << 20)) break;  // 16 MB sanity cap
     }
 #if defined(__NR_close)
     syscall(__NR_close, fd);
 #endif
+    return true;
+}
+
+// v2.9.4: zero every TracerPid field in a /proc/<self>/status body.
+static void ZeroTracerPid(std::string& s) {
+    static const char kKey[] = "TracerPid:";
+    size_t p = s.find(kKey);
+    while (p != std::string::npos) {
+        size_t q = p + sizeof(kKey) - 1;
+        while (q < s.size() && (s[q] == ' ' || s[q] == '\t')) q++;
+        size_t d = q;
+        while (d < s.size() && s[d] >= '0' && s[d] <= '9') d++;
+        if (d > q) s.replace(q, d - q, "0");
+        p = s.find(kKey, p + sizeof(kKey) - 1);
+    }
+}
+
+static bool BuildFiltered(const char* path, std::string& out) {
+    std::string all;
+    if (!RawReadAll(path, all)) return false;
     out.clear();
     size_t start = 0;
     while (start < all.size()) {
@@ -350,6 +419,11 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
     std::string content;
     if (kind == kProcCpuInfo) {
         content = CpuInfoText();
+    } else if (kind == kProcSelinuxEnforce) {
+        content = "1\n";
+    } else if (kind == kProcStatus) {
+        if (!RawReadAll(path, content)) return -1;
+        ZeroTracerPid(content);
     } else {
         if (!BuildFiltered(path, content)) return -1;
     }
@@ -375,8 +449,8 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
 #if defined(__NR_lseek)
     syscall(__NR_lseek, mfd, 0, SEEK_SET);
 #endif
-    static bool s_logged[4] = {false, false, false, false};
-    if (kind >= kProcCpuInfo && kind <= kProcMounts && !s_logged[kind]) {
+    static bool s_logged[6] = {false, false, false, false, false, false};
+    if (kind >= kProcCpuInfo && kind <= kProcSelinuxEnforce && !s_logged[kind]) {
         s_logged[kind] = true;
         Log("native: anti-emu proc spoof kind=%d path=%s (%u bytes)",
             (int)kind, path, (unsigned)content.size());

@@ -17,6 +17,7 @@ import com.kimera.pas.hooks.HookNetworkRequestBuilder
 import com.kimera.pas.hooks.HookRecon
 import com.kimera.pas.hooks.HookSslUnpin
 import com.kimera.pas.hooks.HookAntiEmu
+import com.kimera.pas.hooks.HookSweep
 
 const val TAG = "PerAppSpoofer"
 
@@ -80,6 +81,7 @@ class XposedInit : XposedModule() {
                 HookGpu(),
                 HookRecon(),
                 HookAntiEmu(),
+                HookSweep(),
             )
 
         hooks.forEach {

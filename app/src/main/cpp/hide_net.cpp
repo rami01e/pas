@@ -12,10 +12,20 @@
 // The proxy-port list is deliberately kept in sync with kProxyPorts in
 // hide_netlink.cpp: the netlink filter hides the LISTEN entry from socket
 // dumps, this connect filter hides the port from direct probe.
+//
+// v2.9.4: JNI bridge for SpoofCore.nativeSetNetCellular added at the end of
+// this file. The Kotlin external declaration existed since the net-type
+// feature shipped, but the implementation symbol was missing from every
+// build (UnsatisfiedLinkError, swallowed by runCatching in
+// spoofcore.apply()), so the native half of the toggle could never arm.
+// With the bridge: toggle ON arms the wlan-line hiding (single runtime gate
+// NetCellularSpoof() in pas.cpp); toggle OFF calls SetNetCellular(false)
+// which fully disarms it.
 
 #include "pas.h"
 
 #include <errno.h>
+#include <jni.h>
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -158,3 +168,16 @@ void InstallNetHooks() {
 }
 
 }  // namespace pas
+
+// ---------------------------------------------------------------------------
+// v2.9.4: JNI bridge for SpoofCore.nativeSetNetCellular.
+// Toggle semantics (single owner of g_net_cellular, see pas.cpp):
+//   ON  -> SetNetCellular(true)  -> wlan lines hidden from /proc/net views
+//   OFF -> SetNetCellular(false) -> filter fully inert
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetNetCellular(JNIEnv* env, jobject thiz,
+                                                         jboolean cellular) {
+    (void)env;
+    (void)thiz;
+    pas::SetNetCellular(cellular == JNI_TRUE);
+}
