@@ -28,6 +28,12 @@
 //    vk_icdGetInstanceProcAddr, and reports how many of the 8 target
 //    functions its gipa returns with a NULL instance - the fact that
 //    decides the ICD inline-hook layer's design (next step). Pure lookup.
+//
+// v2.7.8a: forward declaration of ProbeIcdFeasibility() - the probe is
+// defined later in this file but called from the gipa wrappers above the
+// definition; C++ requires declaration before use. (The CI failure
+// surfaced on arm64-v8a only because it is the first ABI in ninja's build
+// order - the bug is ABI-independent.)
 
 #include "pas.h"
 
@@ -68,6 +74,9 @@ static volatile int g_gpu_sparse_binding = 0;
 // v2.7.8 diagnostics.
 static volatile bool g_icd_entry_logged = false;
 static volatile int g_coreprops_calllog = 0;
+
+// v2.7.8a: declaration-before-use fix (see file header comment).
+void ProbeIcdFeasibility();
 
 void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
                    int driverId, bool descriptorIndexing, bool sparseBinding) {
