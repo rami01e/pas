@@ -1,4 +1,4 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.1).
+// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.2).
 //
 // Masks the emulator fingerprints that bundled ad SDKs - and AppDome-grade
 // RASP inside protected games - probe outside the Java Build.* surface.
@@ -38,6 +38,28 @@
 //     /vendor, /apex, /odm, /product - never under /data/app/**, because
 //     the game's own lib/x86_64/*.so files must stay visible or integrity
 //     checks would flag the app itself as tampered.
+//
+// v2.9.2 fixes over v2.9.1 (CPU spoofing regression):
+//   - MyPropGet() consulted ArmAbiValue() WITHOUT the g_anti_emu gate. The
+//     anti-emu prop hook is installed LAST on __system_property_get (stage5b,
+//     after InstallPropSpoofHooks), so it runs FIRST and short-circuited
+//     ro.hardware -> "qcom", ro.board.platform -> "kona" and the
+//     ro.product.cpu.abi* / ro.bionic.* / ro.dalvik.vm.isa.arm* props to
+//     hardcoded arm64 values in EVERY process - even with the ANTI-EMU
+//     toggle OFF. That shadowed hide_props.cpp (one stage earlier: it could
+//     never win the chain) and broke the CPU profile's vendor value and the
+//     abi toggle's mode-driven ABI props. The rewrite is now gated on
+//     g_anti_emu; with the toggle OFF this whole layer is a pure
+//     pass-through, byte-for-byte 2.8.4 behavior on every surface.
+//   - /proc/cpuinfo ownership: while the CPU toggle is on, hide_fs.cpp's
+//     profile engine (ServeSysfsSpoofFd / RewriteCpuinfoContent) stays the
+//     single owner of /proc/cpuinfo, exactly as in 2.8.4 - the user's CPU
+//     name / vendor / core layout wins over the static kona text. Anti-emu
+//     only serves its generated cpuinfo when the CPU toggle is off.
+//   - ArmAbiValue() defers ro.hardware to the CPU engine while
+//     CpuSpoofActive() (hide_props spoofs it from the profile); the pure ABI
+//     props stay anti-emu's while its toggle is on, per the documented
+//     ownership split in spoofcore.kt.
 //
 // v2.9.0 history (kept): #include <jni.h> fix; MyFstatAt CALL_PREV casing;
 // O_TMPFILE varargs composite test; dmi/goldfish/ranchu/vbox/geny/nemu/mumu
@@ -200,7 +222,17 @@ static bool ProcTaskSelfLeaf(const char* path, const char* leaf) {
 
 static ProcSpoofKind ClassifyProcPath(const char* path) {
     if (!g_anti_emu || path == nullptr) return kProcNone;
-    if (strcmp(path, "/proc/cpuinfo") == 0) return kProcCpuInfo;
+    if (strcmp(path, "/proc/cpuinfo") == 0) {
+        // v2.9.2: while the CPU toggle is on, hide_fs.cpp's profile engine
+        // (ServeSysfsSpoofFd / RewriteCpuinfoContent) owns /proc/cpuinfo -
+        // same single-owner behavior as 2.8.4. Deferring here means the
+        // open() call falls through the bytehook chain into HideOpen /
+        // HideFopen, which serve the user's CPU name / vendor / core
+        // layout. Anti-emu only serves its generated kona cpuinfo when the
+        // CPU toggle is off.
+        if (CpuSpoofActive()) return kProcNone;
+        return kProcCpuInfo;
+    }
     if (strcmp(path, "/proc/mounts") == 0) return kProcMounts;
     if (ProcSelfPath(path, "maps") || ProcSelfPath(path, "smaps") ||
         ProcTaskSelfLeaf(path, "maps") || ProcTaskSelfLeaf(path, "smaps")) {
@@ -485,12 +517,22 @@ static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 // Props whose value on MuMu is x86 but whose value on a genuine kona
 // (SM-G991B) device is ARM. Rewritten, not blanked: a blank reads as
 // "property missing", which is itself tamper evidence on a Samsung build.
+//
+// v2.9.2: the CPU toggle's profile engine owns ro.hardware while
+// CpuSpoofActive() - hide_props.cpp spoofs it from the user's profile
+// (CpuSpoofHardware()). We defer so the profile value wins; when the CPU
+// toggle is off we still rewrite to the kona placeholder. The pure ABI
+// props below are NOT deferred: the anti-emu ARM story needs them, and the
+// abi toggle only owns them when anti-emu is off (documented in
+// spoofcore.kt - "the abi toggle owns the Java Build fields, anti-emu owns
+// the native side").
 static const char* ArmAbiValue(const char* name) {
     static const char kAbi64[] = "arm64-v8a";
     static const char kAbiList[] = "arm64-v8a,armeabi-v7a,armeabi";
     static const char kAbiList32[] = "armeabi-v7a,armeabi";
     const size_t n = strlen(name);
     if (n <= 3 || strncmp(name, "ro.", 3) != 0) return nullptr;
+    if (CpuSpoofActive() && strcmp(name, "ro.hardware") == 0) return nullptr;
     auto suffixIs = [&](const char* s) {
         size_t l = strlen(s);
         return n >= l && strcmp(name + (n - l), s) == 0;
@@ -547,7 +589,12 @@ static bool IsAntiEmuProp(const char* name) {
 
 static int MyPropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
-    if (name != nullptr && value != nullptr) {
+    // v2.9.2: gate on g_anti_emu BEFORE ArmAbiValue. In 2.9.1 the hardcoded
+    // kona values leaked into every process even with the ANTI-EMU toggle
+    // OFF, shadowing hide_props.cpp (installed one stage earlier, so our
+    // wrapper ran first in the bytehook chain) and breaking the CPU
+    // profile's ro.hardware plus the abi toggle's mode-driven ABI props.
+    if (g_anti_emu && name != nullptr && value != nullptr) {
         if (const char* v = ArmAbiValue(name)) {
             size_t l = strlen(v);
             if (l >= PROP_VALUE_MAX) l = PROP_VALUE_MAX - 1;
