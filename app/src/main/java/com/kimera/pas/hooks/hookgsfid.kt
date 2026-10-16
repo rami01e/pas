@@ -41,7 +41,7 @@ private fun looksHex16(s: String?): Boolean =
  *           queries are covered as well (ART-level hook entry). Unfiltered
  *           full-table dumps are intercepted: the response mirrors ALL rows
  *           and rewrites only the android_id row; queries filtered for
- *           OTHER gservices keys pass raw (v2.7.6: their result feeds the
+ *           OTHER gservices keys pass raw (their result feeds the
  *           provider-schema diag, which doubles as the Layer-4 traffic
  *           test on this ROM).
  *
@@ -51,11 +51,15 @@ private fun looksHex16(s: String?): Boolean =
  * formatted with the same type and radix as the real cell.
  *
  * v2.7.6 SYNTHESIS: when the real result carries no android_id row (empty
- * result, or rows that are all other keys - the state of emulators whose
- * GMS has never written the row, observed on MuMu), one android_id row is
- * SYNTHESIZED in the provider's own column schema. Without this, mirroring
- * returns an empty cursor and keyed readers regress to "not found" on such
- * devices (the pre-mirroring static cursor always delivered a row).
+ * result, or rows that are all other keys), one android_id row is
+ * SYNTHESIZED in the provider's own column schema.
+ *
+ * v2.7.7 SCHEMA: the MuMu gservices provider's key column is "key", not
+ * "name" (observed via the mirror diag: cols=[key,value], with the value
+ * cell NULL on this device - which is why unspofed readers see "not
+ * found" while the gservices.db file itself holds the real decimal value).
+ * Target-row matching now accepts either column name, so full-dump
+ * mirroring rewrites only the android_id row on both schemas.
  *
  * Double-coverage suppression (v2.7.5): while the thread-local flag is set,
  * every query-layer hook passes through - exactly one mirror, one binder
@@ -71,10 +75,9 @@ private fun looksHex16(s: String?): Boolean =
  * Documented structural limits: call() at the proxy level (signature
  * carries no authority - cannot be attributed without receiver access),
  * raw Parcel transacts, and reads performed inside GMS's own process.
- * For a device whose gservices table has no android_id row at all, the
- * complete "everywhere" answer is to write the row at the source with
- * root (content insert / sqlite) - one value for every reader, including
- * the ones no in-process hook can reach.
+ * The root-only sqlite read of gservices.db (Google's official method)
+ * is outside any app's reach on stock Android and is spoofed by writing
+ * the row at the source with root.
  */
 class HookGsfId : XHook {
 
@@ -238,11 +241,9 @@ class HookGsfId : XHook {
 
     /**
      * v2.7.6: row synthesized when the real result contains no android_id
-     * row (empty result, or rows that are all other keys - the state of
-     * devices whose GMS has never written the row, observed on MuMu).
-     * Keeps the provider's column schema; the value is delivered exactly
-     * as configured (with no real cell to mirror, the radix is the user's
-     * choice - set it to the convention your readers expect).
+     * row (empty result, or rows that are all other keys). Keeps the
+     * provider's column schema; the value is delivered exactly as
+     * configured.
      */
     private fun synthesizedRow(cols: List<String>, nameCol: Int, valueCol: Int): Array<Any?>? {
         val raw = SpoofState.gsfId.trim().removePrefix("0x").removePrefix("0X")
@@ -271,13 +272,14 @@ class HookGsfId : XHook {
      * Build the spoofed response by MIRRORING the real provider's cursor:
      * identical columns, per-cell types and rows; only the android_id value
      * cell is replaced, with the same type and radix as the real cell.
-     * When fullDump is true (no selection filter: the reader extracts
-     * android_id from the whole table) ALL rows are copied, uncapped up to
-     * 4096, and only the android_id row is rewritten. When the real result
-     * carries no android_id row at all, one is synthesized in the provider's
-     * schema (v2.7.6). The proceed runs with the suppression flag set so
-     * lower hook layers pass through. Returns null only when the configured
-     * gsfId is unparseable (caller then passes the real query through).
+     * When fullDump is true ALL rows are copied, uncapped up to 4096, and
+     * only the android_id row is rewritten (v2.7.7: matched via the "name"
+     * OR "key" column - this provider's schema is [key,value]). When the
+     * real result carries no android_id row at all, one is synthesized in
+     * the provider's schema (v2.7.6). The proceed runs with the suppression
+     * flag set so lower hook layers pass through. Returns null only when
+     * the configured gsfId is unparseable (caller then passes the real
+     * query through).
      */
     private fun spoofedQueryCursor(
         module: XposedModule,
@@ -312,7 +314,13 @@ class HookGsfId : XHook {
                 return staticGsfCursor(spoof)
             }
             val valueCol = cols.indexOf("value").let { if (it >= 0) it else if (cols.size >= 2) 1 else -1 }
-            val nameCol = cols.indexOf("name")
+            // v2.7.7: the MuMu gservices provider's schema is [key,value]
+            // (observed via the mirror diag) - the key column is "key", not
+            // "name". Accept either so target-row matching works on both
+            // schemas; with neither present, keyed single-row results still
+            // rewrite by position.
+            var nameCol = cols.indexOf("name")
+            if (nameCol < 0) nameCol = cols.indexOf("key")
             val out = MatrixCursor(cols.toTypedArray())
             val maxRows = if (fullDump) 4096 else 8
             var rowCount = 0
@@ -614,7 +622,7 @@ class HookGsfId : XHook {
     }
 
     private fun hookCpcQueryBundle(module: XposedModule) {
-        hookSafe(module, "ContentProviderClient.query(gsf,bundle)") {
+        hookSafe(module, "ContentResolver.query(gsf,bundle)") {
             val method = ContentProviderClient::class.java.getMethod(
                 "query",
                 Uri::class.java,
