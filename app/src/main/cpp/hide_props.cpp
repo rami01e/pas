@@ -12,25 +12,6 @@
 //
 // Disabled by default; configured from the module GUI through the Vector
 // remote preferences and pushed in with SpoofCore.nativeSetConfig().
-//
-// v2.9.5: when ANTI-EMU is on, the device-identity props
-// (ro.build.fingerprint, ro.build.id, ro.build.display.id,
-//  ro.build.version.incremental, ro.build.tags/type/user/host,
-//  ro.product.model/brand/name/device/manufacturer/board)
-// mirror HookAntiEmu's canonical Galaxy S21 (o1s) values, so a native
-// __system_property_get read and the Java android.os.Build surface always
-// agree. Before this, Java said Samsung while a native prop read returned
-// MuMu's real fingerprint - the first thing an integrity SDK cross-checks.
-// ro.board.platform additionally joins the SoC-gated list (served as the
-// CPU profile hardware) so the platform cannot contradict ro.hardware.
-//
-// v2.9.7: fixed the 2.9.6 CPU spoofing regression. 2.9.6 added
-// ro.board.platform to kSoc but BuildSpoofValue() had no branch for it, so
-// IsSpoofTarget() returned true while the value writer returned false -
-// the hook fell through to the real emulator value ("goldfish"/"ranchu")
-// next to a spoofed ro.hardware ("exynos2100"). AppDome's cross-surface
-// consistency check discarded the CPU profile. ro.board.platform is now
-// served from CpuSpoofHardware() alongside ro.hardware / ro.boot.hardware.
 
 #include "pas.h"
 
@@ -129,37 +110,13 @@ static bool IsSpoofTarget(const char* name) {
         // checks cross-read them against Build.HARDWARE.
         "ro.hardware",
         "ro.boot.hardware",
-        // v2.9.5: the platform must not contradict ro.hardware; served as
-        // the CPU profile hardware (e.g. exynos2100).
-        // v2.9.7: BuildSpoofValue() now actually handles this key - without
-        // the matching branch here the hook fell through to the real value
-        // (2.9.6 CPU spoofing regression).
-        "ro.board.platform",
     };
     // The SDK prop is only spoofed upward-safe: values below 35 break the
     // WebView provider (see spoofcore J1 note), so the native layer falls
     // back to the real value when the requested level is under the floor.
-    static const char* const kAntiEmuIdentity[] = {
-        // v2.9.5: identity surface - mirrors HookAntiEmu's canonical values
-        "ro.build.fingerprint",        "ro.system.build.fingerprint",
-        "ro.vendor.build.fingerprint", "ro.product.build.fingerprint",
-        "ro.build.id",                 "ro.build.display.id",
-        "ro.build.version.incremental",
-        "ro.build.tags",               "ro.build.type",
-        "ro.build.user",               "ro.build.host",
-        "ro.product.model",            "ro.product.brand",
-        "ro.product.name",             "ro.product.device",
-        "ro.product.manufacturer",     "ro.product.board",
-        "ro.product.vendor.model",     "ro.product.vendor.brand",
-        "ro.product.vendor.name",      "ro.product.vendor.device",
-        "ro.product.vendor.manufacturer",
-    };
     if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0])) && g_sdk_val >= 35) return true;
     if (g_abi_on && NameIn(name, kAbi, sizeof(kAbi) / sizeof(kAbi[0]))) return true;
     if (CpuSpoofActive() && NameIn(name, kSoc, sizeof(kSoc) / sizeof(kSoc[0]))) return true;
-    if (AntiEmuEnabled() &&
-        NameIn(name, kAntiEmuIdentity, sizeof(kAntiEmuIdentity) / sizeof(kAntiEmuIdentity[0])))
-        return true;
     return false;
 }
 
@@ -370,70 +327,8 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         // Note: ro.vendor.qti.soc_name is intentionally NOT spoofed - real
         // devices carry the SoC codename ("kalama"), a different value from
         // the platform; a wrong value there is worse than the host's own.
-        //
-        // v2.9.7: ro.board.platform must be served from the same CPU
-        // profile. It was added to kSoc in 2.9.6 but had no branch here, so
-        // IsSpoofTarget() returned true while this function returned false:
-        // the hook fell through to the real emulator value ("goldfish" /
-        // "ranchu") while ro.hardware reported "exynos2100", and AppDome's
-        // cross-surface consistency check discarded the CPU profile. This
-        // is the 2.9.6 CPU spoofing regression.
-        if (strcmp(name, "ro.hardware") == 0 ||
-            strcmp(name, "ro.boot.hardware") == 0 ||
-            strcmp(name, "ro.board.platform") == 0) {
-            const std::string hw = CpuSpoofHardware();
-            // Defensive: if the CPU profile has not landed yet, fall
-            // through to the real value instead of serving an empty prop.
-            if (hw.empty()) return false;
-            return SetStr(out, cap, outLen, hw.c_str());
-        }
-    }
-    if (AntiEmuEnabled()) {
-        // v2.9.5: canonical o1s identity (same values HookAntiEmu writes
-        // into android.os.Build) - both surfaces always agree.
-        if (strcmp(name, "ro.build.fingerprint") == 0 ||
-            strcmp(name, "ro.system.build.fingerprint") == 0 ||
-            strcmp(name, "ro.vendor.build.fingerprint") == 0 ||
-            strcmp(name, "ro.product.build.fingerprint") == 0) {
-            return SetStr(out, cap, outLen,
-                          "samsung/o1sxeea/o1s:15/UP1A.231005.007/G991BXXSJHZC2:user/release-keys");
-        }
-        if (strcmp(name, "ro.build.id") == 0 ||
-            strcmp(name, "ro.build.display.id") == 0) {
-            return SetStr(out, cap, outLen, "UP1A.231005.007");
-        }
-        if (strcmp(name, "ro.build.version.incremental") == 0) {
-            return SetStr(out, cap, outLen, "G991BXXSJHZC2");
-        }
-        if (strcmp(name, "ro.build.tags") == 0) {
-            return SetStr(out, cap, outLen, "release-keys");
-        }
-        if (strcmp(name, "ro.build.type") == 0) {
-            return SetStr(out, cap, outLen, "user");
-        }
-        if (strcmp(name, "ro.build.user") == 0) {
-            return SetStr(out, cap, outLen, "dpi");
-        }
-        if (strcmp(name, "ro.build.host") == 0) {
-            return SetStr(out, cap, outLen, "SWDD5907");
-        }
-        if (strcmp(name, "ro.product.model") == 0) {
-            return SetStr(out, cap, outLen, "SM-G991B");
-        }
-        if (strcmp(name, "ro.product.brand") == 0 ||
-            strcmp(name, "ro.product.manufacturer") == 0 ||
-            strcmp(name, "ro.product.vendor.brand") == 0 ||
-            strcmp(name, "ro.product.vendor.manufacturer") == 0) {
-            return SetStr(out, cap, outLen, "samsung");
-        }
-        if (strcmp(name, "ro.product.name") == 0) {
-            return SetStr(out, cap, outLen, "o1sxeea");
-        }
-        if (strcmp(name, "ro.product.device") == 0) {
-            return SetStr(out, cap, outLen, "o1s");
-        }
-        if (strcmp(name, "ro.product.board") == 0) {
-            return SetStr(out, cap, outLen, "exynos2100");
+        if (strcmp(name, "ro.hardware") == 0 || strcmp(name, "ro.boot.hardware") == 0) {
+            return SetStr(out, cap, outLen, CpuSpoofHardware().c_str());
         }
     }
     return false;

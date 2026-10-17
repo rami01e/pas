@@ -1,22 +1,10 @@
-// pas.cpp v2.9.7
+//pas.cpp v2.9.0
 // PerAppSpoofer native layer (libpas.so)
 //
 // Hides VPN (tun0-style) interfaces from the scoped app process on all
 // supported ABIs, including x86_64 emulators. PLT/GOT hooking is provided by
 // ByteHook (https://github.com/bytedance/bhook, MIT).
 //
-// v2.9.7:
-//  - InstallPropSpoofHooks() and InstallAntiEmuHooks() are once again
-//    installed at stage2b / stage2c, immediately after the config lands and
-//    before every other hook group, matching 2.9.5. The v2.9.0 layout had
-//    them at stage5 / stage5b, which left the early-probe window open:
-//    AppDome reads /proc/cpuinfo, ro.hardware and the ABI props within the
-//    first second, before the spoof was armed, records an "Intel x86_64 /
-//    goldfish" verdict, and later kills the process for CPU inconsistency.
-//    From the user's point of view that is exactly "cores / clusters aren't
-//    spoofed" even though the cluster engine itself is correct. Compat mode
-//    still skips the prop layer (documented), light mode still keeps the
-//    props (they are the identity spoof).
 // v2.9.0:
 //  - ANTI-EMU ships: hide_antiemu.cpp carries the native layer and
 //    InitWorker installs its hooks (runtime-gated on the Kotlin
@@ -725,25 +713,6 @@ static void* InitWorker(void* arg) {
     }
     RefreshHiddenNames(true);
     Log("native: stage2 names cached");
-
-    // v2.9.7 (restores 2.9.5): property and anti-emu hooks are installed
-    // FIRST, immediately after the config lands and before every other hook
-    // group. The v2.9.0 layout had them at stage5/5b, which left the
-    // early-probe window open: AppDome reads /proc/cpuinfo, ro.hardware and
-    // the ABI props inside the first second, sees the un-spoofed Intel x86_64
-    // + goldfish values, records a bad CPU verdict, and later kills the
-    // process for CPU inconsistency - exactly the "cores / clusters not
-    // spoofed" symptom. Compat mode still skips the prop layer (documented);
-    // light mode keeps the props (they are the identity spoof).
-    if (!compat) {
-        InstallPropSpoofHooks();
-        Log("native: stage2b prop spoof hooks");
-    } else {
-        Log("native: compat mode - prop spoof hooks skipped");
-    }
-    InstallAntiEmuHooks();
-    Log("native: stage2c anti-emu hooks (runtime-gated)");
-
     if (!light) {
         InstallIfaceHooks();
         Log("native: stage3 iface hooks");
@@ -785,11 +754,16 @@ static void* InitWorker(void* arg) {
     if (!compat) {
         InstallNetlinkHooks();
         InstallIoctlHooks();
-        // prop hooks already installed at stage2b (v2.9.7)
+        InstallPropSpoofHooks();
     } else {
         Log("native: compat mode - extended hooks skipped (netlink/ioctl/props)");
     }
-    // anti-emu hooks already installed at stage2c (v2.9.7)
+    // v2.9.0: ANTI-EMU (hide_antiemu.cpp) - runtime-gated on the Kotlin
+    // toggle (SpoofCore.nativeSetAntiEmu), so they stay inert until the
+    // per-app config turns them on. Installed in every mode, like the net
+    // hooks: the toggle is the switch, not compat mode.
+    InstallAntiEmuHooks();
+    Log("native: stage5b anti-emu hooks (runtime-gated)");
     Log("native: all hooks installed");
     return nullptr;
 }

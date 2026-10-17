@@ -16,29 +16,6 @@ package com.kimera.pas.spoof
  * Xclipse vendorId stays 0x144D (Samsung Electronics). driverId stays 21
  * (VK_DRIVER_ID_SAMSUNG_PROPRIETARY) - the correct enum member for real
  * Xclipse devices.
- *
- * v2.9.7 (Chrome / Xclipse black-screen fix):
- *  1. Xclipse `renderer` used to be a PRE-WRAPPED ANGLE string
- *     ("ANGLE ((Samsung Xclipse N) on Vulkan X.Y.Z)"). That is not what the
- *     Vulkan ICD returns for GL_RENDERER; it is what a FRONTEND produces on
- *     top of a real Xclipse driver. Chrome's ANGLE treats a GL_RENDERER that
- *     already starts with "ANGLE (" as "already wrapped" and switches to the
- *     Samsung/Xclipse-native render path, which the emulated kona (Adreno
- *     660) ICD on MuMu does not back - vkCreateDevice / pipeline creation
- *     fail mid-frame, the GPU process stalls, the page stays black. Mali and
- *     Adreno work because their renderer strings are raw driver names and
- *     ANGLE keeps using its ICD-agnostic Vulkan workaround path, which does
- *     match the emulated Adreno under the hood.
- *     Fix: Xclipse renderer is now a raw driver string, identical in shape
- *     to Mali/Adreno: "Samsung Xclipse <num>". The Samsung identity is still
- *     exposed via vendor / vendorId / vkDeviceName / driverName, so nothing
- *     a detector cross-checks changed.
- *  2. Xclipse `descriptorIndexing` and `sparseBinding` are kept at false.
- *     Both are reported to the guest as *physical device* features; Chrome
- *     requests them at vkCreateDevice() if the physical device advertises
- *     them, and the emulator ICD does not implement them - a second,
- *     independent vkCreateDevice failure path. Fixing the renderer string
- *     without fixing these was insufficient (verified against 2.9.7-beta).
  */
 object DeviceCatalog {
 
@@ -551,28 +528,6 @@ object DeviceCatalog {
         vulkanHardware = "adreno"
     )
 
-    /**
-     * Xclipse (Samsung/AMD RDNA) profile factory.
-     *
-     * v2.9.7 renderer fix:
-     *  The `renderer` field MUST be a raw driver string ("Samsung Xclipse
-     *  <num>"), matching the shape of Mali/Adreno. The previous value was
-     *  the pre-wrapped ANGLE format ("ANGLE ((Samsung Xclipse N) on Vulkan
-     *  X.Y.Z)"). Chrome's ANGLE treats any GL_RENDERER already starting
-     *  with "ANGLE (" as "already wrapped", switches to the Samsung/Xclipse
-     *  native render path, and then fails on the emulated kona (Adreno 660)
-     *  ICD that MuMu actually provides - vkCreateDevice / pipeline creation
-     *  fail mid-frame, the GPU process stalls, page stays black. Mali and
-     *  Adreno work because their renderer strings are raw driver names and
-     *  ANGLE keeps using its ICD-agnostic Vulkan workaround path.
-     *
-     * v2.9.7 feature fix (kept):
-     *  descriptorIndexing and sparseBinding are reported to the guest as
-     *  *physical device* features. Chrome requests them at vkCreateDevice()
-     *  if the physical device advertises them; the emulator ICD does not
-     *  implement them, so a second independent vkCreateDevice failure path
-     *  exists. Both must stay false for every Xclipse entry.
-     */
     private fun xclipse(
         num: String,
         deviceId: Long,
@@ -590,9 +545,7 @@ object DeviceCatalog {
         maxKHz: Int = 1300000
     ) = Gpu(
         vendor = "Samsung Electronics Co., Ltd.",
-        // v2.9.7: raw driver string, NOT the pre-wrapped ANGLE format.
-        // See the doc comment above for why the wrapper broke Chrome.
-        renderer = "Samsung Xclipse $num",
+        renderer = "ANGLE ((Samsung Xclipse $num) on Vulkan $apiText)",
         label = "Samsung Xclipse $num",
         vkDeviceName = "Samsung Xclipse $num",
         vendorId = 0x144DL,
@@ -604,9 +557,8 @@ object DeviceCatalog {
         glVersion = "OpenGL ES 3.2 Driver version: $glDrv git hash: $glGit",
         conformance = conformanceV,
         driverId = 21,
-        // v2.9.7: never advertise features the emulator ICD can't back.
-        descriptorIndexing = false,
-        sparseBinding = false,
+        descriptorIndexing = true,
+        sparseBinding = true,
         gpuCores = gpuCores,
         l2CacheKb = l2CacheKb,
         gpuArch = "RDNA",
