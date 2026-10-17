@@ -545,7 +545,8 @@ object DeviceCatalog {
         maxKHz: Int = 1300000
     ) = Gpu(
         vendor = "Samsung Electronics Co., Ltd.",
-        renderer = "ANGLE ((Samsung Xclipse $num) on Vulkan $apiText)",
+        //  renderer = "ANGLE ((Samsung Xclipse $num) on Vulkan $apiText)",
+        renderer = "Samsung Xclipse $num",
         label = "Samsung Xclipse $num",
         vkDeviceName = "Samsung Xclipse $num",
         vendorId = 0x144DL,
@@ -557,7 +558,7 @@ object DeviceCatalog {
         glVersion = "OpenGL ES 3.2 Driver version: $glDrv git hash: $glGit",
         conformance = conformanceV,
         driverId = 21,
-        descriptorIndexing = false,
+        descriptorIndexing = true,
         sparseBinding = false,
         gpuCores = gpuCores,
         l2CacheKb = l2CacheKb,
