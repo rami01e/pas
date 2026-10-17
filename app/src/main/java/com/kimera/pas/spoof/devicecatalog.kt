@@ -548,7 +548,7 @@ object DeviceCatalog {
         renderer = "ANGLE ((Samsung Xclipse $num) on Vulkan $apiText)",
         label = "Samsung Xclipse $num",
         vkDeviceName = "Samsung Xclipse $num",
-        vendorId = 0x144DL,
+        vendorId = 0x5143L, //0x144DL,
         deviceId = deviceId,
         driverVersion = vkDrv,
         apiVersion = if (apiText.startsWith("1.4")) vk(1, 4, 304) else vk(1, 3, 279),
