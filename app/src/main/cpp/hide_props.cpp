@@ -23,6 +23,14 @@
 // MuMu's real fingerprint - the first thing an integrity SDK cross-checks.
 // ro.board.platform additionally joins the SoC-gated list (served as the
 // CPU profile hardware) so the platform cannot contradict ro.hardware.
+//
+// v2.9.7: fixed the 2.9.6 CPU spoofing regression. 2.9.6 added
+// ro.board.platform to kSoc but BuildSpoofValue() had no branch for it, so
+// IsSpoofTarget() returned true while the value writer returned false -
+// the hook fell through to the real emulator value ("goldfish"/"ranchu")
+// next to a spoofed ro.hardware ("exynos2100"). AppDome's cross-surface
+// consistency check discarded the CPU profile. ro.board.platform is now
+// served from CpuSpoofHardware() alongside ro.hardware / ro.boot.hardware.
 
 #include "pas.h"
 
@@ -123,6 +131,9 @@ static bool IsSpoofTarget(const char* name) {
         "ro.boot.hardware",
         // v2.9.5: the platform must not contradict ro.hardware; served as
         // the CPU profile hardware (e.g. exynos2100).
+        // v2.9.7: BuildSpoofValue() now actually handles this key - without
+        // the matching branch here the hook fell through to the real value
+        // (2.9.6 CPU spoofing regression).
         "ro.board.platform",
     };
     // The SDK prop is only spoofed upward-safe: values below 35 break the
@@ -359,8 +370,22 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
         // Note: ro.vendor.qti.soc_name is intentionally NOT spoofed - real
         // devices carry the SoC codename ("kalama"), a different value from
         // the platform; a wrong value there is worse than the host's own.
-        if (strcmp(name, "ro.hardware") == 0 || strcmp(name, "ro.boot.hardware") == 0) {
-            return SetStr(out, cap, outLen, CpuSpoofHardware().c_str());
+        //
+        // v2.9.7: ro.board.platform must be served from the same CPU
+        // profile. It was added to kSoc in 2.9.6 but had no branch here, so
+        // IsSpoofTarget() returned true while this function returned false:
+        // the hook fell through to the real emulator value ("goldfish" /
+        // "ranchu") while ro.hardware reported "exynos2100", and AppDome's
+        // cross-surface consistency check discarded the CPU profile. This
+        // is the 2.9.6 CPU spoofing regression.
+        if (strcmp(name, "ro.hardware") == 0 ||
+            strcmp(name, "ro.boot.hardware") == 0 ||
+            strcmp(name, "ro.board.platform") == 0) {
+            const std::string hw = CpuSpoofHardware();
+            // Defensive: if the CPU profile has not landed yet, fall
+            // through to the real value instead of serving an empty prop.
+            if (hw.empty()) return false;
+            return SetStr(out, cap, outLen, hw.c_str());
         }
     }
     if (AntiEmuEnabled()) {

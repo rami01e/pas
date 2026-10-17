@@ -16,6 +16,13 @@ package com.kimera.pas.spoof
  * Xclipse vendorId stays 0x144D (Samsung Electronics). driverId stays 21
  * (VK_DRIVER_ID_SAMSUNG_PROPRIETARY) - the correct enum member for real
  * Xclipse devices.
+ *
+ * v2.9.7: Xclipse profiles no longer advertise descriptorIndexing or
+ * sparseBinding. Chrome (and any Vulkan client) requests the features the
+ * physical device reports; SwiftShader / the emulator ICD does not
+ * implement them, so vkCreateDevice failed and Chrome's GPU process ended
+ * up permanently black. Mali and Adreno never set both flags, which is why
+ * only Xclipse broke rendering. See the xclipse() helper for the guard.
  */
 object DeviceCatalog {
 
@@ -528,6 +535,23 @@ object DeviceCatalog {
         vulkanHardware = "adreno"
     )
 
+    /**
+     * v2.9.7: Xclipse profiles must NOT advertise Vulkan features the
+     * underlying emulator ICD cannot back. descriptorIndexing and
+     * sparseBinding are reported to the guest as *physical device*
+     * features; Chrome requests them at vkCreateDevice() time when the
+     * physical device reports them, SwiftShader / the emulator ICD does
+     * not implement them, so vkCreateDevice fails and Chrome's GPU
+     * process ends up permanently black (page never renders, no recovery).
+     *
+     * Mali and Adreno never set both flags, which is why only Xclipse
+     * black-screened. The identity strings (name/vendor/driver) are what
+     * the spoof actually needs; the feature flags must not lie.
+     *
+     * Do not flip these back to true without confirming the emulator ICD
+     * really supports the feature - a broken Chrome GPU process is the
+     * visible symptom.
+     */
     private fun xclipse(
         num: String,
         deviceId: Long,
@@ -557,8 +581,10 @@ object DeviceCatalog {
         glVersion = "OpenGL ES 3.2 Driver version: $glDrv git hash: $glGit",
         conformance = conformanceV,
         driverId = 21,
-        descriptorIndexing = true,
-        sparseBinding = true,
+        // v2.9.7: see the doc comment above. Both flags false for every
+        // Xclipse entry; Chrome black-screens otherwise on MuMu.
+        descriptorIndexing = false,
+        sparseBinding = false,
         gpuCores = gpuCores,
         l2CacheKb = l2CacheKb,
         gpuArch = "RDNA",
