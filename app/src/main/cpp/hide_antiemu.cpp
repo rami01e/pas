@@ -170,6 +170,12 @@ static bool IsAntiEmuPath(const char* path) {
         "/data/adb/ksu",
         "/system/bin/ksud",
         "/cache/magisk.log",
+
+        // v2.9.5: writability-probe targets (classic root check: create a
+        // file here and it proves the device is an unlocked/emulator image)
+        "/data/local/tmp",
+        "/debug_ramdisk",
+        "/data/local",
     };
     for (const char* p : kExact) {
         if (strcmp(path, p) == 0) return true;
@@ -223,6 +229,7 @@ enum ProcSpoofKind {
     kProcMounts = 3,
     kProcStatus = 4,          // v2.9.4: /proc self status, TracerPid zeroed
     kProcSelinuxEnforce = 5,  // v2.9.4: /sys/fs/selinux/enforce -> "1"
+    kProcVersion = 6,         // v2.9.5: /proc/version, arch -> aarch64
 };
 
 // /proc/self/<leaf> or /proc/<pid-of-self>/<leaf>
@@ -280,6 +287,9 @@ static ProcSpoofKind ClassifyProcPath(const char* path) {
     }
     if (strcmp(path, "/sys/fs/selinux/enforce") == 0) {
         return kProcSelinuxEnforce;
+    }
+    if (strcmp(path, "/proc/version") == 0) {
+        return kProcVersion;
     }
     if (ProcSelfPath(path, "maps") || ProcSelfPath(path, "smaps") ||
         ProcTaskSelfLeaf(path, "maps") || ProcTaskSelfLeaf(path, "smaps")) {
@@ -358,6 +368,20 @@ static bool RawReadAll(const char* path, std::string& out) {
     return true;
 }
 
+// v2.9.5: rewrite x86 arch strings in a /proc/version body. uname(2) is
+// already patched (MyUname) but the version FILE carried the real host
+// arch - a one-line emulator tell.
+static void RewriteVersionArch(std::string& s) {
+    static const char* const kX86[] = {"x86_64", "i686", "i386"};
+    for (const char* t : kX86) {
+        size_t p = s.find(t);
+        while (p != std::string::npos) {
+            s.replace(p, strlen(t), "aarch64");
+            p = s.find(t, p + 7);
+        }
+    }
+}
+
 // v2.9.4: zero every TracerPid field in a /proc/<self>/status body.
 static void ZeroTracerPid(std::string& s) {
     static const char kKey[] = "TracerPid:";
@@ -424,6 +448,9 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
     } else if (kind == kProcStatus) {
         if (!RawReadAll(path, content)) return -1;
         ZeroTracerPid(content);
+    } else if (kind == kProcVersion) {
+        if (!RawReadAll(path, content)) return -1;
+        RewriteVersionArch(content);
     } else {
         if (!BuildFiltered(path, content)) return -1;
     }
@@ -449,8 +476,8 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
 #if defined(__NR_lseek)
     syscall(__NR_lseek, mfd, 0, SEEK_SET);
 #endif
-    static bool s_logged[6] = {false, false, false, false, false, false};
-    if (kind >= kProcCpuInfo && kind <= kProcSelinuxEnforce && !s_logged[kind]) {
+    static bool s_logged[7] = {false, false, false, false, false, false, false};
+    if (kind >= kProcCpuInfo && kind <= kProcVersion && !s_logged[kind]) {
         s_logged[kind] = true;
         Log("native: anti-emu proc spoof kind=%d path=%s (%u bytes)",
             (int)kind, path, (unsigned)content.size());

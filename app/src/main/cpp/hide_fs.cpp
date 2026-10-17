@@ -1336,10 +1336,61 @@ struct PasLinuxDirent64 {
     char d_name[];
 };
 
+// ---------------------------------------------------------------------------
+// v2.9.5: package-sweep hiding for direct readdir scans.
+//
+// Under permissive SELinux a scoped app can opendir("/data/data") or
+// "/data/user/0" and enumerate installed package names straight from the
+// filesystem - no PackageManager involved, so the Java sweep shield
+// (HookSweep) never sees it. When the listed directory is one of those
+// containers, entries whose name carries a hidden tool token are dropped
+// from the stream. The fd -> directory check is one raw readlinkat per
+// getdents64 call; directory listings cost a handful of calls, so the
+// overhead is negligible. Raw syscall: invisible to every hook (ours
+// included) and immune to PLT re-entry.
+// ---------------------------------------------------------------------------
+
+static bool SweepDirFd(int fd) {
+    char link[64];
+    char path[512];
+    snprintf(link, sizeof(link), "/proc/self/fd/%d", fd);
+#if defined(__NR_readlinkat)
+    long n = syscall(__NR_readlinkat, AT_FDCWD, link, path, sizeof(path) - 1);
+#else
+    long n = -1;
+#endif
+    if (n <= 0) return false;
+    path[n] = '\0';
+    if (strcmp(path, "/data/data") == 0) return true;
+    if (strcmp(path, "/data/user/0") == 0) return true;
+    if (strncmp(path, "/data/user/", 11) == 0) {
+        const char* rest = path + 11;
+        if (*rest >= '0' && *rest <= '9') {
+            const char* q = rest;
+            while (*q >= '0' && *q <= '9') q++;
+            if (*q == '\0') return true;   // exact /data/user/<id>
+        }
+    }
+    return false;
+}
+
+static bool SweepHiddenEntry(const char* name) {
+    if (name == nullptr) return false;
+    static const char* const kTokens[] = {
+        "kernelsu", "trustme", "kimera", "lsposed", "xposed", "edxposed",
+        "magisk", "supersu", "substrate", "shamiko", "riru", "frida", "vmos",
+    };
+    for (const char* t : kTokens) {
+        if (strstr(name, t) != nullptr) return true;
+    }
+    return false;
+}
+
 ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
     BYTEHOOK_STACK_SCOPE();
     ssize_t total = BYTEHOOK_CALL_PREV(HideGetDents64, fd, dirp, count);
     if (total <= 0) return total;
+    bool sweep = SweepDirFd(fd);
     char* base = (char*)dirp;
     char* p = base;
     char* end = base + total;
@@ -1349,7 +1400,9 @@ ssize_t HideGetDents64(int fd, void* dirp, size_t count) {
         size_t rl = d->d_reclen;
         if (rl < sizeof(PasLinuxDirent64) || p + rl > end) break;
         // v2.4.6: also hide cpufreq/policyN entries beyond the cluster count.
-        if (!IsHiddenIfaceName(d->d_name) && !IsHiddenPolicyDirEntry(d->d_name)) {
+        // v2.9.5: also hide tool packages from /data/data / /data/user/<n>.
+        if (!IsHiddenIfaceName(d->d_name) && !IsHiddenPolicyDirEntry(d->d_name) &&
+            !(sweep && SweepHiddenEntry(d->d_name))) {
             if (out != p) memmove(out, p, rl);
             out += rl;
         }

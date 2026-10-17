@@ -168,8 +168,8 @@ class HookSweep : XHook {
     companion object {
         private const val PREF_GROUP = "pas_spoof"
         private const val DEFAULT_HIDDEN =
-            "me.weishu.kernelsu,hk.kirk.trustme,de.robv.android.xposed.installer," +
-            "org.lsposed.manager,io.github.lsposed.manager,com.topjohnwu.magisk," +
-            "eu.chainfire.supersu"
+            "me.weishu.kernelsu,hk.kirk.trustme,com.kimera.pas," +
+            "de.robv.android.xposed.installer,org.lsposed.manager," +
+            "io.github.lsposed.manager,com.topjohnwu.magisk,eu.chainfire.supersu"
     }
 }

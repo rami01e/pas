@@ -47,16 +47,22 @@ class HookAntiEmu : XHook {
         val model    = sysProp("ro.product.model")        ?: "SM-G991B"
         val device   = sysProp("ro.product.device")       ?: "o1s"
         val product  = sysProp("ro.product.name")         ?: "o1sxeea"
-        val board    = sysProp("ro.product.board")        ?: "o1s"
-        val hardware = sysProp("ro.hardware")             ?: "exynos2100"
+        // v2.9.5: BOARD/HARDWARE are canonical o1s values, NOT read from
+        // props - MuMu's ro.product.board ('SM-G991B') and ro.hardware
+        // ('Samsung') are impossible values on a real S21 and fail
+        // device-database validation.
+        val board    = "exynos2100"
+        val hardware = "exynos2100"
         val fp       = sysProp("ro.build.fingerprint")
             ?: "samsung/o1sxeea/o1s:15/UP1A.231005.007/G991BXXSJHZC2:user/release-keys"
         val id       = sysProp("ro.build.id")             ?: "UP1A.231005.007"
         val disp     = sysProp("ro.build.display.id")     ?: "UP1A.231005.007"
         val tags     = sysProp("ro.build.tags")           ?: "release-keys"
         val type     = sysProp("ro.build.type")           ?: "user"
-        val user     = sysProp("ro.build.user")           ?: "dpi"
-        val host     = sysProp("ro.build.host")           ?: "SWDD5907"
+        // v2.9.5: canonical values (MuMu's ro.build.user='abc' /
+        // ro.build.host=<hash> are not what a real o1s build carries).
+        val user     = "dpi"
+        val host     = "SWDD5907"
 
         var ok = 0
         var fail = 0
