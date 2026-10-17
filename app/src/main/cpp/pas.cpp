@@ -713,6 +713,19 @@ static void* InitWorker(void* arg) {
     }
     RefreshHiddenNames(true);
     Log("native: stage2 names cached");
+    // v2.9.5: the prop and anti-emu/anti-root hook groups are fully
+    // runtime-gated (the toggle decides at call time), so they install
+    // FIRST after the config. The JJ capture showed the target's
+    // first-second detection probes (access /system/xbin/su, identity
+    // props) racing ahead of the late stage5/stage5b installs and hitting
+    // an unhooked process. Nothing else here is order-sensitive; coverage
+    // is.
+    if (!compat) {
+        InstallPropSpoofHooks();
+        Log("native: stage2b prop hooks (early)");
+    }
+    InstallAntiEmuHooks();
+    Log("native: stage2c anti-emu hooks (early)");
     if (!light) {
         InstallIfaceHooks();
         Log("native: stage3 iface hooks");
@@ -754,16 +767,13 @@ static void* InitWorker(void* arg) {
     if (!compat) {
         InstallNetlinkHooks();
         InstallIoctlHooks();
-        InstallPropSpoofHooks();
+        Log("native: stage5 extended hooks (netlink/ioctl; props installed early)");
     } else {
         Log("native: compat mode - extended hooks skipped (netlink/ioctl/props)");
     }
-    // v2.9.0: ANTI-EMU (hide_antiemu.cpp) - runtime-gated on the Kotlin
-    // toggle (SpoofCore.nativeSetAntiEmu), so they stay inert until the
-    // per-app config turns them on. Installed in every mode, like the net
-    // hooks: the toggle is the switch, not compat mode.
-    InstallAntiEmuHooks();
-    Log("native: stage5b anti-emu hooks (runtime-gated)");
+    // v2.9.0/v2.9.5: ANTI-EMU (hide_antiemu.cpp) is runtime-gated on the
+    // Kotlin toggle (SpoofCore.nativeSetAntiEmu) and now installs early
+    // (stage2c) - the toggle is the switch, not compat mode.
     Log("native: all hooks installed");
     return nullptr;
 }

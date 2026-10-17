@@ -170,6 +170,14 @@ static bool IsAntiEmuPath(const char* path) {
         "/data/adb/ksu",
         "/system/bin/ksud",
         "/cache/magisk.log",
+        "/sbin/.magisk",
+        "/sbin/magiskhide",
+        "/sbin/magiskinit",
+        "/sbin/magiskpolicy",
+        "/system/bin/.ext/.su",
+        "/system/etc/.has_su_daemon",
+        "/system/etc/.installed_su_daemon",
+        "/data/local/tmp/.su",
 
         // v2.9.5: writability-probe targets (classic root check: create a
         // file here and it proves the device is an unlocked/emulator image)
@@ -633,7 +641,14 @@ static const char* ArmAbiValue(const char* name) {
     static const char kAbiList32[] = "armeabi-v7a,armeabi";
     const size_t n = strlen(name);
     if (n <= 3 || strncmp(name, "ro.", 3) != 0) return nullptr;
-    if (CpuSpoofActive() && strcmp(name, "ro.hardware") == 0) return nullptr;
+    // v2.9.5: the board/platform keys defer to the CPU profile too - the
+    // "kona" placeholder contradicted the Exynos identity the rest of the
+    // module presents (hide_props now serves exynos2100 for them).
+    if (CpuSpoofActive() && (strcmp(name, "ro.hardware") == 0 ||
+                             strcmp(name, "ro.board.platform") == 0 ||
+                             strcmp(name, "ro.product.board") == 0)) {
+        return nullptr;
+    }
     auto suffixIs = [&](const char* s) {
         size_t l = strlen(s);
         return n >= l && strcmp(name + (n - l), s) == 0;
