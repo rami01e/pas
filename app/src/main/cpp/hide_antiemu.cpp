@@ -1,4 +1,26 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (2.10.3).
+// hide_antiemu.cpp - ANTI-EMU native layer (2.10.4).
+//
+// v2.10.4 changes over v2.10.3 (from jj-appdome-capture 10-18, 09:57 round):
+//
+//  - NEW: /proc/self/map_files + /proc/<pid>/map_files hiding. Even with
+//    dl_iterate_phdr filtered and /proc/self/maps rewritten, a native RASP
+//    can opendir("/proc/self/map_files"), readlink() each entry, and get
+//    the real backing file (libhoudini.so, libnb.so, libnemu*, ...). The
+//    directory would leak exactly the libraries we spend so much time
+//    hiding elsewhere. IsAntiEmuPath now claims the whole map_files tree
+//    so open/stat/access/fstatat/syscall all return ENOENT for it.
+//
+//  - readlink/readlinkat: ShouldSanitizeFdTarget now also matches native
+//    bridge / translation artifacts (libhoudini.so, libndk_translation.so,
+//    libnb.so, libnemu*, libmumu*, libhp15, libjavahelper), /memfd:zygisk,
+//    and /data/adb. This closes the /proc/self/fd/<n> enumeration route
+//    that survived v2.10.3.
+//
+//  - NEW: dladdr hook (libdl.so + libc.so). Native code can call
+//    dladdr(&some_address, &info) and read info.dli_fname to learn the
+//    backing library, without ever touching dl_iterate_phdr. v2.10.4
+//    rewrites dli_fname to /system/lib64/libc.so when the address belongs
+//    to an anti-emu library, and clears the symbol fields.
 //
 // v2.10.3 changes over v2.10.2 (from jj-appdome-capture 10-18):
 //
@@ -177,8 +199,37 @@ static bool StartsWithPrefixSeg(const char* path, const char* prefix, size_t ple
     return n == '\0' || n == '/';
 }
 
+// v2.10.4: /proc/self/map_files (+ /proc/<pid>/map_files). The directory
+// entries are symlinks whose targets are the real backing files of each
+// mapping, so a RASP can walk it to find libhoudini.so / libnb.so without
+// ever touching /proc/self/maps. Claiming the whole tree in IsAntiEmuPath
+// makes open/stat/access/fstatat/syscall all return ENOENT for it.
+static bool IsProcMapFilesPath(const char* path) {
+    if (path == nullptr) return false;
+
+    if (strncmp(path, "/proc/self/map_files", 20) == 0) {
+        char n = path[20];
+        return n == '\0' || n == '/';
+    }
+
+    if (strncmp(path, "/proc/", 6) == 0) {
+        const char* p = path + 6;
+        if (*p < '0' || *p > '9') return false;
+        long v = 0;
+        while (*p >= '0' && *p <= '9') { v = v * 10 + (*p - '0'); ++p; }
+        if (v != (long)getpid()) return false;
+        if (strncmp(p, "/map_files", 10) != 0) return false;
+        char n = p[10];
+        return n == '\0' || n == '/';
+    }
+    return false;
+}
+
 static bool IsAntiEmuPath(const char* path) {
     if (!g_anti_emu || path == nullptr || path[0] != '/') return false;
+
+    // v2.10.4: entire map_files tree is off-limits to the app.
+    if (IsProcMapFilesPath(path)) return true;
 
     static const char* const kExact[] = {
         "/dev/qemu_pipe",
@@ -297,7 +348,7 @@ static bool IsAntiEmuPath(const char* path) {
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8: library name filter used by dl_iterate_phdr / dlopen
+// v2.9.8: library name filter used by dl_iterate_phdr / dlopen / dladdr
 // ---------------------------------------------------------------------------
 static bool IsAntiEmuLibName(const char* name) {
     if (name == nullptr || name[0] == '\0') return false;
@@ -642,6 +693,26 @@ static void* MyDlopen(const char* filename, int flags) {
 }
 
 // ---------------------------------------------------------------------------
+// v2.10.4: dladdr hook - scrub dli_fname when the address resolves to an
+// anti-emu library. dladdr() is a direct alternative to dl_iterate_phdr and
+// bypasses both the phdr wrapper and the /proc spoof. We rewrite dli_fname
+// to /system/lib64/libc.so and null out the symbol fields so the caller
+// sees a completely uninteresting result.
+// ---------------------------------------------------------------------------
+static int MyDladdr(void* addr, Dl_info* info) {
+    BYTEHOOK_STACK_SCOPE();
+    int r = BYTEHOOK_CALL_PREV(MyDladdr, addr, info);
+    if (g_anti_emu && r != 0 && info != nullptr &&
+        info->dli_fname != nullptr && IsAntiEmuLibName(info->dli_fname)) {
+        info->dli_fname = "/system/lib64/libc.so";
+        info->dli_fbase = nullptr;
+        info->dli_sname  = nullptr;
+        info->dli_saddr  = nullptr;
+    }
+    return r;
+}
+
+// ---------------------------------------------------------------------------
 // libc open family
 // ---------------------------------------------------------------------------
 
@@ -776,6 +847,8 @@ static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 
 // ---------------------------------------------------------------------------
 // v2.9.8: readlink/readlinkat - hide /dev/vaddress fd targets
+// v2.10.4: also sanitize targets that resolve to anti-emu libraries, so
+// /proc/self/fd/* enumeration cannot leak libhoudini.so / libnb.so etc.
 // ---------------------------------------------------------------------------
 static bool ShouldSanitizeFdTarget(const char* target, size_t len) {
     static const char* const kSuspicious[] = {
@@ -784,6 +857,16 @@ static bool ShouldSanitizeFdTarget(const char* target, size_t len) {
         "/dev/goldfish",
         "/dev/socket/qemud",
         "/dev/socket/genyd",
+        // v2.10.4: native bridge / translation artifacts
+        "libhoudini.so",
+        "libndk_translation.so",
+        "libnb.so",
+        "libnemu",
+        "libmumu",
+        "libhp15",
+        "libjavahelper",
+        "/memfd:zygisk",
+        "/data/adb",
     };
     for (const char* s : kSuspicious) {
         size_t sl = strlen(s);
@@ -1164,9 +1247,9 @@ static int MyUname(struct utsname* u) {
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8: InstallAntiEmuHooks - extended with dl_iterate_phdr / dlopen /
-// prctl / pthread_create / epoll_wait / epoll_pwait / epoll_pwait2 /
-// readlink / readlinkat
+// v2.9.8 / v2.10.4: InstallAntiEmuHooks - extended with dl_iterate_phdr /
+// dlopen / dladdr / prctl / pthread_create / epoll_wait / epoll_pwait /
+// epoll_pwait2 / readlink / readlinkat
 // ---------------------------------------------------------------------------
 void InstallAntiEmuHooks() {
     int okFs = 0;
@@ -1220,6 +1303,13 @@ void InstallAntiEmuHooks() {
     if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libdl.so",
                               "dlopen", (void*)MyDlopen,
                               nullptr, nullptr)) okLib++;
+    // v2.10.4: dladdr is exported from libdl.so and forwarded from libc.so
+    if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libdl.so",
+                              "dladdr", (void*)MyDladdr,
+                              nullptr, nullptr)) okLib++;
+    if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so",
+                              "dladdr", (void*)MyDladdr,
+                              nullptr, nullptr)) okLib++;
 
     int okSec = 0;
     if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so",
@@ -1238,7 +1328,7 @@ void InstallAntiEmuHooks() {
                               "epoll_pwait2", (void*)MyEpollPWait2,
                               nullptr, nullptr)) okSec++;
 
-    Log("native: anti-emu hooks installed fs=%d/%d prop=%d/4 syscall=%d/1 lib=%d/3 sec=%d/5 (runtime-gated)",
+    Log("native: anti-emu hooks installed fs=%d/%d prop=%d/4 syscall=%d/1 lib=%d/5 sec=%d/5 (runtime-gated)",
         okFs, (int)(sizeof(kFsSpecs) / sizeof(kFsSpecs[0])), okProp, okSys, okLib, okSec);
 }
 
