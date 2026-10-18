@@ -73,6 +73,14 @@
 // The real seccomp install from v2.9.7 (EnsurePermissiveSeccompThisThread
 // with SECCOMP_RET_ALLOW) is retained unchanged. v2.9.8 just delivers it
 // to the main thread earlier so the kernel actually reports it.
+//
+// EGL note: MuMu renders through /vendor/lib64/egl/libEGL_kona.so (and the
+// matching libGLESv1_CM_kona.so / libGLESv2_kona.so). The vendor loader
+// picks that implementation from ro.hardware.egl, falling back to
+// ro.hardware. The real selection is captured before g_anti_emu is set and
+// is kept serving the *_egl/_vulkan/_gralloc keys, so SoC/hardware spoofing
+// never redirects the renderer to a non-existent library. This mirrors the
+// protection added to hide_props.cpp.
 
 #include "pas.h"
 
@@ -115,6 +123,29 @@ static const bool PAS_F_HOOK_SYSCALL      = true;
 // state
 // ---------------------------------------------------------------------------
 static volatile bool g_anti_emu = false;
+
+// EGL / renderer-selection preservation.
+// MuMu's renderer is the kona EGL stack.  Capture the real selection before
+// anti-emu property hooks can rewrite ro.hardware.egl / ro.hardware.
+static char g_real_hardware[PROP_VALUE_MAX] = {0};
+static char g_real_egl_impl[PROP_VALUE_MAX] = {0};
+static char g_real_vulkan_impl[PROP_VALUE_MAX] = {0};
+static char g_real_gralloc_impl[PROP_VALUE_MAX] = {0};
+static bool g_egl_sel_captured = false;
+static __thread bool t_bypass_props = false;
+
+static void CaptureEglSelection() {
+    if (g_egl_sel_captured) return;
+    g_egl_sel_captured = true;
+    t_bypass_props = true;
+    __system_property_get("ro.hardware", g_real_hardware);
+    __system_property_get("ro.hardware.egl", g_real_egl_impl);
+    __system_property_get("ro.hardware.vulkan", g_real_vulkan_impl);
+    __system_property_get("ro.hardware.gralloc", g_real_gralloc_impl);
+    t_bypass_props = false;
+    Log("native: anti-emu egl selection captured hardware=%s egl=%s vulkan=%s gralloc=%s",
+        g_real_hardware, g_real_egl_impl, g_real_vulkan_impl, g_real_gralloc_impl);
+}
 
 // Seccomp per-thread install state.
 static __thread bool t_seccomp_installed = false;
@@ -174,9 +205,12 @@ static void MaybeInstallSeccompOnMainThread() {
 }
 
 // ---------------------------------------------------------------------------
-// public entry point (unchanged signature)
+// public entry point
 // ---------------------------------------------------------------------------
 void SetAntiEmu(bool on) {
+    // Snapshot the real renderer selection before any hook can rewrite it.
+    if (on) CaptureEglSelection();
+
     g_anti_emu = on;
     if (on) {
         EnsurePermissiveSeccompThisThread();
@@ -655,7 +689,7 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8: dl_iterate_phdr hook - hide ARM-translation libs from enumeration
+// v2.9.8: dl_iterate_phdr hook
 // ---------------------------------------------------------------------------
 struct DlIterData {
     int (*cb)(struct dl_phdr_info*, size_t, void*);
@@ -681,7 +715,7 @@ static int MyDlIteratePhdr(int (*cb)(struct dl_phdr_info*, size_t, void*), void*
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8: dlopen hook - dlopen("libhoudini.so", RTLD_NOLOAD) -> NULL/ENOENT
+// v2.9.8: dlopen hook
 // ---------------------------------------------------------------------------
 static void* MyDlopen(const char* filename, int flags) {
     BYTEHOOK_STACK_SCOPE();
@@ -693,11 +727,7 @@ static void* MyDlopen(const char* filename, int flags) {
 }
 
 // ---------------------------------------------------------------------------
-// v2.10.4: dladdr hook - scrub dli_fname when the address resolves to an
-// anti-emu library. dladdr() is a direct alternative to dl_iterate_phdr and
-// bypasses both the phdr wrapper and the /proc spoof. We rewrite dli_fname
-// to /system/lib64/libc.so and null out the symbol fields so the caller
-// sees a completely uninteresting result.
+// v2.10.4: dladdr hook
 // ---------------------------------------------------------------------------
 static int MyDladdr(void* addr, Dl_info* info) {
     BYTEHOOK_STACK_SCOPE();
@@ -846,9 +876,7 @@ static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8: readlink/readlinkat - hide /dev/vaddress fd targets
-// v2.10.4: also sanitize targets that resolve to anti-emu libraries, so
-// /proc/self/fd/* enumeration cannot leak libhoudini.so / libnb.so etc.
+// v2.9.8: readlink/readlinkat
 // ---------------------------------------------------------------------------
 static bool ShouldSanitizeFdTarget(const char* target, size_t len) {
     static const char* const kSuspicious[] = {
@@ -904,7 +932,7 @@ static ssize_t MyReadlinkAt(int dirfd, const char* path, char* buf, size_t bufsi
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8: prctl hook - spoof PR_GET_SECCOMP / PR_GET_NO_NEW_PRIVS queries
+// v2.9.8: prctl hook
 // ---------------------------------------------------------------------------
 static int MyPrctl(int option, ...) {
     BYTEHOOK_STACK_SCOPE();
@@ -924,12 +952,6 @@ static int MyPrctl(int option, ...) {
 
 // ---------------------------------------------------------------------------
 // v2.9.8: main-thread seccomp early delivery
-//
-// Once Unity takes over, the June's Journey activity thread idles in
-// epoll_wait and never calls open/stat/access again. Without these hooks,
-// /proc/self/status stayed at Seccomp: 0 for the whole process (see the
-// 08-proc-snapshots captures). epoll_wait fires every time the Looper
-// wakes, which is the earliest reliable main-thread signal.
 // ---------------------------------------------------------------------------
 static int MyPthreadCreate(pthread_t* thread, const pthread_attr_t* attr,
                            void* (*start_routine)(void*), void* arg) {
@@ -965,7 +987,7 @@ static int MyEpollPWait2(int epfd, struct epoll_event* events, int maxevents,
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8: direct syscall() bypass closer (extended with __NR_prctl)
+// v2.9.8: direct syscall() bypass closer
 // ---------------------------------------------------------------------------
 static long MySyscall(long number, ...) {
     BYTEHOOK_STACK_SCOPE();
@@ -1075,6 +1097,17 @@ static const char* CpuHwOr(const char* fallback) {
     return v.empty() ? fallback : v.c_str();
 }
 
+// Renderer-selection keys must keep pointing at the real vendor stack.
+// MuMu: real_egl_impl = "kona"; real_hardware = "kona". If the dedicated
+// property is empty, return the real ro.hardware so the loader's own
+// ro.hardware fallback still lands on libEGL_kona.so.
+static const char* RealRendererValue(const char* dedicated,
+                                     const char* real_hw) {
+    if (dedicated != nullptr && dedicated[0] != '\0') return dedicated;
+    if (real_hw != nullptr && real_hw[0] != '\0') return real_hw;
+    return nullptr;
+}
+
 static const char* ArmAbiValue(const char* name) {
     static const char kAbi64[] = "arm64-v8a";
     static const char kAbiList[] = "arm64-v8a,armeabi-v7a,armeabi";
@@ -1096,9 +1129,21 @@ static const char* ArmAbiValue(const char* name) {
     if (strcmp(name, "ro.dalvik.vm.isa.arm") == 0) return "arm";
     if (strcmp(name, "ro.dalvik.vm.isa.arm64") == 0) return "arm64";
 
+    // Renderer selection: serve the REAL vendor suffix (MuMu: kona).
+    // This is the critical difference from the spoofed hardware family.
+    if (strcmp(name, "ro.hardware.egl") == 0) {
+        return RealRendererValue(g_real_egl_impl, g_real_hardware);
+    }
+    if (strcmp(name, "ro.hardware.vulkan") == 0) {
+        return RealRendererValue(g_real_vulkan_impl, g_real_hardware);
+    }
+    if (strcmp(name, "ro.hardware.gralloc") == 0) {
+        return RealRendererValue(g_real_gralloc_impl, g_real_hardware);
+    }
+
+    // Everything else in the hardware family remains spoofed for anti-emu.
     if (strcmp(name, "ro.product.board") == 0) return CpuHwOr("exynos2100");
     if (strcmp(name, "ro.boot.hardware") == 0) return CpuHwOr("exynos2100");
-    if (strcmp(name, "ro.hardware.egl") == 0) return CpuHwOr("exynos2100");
     if (strcmp(name, "ro.arch") == 0) return CpuHwOr("exynos2100");
     if (strcmp(name, "ro.board.platform") == 0) return CpuHwOr("exynos2100");
     if (strcmp(name, "ro.hardware") == 0) return CpuHwOr("qcom");
@@ -1140,6 +1185,9 @@ static bool IsAntiEmuProp(const char* name) {
 
 static int MyPropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
+    if (t_bypass_props) {
+        return BYTEHOOK_CALL_PREV(MyPropGet, name, value);
+    }
     if (g_anti_emu && name != nullptr && value != nullptr) {
         if (const char* v = ArmAbiValue(name)) {
             size_t l = strlen(v);
@@ -1158,6 +1206,9 @@ static int MyPropGet(const char* name, char* value) {
 
 static const prop_info* MyPropFind(const char* name) {
     BYTEHOOK_STACK_SCOPE();
+    if (t_bypass_props) {
+        return BYTEHOOK_CALL_PREV(MyPropFind, name);
+    }
     if (IsAntiEmuProp(name)) return nullptr;
     return BYTEHOOK_CALL_PREV(MyPropFind, name);
 }
@@ -1178,6 +1229,10 @@ static void MyPropReadCallback(const prop_info* pi,
                                void (*cb)(void*, const char*, const char*, uint32_t),
                                void* cookie) {
     BYTEHOOK_STACK_SCOPE();
+    if (t_bypass_props) {
+        BYTEHOOK_CALL_PREV(MyPropReadCallback, pi, cb, cookie);
+        return;
+    }
     if (g_anti_emu && pi != nullptr && cb != nullptr) {
         PropGrab g;
         g.name = nullptr;
@@ -1216,6 +1271,9 @@ static void PropForeachShim(const prop_info* pi, void* cookie) {
 
 static int MyPropForeach(void (*cb)(const prop_info*, void*), void* cookie) {
     BYTEHOOK_STACK_SCOPE();
+    if (t_bypass_props) {
+        return BYTEHOOK_CALL_PREV(MyPropForeach, cb, cookie);
+    }
     if (g_anti_emu && cb != nullptr) {
         PropForeachFwd fwd;
         fwd.cb = cb;
@@ -1247,9 +1305,7 @@ static int MyUname(struct utsname* u) {
 }
 
 // ---------------------------------------------------------------------------
-// v2.9.8 / v2.10.4: InstallAntiEmuHooks - extended with dl_iterate_phdr /
-// dlopen / dladdr / prctl / pthread_create / epoll_wait / epoll_pwait /
-// epoll_pwait2 / readlink / readlinkat
+// v2.9.8 / v2.10.4: InstallAntiEmuHooks
 // ---------------------------------------------------------------------------
 void InstallAntiEmuHooks() {
     int okFs = 0;
