@@ -1,23 +1,73 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.6).
+// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.7).
 //
-// v2.9.6 changes over v2.9.4:
-//  - /proc/self/status: Seccomp, Seccomp_filters and NoNewPrivs are rewritten
-//    alongside TracerPid. MuMu runs the app with seccomp disabled; AppDome-grade
-//    RASP treats "Seccomp: 0" as an emulator/debug signal.
-//  - maps/mounts line filter: "nativebridge" and "vaddress" added. The old
-//    filter removed houdini/libnb but left libnativebridge*.so lines visible.
-//  - Root-path hiding: /data/adb/** prefix, and Magisk paths under /sbin,
-//    /bin, /system/bin, /system/xbin. JJ probes /sbin/.magisk, /bin/magiskhide,
-//    /sbin/magiskinit, etc.; those were not covered by the exact list.
-//  - Property consistency: ro.build.host, service.adb.root, ro.boot.hardware,
-//    ro.hardware.egl, ro.arch, ro.product.board, ro.board.platform and
-//    ro.hardware now follow the active CPU profile where applicable. This
-//    prevents "Exynos 2100 CPU profile + kona/Samsung props + MuMu host hash".
+// v2.9.7 changes over v2.9.6:
+//
+//  - Real permissive seccomp. v2.9.6's SanitizeStatus() only rewrote the
+//    /proc/self/status TEXT for libc readers. AppDome-grade RASP reads
+//    through direct syscall() and sees the raw kernel truth:
+//    Seccomp: 0, Seccomp_filters: 0, NoNewPrivs: 0 - which is what MuMu
+//    leaves in place ("Zygote: seccomp disabled by setenforce 0" in the
+//    10-18 capture). We install a real (fully permissive) SECCOMP_MODE_FILTER
+//    so the kernel itself reports Seccomp: 2 to every reader - direct
+//    syscall or not.
+//
+//    Scope: prctl(PR_SET_NO_NEW_PRIVS) and prctl(PR_SET_SECCOMP) are
+//    per-thread attributes inherited only by that thread's fork/clone
+//    children. This library runs inside the scoped app's own process
+//    (XposedInit.initNativeAddon -> System.loadLibrary -> SpoofCore.init
+//    on the "pas-native-init" thread), so the install touches nothing
+//    outside the app process. No system-wide effect.
+//
+//    The filter is SECCOMP_RET_ALLOW for everything - functionally a no-op.
+//    Only its presence is what we need.
+//
+//  - Lazy main-thread seccomp install. nativeSetAntiEmu() runs on
+//    "pas-native-init" (a worker; the 10-18 log shows "native: anti-emu
+//    on" on tid 38976, not 38829). /proc/<pid>/status reflects the MAIN
+//    thread's seccomp state, not the reading thread's. SetAntiEmu still
+//    installs on the caller (harmless), and the first hook call that runs
+//    on the main thread (open/openat/fopen/stat/lstat/fstatat/access/
+//    syscall - all fire within ms of Activity startup) triggers
+//    MaybeInstallSeccompOnMainThread(), which finishes the real install
+//    there too. After that, /proc/self/status reports Seccomp: 2 natively
+//    for the whole process.
+//
+//  - /proc/self/maps and /proc/self/smaps x86_64 paths rewritten to arm64.
+//    APK-internal paths ("base.apk!/lib/x86_64/*.so") become
+//    "base.apk!/lib/arm64-v8a/*.so" - exactly what a real SM-G991B shows.
+//    Extracted-lib paths (".../lib/x86_64/*.so") become
+//    ".../lib/arm64/*.so" to match extractNativeLibs=true installs. The
+//    discriminator is the ".apk!/" substring on the line itself.
+//    base.apk! arm64-v8a is a valid zip entry for universal APKs (the
+//    10-18 loader config shows library_path=...base.apk!/lib/x86_64:
+//    ...base.apk!/lib/arm64-v8a), so the rewritten path is real, not fake.
+//
+//  - gre0 sysfs paths hidden (/sys/{class,devices/virtual}/net/gre0*).
+//    Java-side NetworkInterface already hides gre0, but UnityMain reads
+//    /sys/devices/virtual/net/gre0/ifindex directly (03-module.log at
+//    10:14:38.973) and bypassed that filter. Hiding sysfs keeps the story
+//    consistent.
+//
+//  - NEW: syscall() hook. v2.9.6 relied on libc open/openat/fopen hooks,
+//    which a hardened RASP bypasses with direct syscall(). This closes the
+//    last bypass: houdini, qemu_pipe, root paths, proc-maps/status/cpuinfo
+//    are all hidden on BOTH libc and raw-syscall paths. Installed after
+//    hide_fs.cpp's syscall hook (pas.cpp stage 4a vs 5b), so this runs as
+//    the OUTER layer - it handles anti-emu paths first and falls through
+//    via BYTEHOOK_CALL_PREV to hide_fs.MySyscall (CPU freq / interface
+//    hiding) on every other path.
+//
+//  - Fixed: v2.9.6-era gre0 prefix match used strncmp(path, prefix, N)
+//    where N was larger than the literal, which stops at the pattern's
+//    NUL and never matched children. Now uses strncmp(...) with the literal
+//    length + explicit terminator/"/" check, so /sys/class/net/gre0 and
+//    /sys/class/net/gre0/ifindex both hit.
 //
 // Runtime-gated on g_anti_emu; the toggle is delivered from Kotlin via
 // nativeSetAntiEmu(). Caller filter is the standard module one
-// (CallerAllowHooks), which excludes Houdini / native-bridge libs so their
-// own property reads stay raw and MuMu's injected helpers keep working.
+// (CallerAllowHooks), which excludes Houdini / native-bridge libs so
+// their own property reads stay raw and MuMu's injected helpers keep
+// working.
 
 #include "pas.h"
 
@@ -28,20 +78,112 @@
 #include <stdio.h>
 #include <string.h>
 #include <string>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/system_properties.h>
 #include <sys/utsname.h>
 #include <unistd.h>
 
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+
 #include "bytehook.h"
 
 namespace pas {
 
+// ---------------------------------------------------------------------------
+// v2.9.7 feature flags (compile-time const; dead branches are optimized out)
+// ---------------------------------------------------------------------------
+static const bool PAS_F_REAL_SECCOMP      = true;
+static const bool PAS_F_REWRITE_MAPS_X86  = true;
+static const bool PAS_F_HIDE_GRE0_SYSFS   = true;
+static const bool PAS_F_HOOK_SYSCALL      = true;
+
+// ---------------------------------------------------------------------------
+// state
+// ---------------------------------------------------------------------------
 static volatile bool g_anti_emu = false;
 
+// Seccomp per-thread install state.
+static __thread bool t_seccomp_installed = false;
+static __thread bool t_seccomp_failed    = false;
+static __thread int  t_is_main           = -1;   // -1 unknown, 0 no, 1 yes
+static bool          g_seccomp_installed_main = false;
+
+static inline pid_t GetTid() {
+#if defined(__NR_gettid)
+    return (pid_t)syscall(__NR_gettid);
+#else
+    return gettid();
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// v2.9.7: real permissive seccomp (see file header for scope statement)
+//
+// The filter is SECCOMP_RET_ALLOW for everything - functionally a no-op.
+// Its only purpose is to make the kernel report Seccomp: 2 and
+// Seccomp_filters: 1 in /proc/<pid>/status, matching every stock Android
+// app (zygote installs a filter before fork). MuMu runs the app process
+// with seccomp disabled entirely - that is the emulator tell.
+//
+// Both prctl() calls are per-thread; children inherit them via fork/clone.
+// No system-wide state is touched.
+// ---------------------------------------------------------------------------
+static void EnsurePermissiveSeccompThisThread() {
+    if (!PAS_F_REAL_SECCOMP) return;
+    if (t_seccomp_installed || t_seccomp_failed) return;
+
+    // PR_SET_NO_NEW_PRIVS is required to install seccomp-bpf without
+    // CAP_SYS_ADMIN. One-way; matches what every stock Android app already
+    // has (zygote sets it before fork).
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        Log("native: anti-emu seccomp PR_SET_NO_NEW_PRIVS errno=%d", errno);
+        t_seccomp_failed = true;
+        return;
+    }
+
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog;
+    prog.len    = (unsigned short)(sizeof(filter) / sizeof(filter[0]));
+    prog.filter = filter;
+
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        Log("native: anti-emu seccomp PR_SET_SECCOMP errno=%d", errno);
+        t_seccomp_failed = true;
+        return;
+    }
+
+    t_seccomp_installed = true;
+    Log("native: anti-emu permissive seccomp installed (tid=%d)", (int)GetTid());
+}
+
+static void MaybeInstallSeccompOnMainThread() {
+    if (!PAS_F_REAL_SECCOMP) return;
+    if (!g_anti_emu) return;
+    if (g_seccomp_installed_main) return;
+    if (t_is_main < 0) {
+        t_is_main = (GetTid() == getpid()) ? 1 : 0;
+    }
+    if (t_is_main != 1) return;
+    EnsurePermissiveSeccompThisThread();
+    g_seccomp_installed_main = true;
+}
+
+// ---------------------------------------------------------------------------
+// public entry point (unchanged signature)
+// ---------------------------------------------------------------------------
 void SetAntiEmu(bool on) {
     g_anti_emu = on;
+    if (on) {
+        // Install on the calling thread (usually "pas-native-init"; harmless).
+        EnsurePermissiveSeccompThisThread();
+        // If we happen to be the main thread, mark it done right away.
+        MaybeInstallSeccompOnMainThread();
+    }
     Log("native: anti-emu %s", on ? "on" : "off");
 }
 
@@ -53,10 +195,19 @@ bool AntiEmuEnabled() {
 // path filter
 // ---------------------------------------------------------------------------
 
+// v2.9.7: proper prefix match. strncmp(path, prefix, N) with N > strlen(prefix)
+// stops at the pattern NUL and never matches children. This helper compares
+// exactly strlen(prefix) bytes and then requires the next path byte to be
+// either the terminator or '/'.
+static bool StartsWithPrefixSeg(const char* path, const char* prefix, size_t plen) {
+    if (strncmp(path, prefix, plen) != 0) return false;
+    char n = path[plen];
+    return n == '\0' || n == '/';
+}
+
 static bool IsAntiEmuPath(const char* path) {
     if (!g_anti_emu || path == nullptr || path[0] != '/') return false;
 
-    // Exact matches (the SG Bigo / classic emulator-detector list)
     static const char* const kExact[] = {
         "/dev/qemu_pipe",
         "/dev/socket/qemud",
@@ -82,7 +233,7 @@ static bool IsAntiEmuPath(const char* path) {
         "/system/lib64/x86_64",
         "/system/etc/cpuinfo.x86_64.txt",
 
-        // v2.9.4: root / privilege artifacts. ENOENT while ANTI-EMU is on.
+        // Root / privilege artifacts. ENOENT while ANTI-EMU is on.
         "/system/bin/su",
         "/system/xbin/su",
         "/sbin/su",
@@ -106,8 +257,7 @@ static bool IsAntiEmuPath(const char* path) {
         "/system/bin/ksud",
         "/cache/magisk.log",
 
-        // v2.9.5: writability-probe targets (classic root check: create a
-        // file here and it proves the device is an unlocked/emulator image)
+        // Writability-probe targets
         "/data/local/tmp",
         "/debug_ramdisk",
         "/data/local",
@@ -116,11 +266,11 @@ static bool IsAntiEmuPath(const char* path) {
         if (strcmp(path, p) == 0) return true;
     }
 
-    // v2.9.6: all children of /data/adb (modules, ksu, magisk, ...)
+    // All children of /data/adb (modules, ksu, magisk, ...)
     if (strncmp(path, "/data/adb/", 10) == 0) return true;
 
-    // v2.9.6: Magisk paths under common root locations. JJ probes
-    // /sbin/.magisk, /bin/magiskhide, /sbin/magiskinit, etc.
+    // Magisk paths under common root locations (JJ probes /sbin/.magisk,
+    // /bin/magiskhide, /sbin/magiskinit, etc.)
     if (strncmp(path, "/sbin/", 6) == 0 ||
         strncmp(path, "/bin/", 5) == 0 ||
         strncmp(path, "/system/bin/", 12) == 0 ||
@@ -128,6 +278,19 @@ static bool IsAntiEmuPath(const char* path) {
         if (strstr(path, "magisk") != nullptr || strstr(path, ".magisk") != nullptr) {
             return true;
         }
+    }
+
+    // v2.9.7: gre0 sysfs (both exact dir and every child). The Java-side
+    // NetworkInterface filter hides gre0, but UnityMain reads
+    // /sys/devices/virtual/net/gre0/ifindex directly and bypassed it.
+    // v2.9.7 fix: the strncmp-with-literal-length + terminator check is
+    // what actually matches children; a bare strncmp(path, prefix, N)
+    // with N > strlen(prefix) never does.
+    if (PAS_F_HIDE_GRE0_SYSFS) {
+        static const char kGre0Dev[] = "/sys/devices/virtual/net/gre0";
+        static const char kGre0Cls[] = "/sys/class/net/gre0";
+        if (StartsWithPrefixSeg(path, kGre0Dev, sizeof(kGre0Dev) - 1)) return true;
+        if (StartsWithPrefixSeg(path, kGre0Cls, sizeof(kGre0Cls) - 1)) return true;
     }
 
     // Basename patterns (some ROMs relocate these or symlink them)
@@ -168,7 +331,7 @@ static bool IsAntiEmuPath(const char* path) {
 }
 
 // ---------------------------------------------------------------------------
-// /proc content spoof - detectors read the raw files, not only the props
+// /proc content spoof
 // ---------------------------------------------------------------------------
 
 enum ProcSpoofKind {
@@ -176,12 +339,11 @@ enum ProcSpoofKind {
     kProcCpuInfo = 1,
     kProcMaps = 2,
     kProcMounts = 3,
-    kProcStatus = 4,          // v2.9.4: /proc self status, TracerPid zeroed
-    kProcSelinuxEnforce = 5,  // v2.9.4: /sys/fs/selinux/enforce -> "1"
-    kProcVersion = 6,         // v2.9.5: /proc/version, arch -> aarch64
+    kProcStatus = 4,          // /proc self status, TracerPid/Seccomp/NoNewPrivs
+    kProcSelinuxEnforce = 5,  // /sys/fs/selinux/enforce -> "1"
+    kProcVersion = 6,         // /proc/version, arch -> aarch64
 };
 
-// /proc/self/<leaf> or /proc/<pid-of-self>/<leaf>
 static bool ProcSelfPath(const char* path, const char* leaf) {
     if (strncmp(path, "/proc/self/", 11) == 0) return strcmp(path + 11, leaf) == 0;
     if (strncmp(path, "/proc/", 6) == 0) {
@@ -194,8 +356,6 @@ static bool ProcSelfPath(const char* path, const char* leaf) {
     return false;
 }
 
-// /proc/self/task/<tid>/<leaf> or /proc/<pid-of-self>/task/<tid>/<leaf>
-// (any thread of this process shows this process' view)
 static bool ProcTaskSelfLeaf(const char* path, const char* leaf) {
     const char* p = nullptr;
     if (strncmp(path, "/proc/self/task/", 16) == 0) {
@@ -219,18 +379,17 @@ static bool ProcTaskSelfLeaf(const char* path, const char* leaf) {
 static ProcSpoofKind ClassifyProcPath(const char* path) {
     if (!g_anti_emu || path == nullptr) return kProcNone;
     if (strcmp(path, "/proc/cpuinfo") == 0) {
-        // v2.9.2: while the CPU toggle is on, hide_fs.cpp's profile engine
-        // (ServeSysfsSpoofFd / RewriteCpuinfoContent) owns /proc/cpuinfo -
-        // same single-owner behavior as 2.8.4. Deferring here means the
-        // open() call falls through the bytehook chain into HideOpen /
-        // HideFopen, which serve the user's CPU name / vendor / core
-        // layout. Anti-emu only serves its generated kona cpuinfo when the
-        // CPU toggle is off.
+        // hide_fs.cpp's CPU profile engine (ServeSysfsSpoofFd /
+        // RewriteCpuinfoContent) owns /proc/cpuinfo while CpuSpoofActive().
+        // Deferring here means the open() falls through the bytehook chain
+        // into HideOpen / HideFopen, which serve the user's CPU name /
+        // vendor / core layout. Anti-emu only serves its kona cpuinfo when
+        // the CPU toggle is off.
         if (CpuSpoofActive()) return kProcNone;
         return kProcCpuInfo;
     }
     if (strcmp(path, "/proc/mounts") == 0) return kProcMounts;
-    // v2.9.4: own-process status (anti-debug TracerPid) and SELinux state.
+    // Own-process status (TracerPid + Seccomp + NoNewPrivs) and SELinux.
     if (ProcSelfPath(path, "status") || ProcTaskSelfLeaf(path, "status")) {
         return kProcStatus;
     }
@@ -251,8 +410,6 @@ static ProcSpoofKind ClassifyProcPath(const char* path) {
     return kProcNone;
 }
 
-// Raw syscalls for internal work: no PLT, no re-entry, invisible to every
-// other hook (ours included).
 static int RawOpenRo(const char* path) {
 #if defined(__NR_openat)
     return (int)syscall(__NR_openat, (int)AT_FDCWD, path, O_RDONLY, 0);
@@ -296,7 +453,43 @@ static bool LineHasToken(const char* line, size_t len) {
     return false;
 }
 
-// v2.9.4: raw full-file read for internal work (no PLT, no re-entry).
+// v2.9.7: APK-internal paths use the full ABI name ("base.apk!/lib/
+// arm64-v8a/"); extracted-lib paths use the short name (".../lib/arm64/"),
+// matching Android's extractNativeLibs=true layout. The discriminator is
+// the ".apk!/" substring on the line. Both rewritten forms are real paths
+// on a genuine SM-G991B base.apk (which is universal: the loader_config log
+// shows library_path=...!/lib/x86_64:...!/lib/arm64-v8a).
+static void RewriteMapsLine(std::string& line) {
+    if (!PAS_F_REWRITE_MAPS_X86) return;
+
+    bool in_apk = line.find(".apk!/") != std::string::npos;
+    const char* arm64_dir = in_apk ? "arm64-v8a"   : "arm64";
+    const char* arm32_dir = in_apk ? "armeabi-v7a" : "arm";
+
+    std::string to64   = std::string("/lib/")   + arm64_dir + "/";
+    std::string to32   = std::string("/lib/")   + arm32_dir + "/";
+    std::string to64b  = std::string("/lib64/") + arm64_dir + "/";
+    std::string to32b  = std::string("/lib64/") + arm32_dir + "/";
+
+    auto rep = [](std::string& s, const char* from, const std::string& to) {
+        size_t fl = strlen(from);
+        size_t p = 0;
+        while ((p = s.find(from, p)) != std::string::npos) {
+            s.replace(p, fl, to);
+            p += to.size();
+        }
+    };
+    rep(line, "/lib/x86_64/",   to64);
+    rep(line, "/lib/x86/",      to32);
+    rep(line, "/lib64/x86_64/", to64b);
+    rep(line, "/lib64/x86/",    to32b);
+
+    if (in_apk) {
+        rep(line, "split_config.x86_64.apk", "split_config.arm64_v8a.apk");
+        rep(line, "split_config.x86.apk",    "split_config.armeabi_v7a.apk");
+    }
+}
+
 static bool RawReadAll(const char* path, std::string& out) {
     int fd = RawOpenRo(path);
     if (fd < 0) return false;
@@ -310,7 +503,7 @@ static bool RawReadAll(const char* path, std::string& out) {
 #endif
         if (n <= 0) break;
         out.append(buf, (size_t)n);
-        if (out.size() > (16u << 20)) break;  // 16 MB sanity cap
+        if (out.size() > (16u << 20)) break;
     }
 #if defined(__NR_close)
     syscall(__NR_close, fd);
@@ -318,9 +511,8 @@ static bool RawReadAll(const char* path, std::string& out) {
     return true;
 }
 
-// v2.9.5: rewrite x86 arch strings in a /proc/version body. uname(2) is
-// already patched (MyUname) but the version FILE carried the real host
-// arch - a one-line emulator tell.
+// Rewrite x86 arch strings in a /proc/version body. uname(2) is already
+// patched (MyUname) but the version FILE carried the real host arch.
 static void RewriteVersionArch(std::string& s) {
     static const char* const kX86[] = {"x86_64", "i686", "i386"};
     for (const char* t : kX86) {
@@ -332,8 +524,6 @@ static void RewriteVersionArch(std::string& s) {
     }
 }
 
-// v2.9.6: set a "Key:\tvalue" field in /proc/self/status. Used for
-// TracerPid, Seccomp, Seccomp_filters and NoNewPrivs.
 static void SetStatusField(std::string& s, const char* key, const char* value) {
     size_t p = s.find(key);
     if (p == std::string::npos) return;
@@ -344,7 +534,11 @@ static void SetStatusField(std::string& s, const char* key, const char* value) {
     s.replace(vstart, e - vstart, value);
 }
 
-// v2.9.6: TracerPid zeroed, seccomp present, no_new_privs set.
+// After v2.9.7's real seccomp install on the main thread, the kernel itself
+// writes Seccomp: 2 and Seccomp_filters: 1, so these two rewrites become
+// idempotent no-ops for the main thread; they still cover the small window
+// before the lazy install lands, and non-main threads (which read their
+// own status via /proc/self/task/<tid>/status).
 static void SanitizeStatus(std::string& s) {
     SetStatusField(s, "TracerPid:", "0");
     SetStatusField(s, "Seccomp:", "2");
@@ -352,16 +546,25 @@ static void SanitizeStatus(std::string& s) {
     SetStatusField(s, "NoNewPrivs:", "1");
 }
 
-static bool BuildFiltered(const char* path, std::string& out) {
+static bool BuildFiltered(ProcSpoofKind kind, const char* path, std::string& out) {
     std::string all;
     if (!RawReadAll(path, all)) return false;
     out.clear();
+    out.reserve(all.size());
+
     size_t start = 0;
     while (start < all.size()) {
         size_t nl = all.find('\n', start);
         size_t next = (nl == std::string::npos) ? all.size() : nl + 1;
+
         if (!LineHasToken(all.c_str() + start, next - start)) {
-            out.append(all, start, next - start);
+            if (kind == kProcMaps) {
+                std::string line(all.c_str() + start, next - start);
+                RewriteMapsLine(line);
+                out += line;
+            } else {
+                out.append(all, start, next - start);
+            }
         }
         start = next;
     }
@@ -369,6 +572,7 @@ static bool BuildFiltered(const char* path, std::string& out) {
 }
 
 // Genuine kona (Samsung SM-G991B, Snapdragon 888) style AArch64 cpuinfo.
+// Only served when CpuSpoofActive() is false (see ClassifyProcPath).
 static const std::string& CpuInfoText() {
     static const std::string kText = [] {
         std::string s;
@@ -408,7 +612,7 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
         if (!RawReadAll(path, content)) return -1;
         RewriteVersionArch(content);
     } else {
-        if (!BuildFiltered(path, content)) return -1;
+        if (!BuildFiltered(kind, path, content)) return -1;
     }
     int mfd = RawMemFd("pas_proc_spoof");
     if (mfd < 0) return -1;
@@ -442,12 +646,13 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
 }
 
 // ---------------------------------------------------------------------------
-// open family - every entry point the SDKs use for File.exists() /
+// libc open family - every entry point the SDKs use for File.exists() /
 // FileInputStream / fopen / ifstream
 // ---------------------------------------------------------------------------
 
 static int MyOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (path != nullptr && (flags & O_ACCMODE) == O_RDONLY) {
         ProcSpoofKind k = ClassifyProcPath(path);
         if (k != kProcNone) {
@@ -458,8 +663,6 @@ static int MyOpen(const char* path, int flags, ...) {
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0;
 #if defined(O_TMPFILE)
-    // O_TMPFILE is (__O_TMPFILE | O_DIRECTORY); testing the full composite
-    // keeps plain O_DIRECTORY opens out of the varargs branch.
     if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
 #else
     if (flags & O_CREAT) {
@@ -473,6 +676,7 @@ static int MyOpen(const char* path, int flags, ...) {
 
 static int MyOpen2(const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (path != nullptr && (flags & O_ACCMODE) == O_RDONLY) {
         ProcSpoofKind k = ClassifyProcPath(path);
         if (k != kProcNone) {
@@ -486,6 +690,7 @@ static int MyOpen2(const char* path, int flags) {
 
 static int MyOpenAt(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (path != nullptr && path[0] == '/' && (flags & O_ACCMODE) == O_RDONLY) {
         ProcSpoofKind k = ClassifyProcPath(path);
         if (k != kProcNone) {
@@ -509,6 +714,7 @@ static int MyOpenAt(int dirfd, const char* path, int flags, ...) {
 
 static int MyOpenAt2(int dirfd, const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (path != nullptr && path[0] == '/' && (flags & O_ACCMODE) == O_RDONLY) {
         ProcSpoofKind k = ClassifyProcPath(path);
         if (k != kProcNone) {
@@ -522,6 +728,7 @@ static int MyOpenAt2(int dirfd, const char* path, int flags) {
 
 static FILE* MyFopen(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (path != nullptr && mode != nullptr && mode[0] == 'r') {
         ProcSpoofKind k = ClassifyProcPath(path);
         if (k != kProcNone) {
@@ -539,40 +746,151 @@ static FILE* MyFopen(const char* path, const char* mode) {
 
 static int MyAccess(const char* path, int mode) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     return BYTEHOOK_CALL_PREV(MyAccess, path, mode);
 }
 
 static int MyFAccessAt(int dirfd, const char* path, int mode, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     return BYTEHOOK_CALL_PREV(MyFAccessAt, dirfd, path, mode, flags);
 }
 
 static int MyStat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     return BYTEHOOK_CALL_PREV(MyStat, path, buf);
 }
 
 static int MyLstat(const char* path, struct stat* buf) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     return BYTEHOOK_CALL_PREV(MyLstat, path, buf);
 }
 
 static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
     BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
     return BYTEHOOK_CALL_PREV(MyFstatAt, dirfd, path, buf, flags);
 }
 
 // ---------------------------------------------------------------------------
-// property filter - Appsflyer / Mintegral / AppDome-grade probes
+// v2.9.7: direct syscall() bypass closer
+//
+// Installed after hide_fs.cpp's syscall hook (pas.cpp stage 4a vs 5b), so
+// this is the OUTER layer: anti-emu paths handled first, then falls through
+// via BYTEHOOK_CALL_PREV to hide_fs.MySyscall (CPU freq / interface hiding).
+//
+// Bytehook's CallerAllowHooks filter excludes Houdini / native-bridge libs
+// (their syscalls are x86_64 host syscalls running ARM-translated code; a
+// vararg mismatch there would corrupt the bridge). App code (x86_64) and
+// the module itself are the only callers that hit this hook, which is
+// exactly what we want.
+// ---------------------------------------------------------------------------
+static long MySyscall(long number, ...) {
+    BYTEHOOK_STACK_SCOPE();
+    MaybeInstallSeccompOnMainThread();
+
+    va_list ap;
+    va_start(ap, number);
+    long a0 = va_arg(ap, long);
+    long a1 = va_arg(ap, long);
+    long a2 = va_arg(ap, long);
+    long a3 = va_arg(ap, long);
+    long a4 = va_arg(ap, long);
+    long a5 = va_arg(ap, long);
+    va_end(ap);
+
+    if (g_anti_emu) {
+#if defined(__NR_openat)
+        if (number == __NR_openat) {
+            const char* path = (const char*)a1;
+            int flags = (int)a2;
+            if (path != nullptr && path[0] == '/' && (flags & O_ACCMODE) == O_RDONLY) {
+                ProcSpoofKind k = ClassifyProcPath(path);
+                if (k != kProcNone) {
+                    int fd = ServeProcFd(k, path);
+                    if (fd >= 0) return fd;
+                }
+            }
+            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+#endif
+#if defined(__NR_open)
+        if (number == __NR_open) {
+            const char* path = (const char*)a0;
+            int flags = (int)a1;
+            if (path != nullptr && path[0] == '/' && (flags & O_ACCMODE) == O_RDONLY) {
+                ProcSpoofKind k = ClassifyProcPath(path);
+                if (k != kProcNone) {
+                    int fd = ServeProcFd(k, path);
+                    if (fd >= 0) return fd;
+                }
+            }
+            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+#endif
+#if defined(__NR_faccessat)
+        if (number == __NR_faccessat) {
+            const char* path = (const char*)a1;
+            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+#endif
+#if defined(__NR_stat)
+        if (number == __NR_stat) {
+            const char* path = (const char*)a0;
+            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+#endif
+#if defined(__NR_lstat)
+        if (number == __NR_lstat) {
+            const char* path = (const char*)a0;
+            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+#endif
+#if defined(__NR_newfstatat)
+        if (number == __NR_newfstatat) {
+            const char* path = (const char*)a1;
+            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+#endif
+    }
+
+    // Fall through to the next hook (hide_fs::MySyscall on this chain, which
+    // handles CPU freq / interface hiding), then eventually the real syscall.
+    return BYTEHOOK_CALL_PREV(MySyscall, number, a0, a1, a2, a3, a4, a5);
+}
+
+// ---------------------------------------------------------------------------
+// property filter - AppsFlyer / Mintegral / AppDome-grade probes
 // ---------------------------------------------------------------------------
 
-// v2.9.6: if the CPU toggle is active, follow the user's CPU profile for
-// hardware-ish properties. Otherwise keep the previous kona fallbacks.
+// If the CPU toggle is active, follow the user's CPU profile for
+// hardware-ish properties. Otherwise keep the kona fallbacks. Same value
+// hide_props.cpp would produce, so the two layers stay consistent.
 static const char* CpuHwOr(const char* fallback) {
     if (!CpuSpoofActive()) return fallback;
     static std::string v;
@@ -581,17 +899,14 @@ static const char* CpuHwOr(const char* fallback) {
 }
 
 // Props whose value on MuMu is x86 but whose value on a genuine kona
-// (SM-G991B) device is ARM. Rewritten, not blanked: a blank reads as
-// "property missing", which is itself tamper evidence on a Samsung build.
+// (SM-G991B) is ARM. Rewritten, not blanked: a blank reads as "property
+// missing", which is itself tamper evidence on a Samsung build.
 //
-// v2.9.2: the CPU toggle's profile engine owns ro.hardware while
-// CpuSpoofActive() - hide_props.cpp spoofs it from the user's profile
-// (CpuSpoofHardware()). We defer so the profile value wins; when the CPU
-// toggle is off we still rewrite to the kona placeholder. The pure ABI
-// props below are NOT deferred: the anti-emu ARM story needs them, and the
-// abi toggle only owns them when anti-emu is off (documented in
-// spoofcore.kt - "the abi toggle owns the Java Build fields, anti-emu owns
-// the native side").
+// The CPU toggle's profile engine owns ro.hardware while CpuSpoofActive() -
+// hide_props.cpp spoofs it from the user's profile. We defer so the profile
+// value wins; when the CPU toggle is off we still rewrite to the kona
+// placeholder. The pure ABI props below are NOT deferred: the anti-emu ARM
+// story needs them, and the abi toggle only owns them when anti-emu is off.
 static const char* ArmAbiValue(const char* name) {
     static const char kAbi64[] = "arm64-v8a";
     static const char kAbiList[] = "arm64-v8a,armeabi-v7a,armeabi";
@@ -613,7 +928,7 @@ static const char* ArmAbiValue(const char* name) {
     if (strcmp(name, "ro.dalvik.vm.isa.arm") == 0) return "arm";
     if (strcmp(name, "ro.dalvik.vm.isa.arm64") == 0) return "arm64";
 
-    // v2.9.6: keep hardware props consistent with the active CPU profile.
+    // Hardware props follow the active CPU profile where applicable.
     if (strcmp(name, "ro.product.board") == 0) return CpuHwOr("exynos2100");
     if (strcmp(name, "ro.boot.hardware") == 0) return CpuHwOr("exynos2100");
     if (strcmp(name, "ro.hardware.egl") == 0) return CpuHwOr("exynos2100");
@@ -621,8 +936,8 @@ static const char* ArmAbiValue(const char* name) {
     if (strcmp(name, "ro.board.platform") == 0) return CpuHwOr("exynos2100");
     if (strcmp(name, "ro.hardware") == 0) return CpuHwOr("qcom");
 
-    // v2.9.6: root/debug and build-host leaks. HookAntiEmu already patches
-    // Java Build.HOST/USER; native reads need the same values.
+    // Root/debug and build-host leaks. HookAntiEmu already patches Java
+    // Build.HOST/USER; native reads need the same values.
     if (strcmp(name, "ro.build.host") == 0) return "SWDD5907";
     if (strcmp(name, "ro.build.user") == 0) return "dpi";
     if (strcmp(name, "service.adb.root") == 0) return "0";
@@ -661,17 +976,11 @@ static bool IsAntiEmuProp(const char* name) {
     for (const char* s : kPropSubstr) {
         if (strstr(name, s) != nullptr) return true;
     }
-
     return false;
 }
 
 static int MyPropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
-    // v2.9.2: gate on g_anti_emu BEFORE ArmAbiValue. In 2.9.1 the hardcoded
-    // kona values leaked into every process even with the ANTI-EMU toggle
-    // OFF, shadowing hide_props.cpp (installed one stage earlier, so our
-    // wrapper ran first in the bytehook chain) and breaking the CPU
-    // profile's ro.hardware plus the abi toggle's mode-driven ABI props.
     if (g_anti_emu && name != nullptr && value != nullptr) {
         if (const char* v = ArmAbiValue(name)) {
             size_t l = strlen(v);
@@ -815,8 +1124,14 @@ void InstallAntiEmuHooks() {
     if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so", "__system_property_foreach",
                               (void*)MyPropForeach, nullptr, nullptr)) okProp++;
 
-    Log("native: anti-emu hooks installed fs=%d/%d prop=%d/4 (runtime-gated)",
-        okFs, (int)(sizeof(kFsSpecs) / sizeof(kFsSpecs[0])), okProp);
+    int okSys = 0;
+    if (PAS_F_HOOK_SYSCALL) {
+        if (bytehook_hook_partial(CallerAllowHooks, nullptr, "libc.so", "syscall",
+                                  (void*)MySyscall, nullptr, nullptr)) okSys++;
+    }
+
+    Log("native: anti-emu hooks installed fs=%d/%d prop=%d/4 syscall=%d/1 (runtime-gated)",
+        okFs, (int)(sizeof(kFsSpecs) / sizeof(kFsSpecs[0])), okProp, okSys);
 }
 
 }  // namespace pas
