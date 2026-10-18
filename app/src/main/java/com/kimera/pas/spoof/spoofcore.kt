@@ -1,4 +1,4 @@
-// spoofcore.kt v2.9.1
+// spoofcore.kt v2.9.2
 
 package com.kimera.pas.spoof
 
@@ -20,6 +20,15 @@ import java.lang.reflect.Field
  * other toggle covers (os.version / os.name). For a coherent arm64 story
  * run with BOTH toggles ON: anti-emu owns the native side (props, /proc
  * content, uname), the abi toggle owns the Java Build fields.
+ *
+ * v2.9.2: init() now runs apply(prefs) SYNCHRONOUSLY before returning, so
+ * nativeSetCpu / nativeSetCpuClusters have landed before the target app's
+ * main thread can read /proc/cpuinfo. The old 5 s background re-apply left
+ * a race in which fast-starting x86_64 apps (e.g. the x86 build of
+ * DevCheck) read raw Intel cpuinfo before the cluster table was populated,
+ * causing DevCheck to report the host's cores as separate clusters instead
+ * of the spoofed ARM cluster layout. A short background re-apply loop
+ * remains for late-arriving native state.
  */
 object SpoofCore {
 
@@ -104,25 +113,45 @@ object SpoofCore {
     external fun nativeSetAntiEmu(on: Boolean)
 
     fun init(module: XposedModule) {
+        // v2.9.2: apply synchronously. This guarantees nativeSetCpu and
+        // nativeSetCpuClusters have run before init() returns, i.e. before
+        // the target app's main thread starts touching /proc/cpuinfo. The
+        // previous design launched a background thread whose first apply()
+        // could lose the race against fast-starting x86_64 apps, producing
+        // legacy-layout cpuinfo (host cores shown as separate clusters).
+        val prefs: SharedPreferences? = try {
+            module.getRemotePreferences(GROUP)
+        } catch (t: Throwable) {
+            Log.i(TAG, "[PAS] spoof: no remote prefs ($t) - defaults")
+            null
+        }
+        if (prefs == null) {
+            runCatching { nativeSetConfig(false, 0, false, 0, true, false) }
+            runCatching { nativeSetAntiEmu(false) }
+            return
+        }
+
+        // Synchronous first apply - no Thread wrapper, no sleep.
+        try {
+            apply(prefs)
+        } catch (t: Throwable) {
+            Log.w(TAG, "[PAS] spoof: sync apply failed: ${t.message}")
+        }
+
+        // Background short-retry loop: some native setters can land
+        // marginally after the sync apply returns (library load order, cold
+        // caches). Retry a handful of times with tiny sleeps - total extra
+        // latency ~250 ms instead of the previous 5 s.
         Thread({
-            val prefs: SharedPreferences? = try {
-                module.getRemotePreferences(GROUP)
-            } catch (t: Throwable) {
-                Log.i(TAG, "[PAS] spoof: no remote prefs ($t) - defaults")
-                null
-            }
-            if (prefs == null) {
-                runCatching { nativeSetConfig(false, 0, false, 0, true, false) }
-                runCatching { nativeSetAntiEmu(false) }
-            } else {
-                apply(prefs)
+            repeat(5) {
                 try {
-                    Thread.sleep(5000)
+                    Thread.sleep(50)
                 } catch (_: InterruptedException) {
+                    return@Thread
                 }
-                apply(prefs)
-                Log.i(TAG, "[PAS] spoof: remote prefs attached")
+                runCatching { apply(prefs) }
             }
+            Log.i(TAG, "[PAS] spoof: remote prefs attached")
         }, "pas-spoof").start()
     }
 

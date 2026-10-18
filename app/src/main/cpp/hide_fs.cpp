@@ -344,6 +344,52 @@ static bool CpuinfoKeyMatch(const char* line, const char* key) {
     return *p == ':';
 }
 
+// ---------------------------------------------------------------------------
+// v2.9.2: unified "how many cores does the spoofed layout have?" helper.
+//
+// The previous code decided between the synthetic-cluster rewrite and the
+// legacy per-block rewrite purely on CpuClusterTableSize() > 0. On the
+// emulator the cluster table is only populated once nativeSetCpuClusters()
+// has run. A fast-starting x86_64 app could therefore read /proc/cpuinfo
+// while the table was still empty, fall into the legacy path, and see the
+// host's N Intel cores as N separate ARM cores - which is exactly the
+// "x86 DevCheck shows separate cores, ARM DevCheck shows clusters" symptom.
+//
+// This helper prefers the populated table, but falls back to summing the
+// counts string ("2+4+2" -> 8) so a synthetic cluster layout can be built
+// the moment the profile is applied, even before the per-cluster spec has
+// finished landing.
+// ---------------------------------------------------------------------------
+static int ComputeSpoofTotalCores() {
+    int total = 0;
+    if (CpuClusterTableSize() > 0) {
+        for (int i = 0; i < CpuClusterTableSize(); i++) {
+            total += CpuClusterTable()[i].cores;
+        }
+    } else {
+        const char* cs = CpuSpoofClusters();
+        if (cs != nullptr) {
+            int cur = 0;
+            bool has = false;
+            for (const char* p = cs; *p != '\0'; p++) {
+                if (*p >= '0' && *p <= '9') {
+                    cur = cur * 10 + (*p - '0');
+                    has = true;
+                } else if (has) {
+                    total += cur;
+                    cur = 0;
+                    has = false;
+                }
+            }
+            if (has) total += cur;
+        }
+    }
+    // Keep in sync with PAS_CPU_MAX_CORES below: topology and cpuinfo
+    // must agree on the visible core count.
+    if (total > 16) total = 16;
+    return total;
+}
+
 static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
     const std::string model = CpuSpoofCpuinfoModel();
     const std::string features = CpuSpoofFeatures();
@@ -380,21 +426,22 @@ static void RewriteCpuinfoContent(const std::string& raw, std::string* out) {
         return;
     }
     out->append(raw, 0, first);
-    if (CpuClusterTableSize() > 0) {
+
+    // v2.9.2: use the unified total. This covers the window where the
+    // per-cluster table is not yet populated but the counts string is -
+    // the synthetic layout will use CpuSpoofPart / CpuSpoofFeatures for
+    // every core, which is still the right core count and cluster shape.
+    const int total = ComputeSpoofTotalCores();
+    if (total > 0) {
         // v2.5.9: synthesize exactly the spoofed core count, each block
         // carrying its own cluster's CPU part / variant / revision from the
         // catalog cluster spec. The host layout is ignored entirely - an
         // emulator or a different SoC can never leak through.
-        int total = 0;
-        for (int i = 0; i < CpuClusterTableSize(); i++) {
-            total += CpuClusterTable()[i].cores;
-        }
-        // Keep in sync with PAS_CPU_MAX_CORES below: topology and cpuinfo
-        // must agree on the visible core count.
-        if (total > 16) total = 16;
         char tmp[64];
         for (int core = 0; core < total; core++) {
-            const PasCpuCluster* cl = CpuClusterForCore(core, nullptr);
+            const PasCpuCluster* cl = (CpuClusterTableSize() > 0)
+                                          ? CpuClusterForCore(core, nullptr)
+                                          : nullptr;
             const char* cpart = (cl && cl->part[0] != '\0') ? cl->part : part.c_str();
             const char* crev = cl ? cl->revision : "";
             int variant = revVariant(crev);
@@ -1894,18 +1941,32 @@ static bool RdcLooksRaw(const char* p, size_t n) {
     if (n < 96) return false;
     if (memcmp(p, "processor", 9) != 0) return false;
     if (!RdcMemHas(p, n, "vendor_id") && !RdcMemHas(p, n, "model name")) return false;
-    if (!RdcMemHas(p, n, "GenuineIntel") && !RdcMemHas(p, n, "AuthenticAMD")) return false;
+    // v2.9.2: also recognize the QEMU/KVM vendor strings some hosts expose
+    // in place of the passthrough Intel/AMD text.
+    if (!RdcMemHas(p, n, "GenuineIntel") && !RdcMemHas(p, n, "AuthenticAMD") &&
+        !RdcMemHas(p, n, "QEMU") && !RdcMemHas(p, n, "KVM")) {
+        return false;
+    }
     if (!RdcMemHas(p, n, "cpu family") && !RdcMemHas(p, n, "stepping")) return false;
     return true;
 }
 
 static void RdcBuildFake() {
-    g_rdc_fake_ready = true;
+    // v2.9.2: do not cache a fake built from the legacy per-block path. The
+    // read fallback only fires when a raw x86 view slipped past the open
+    // hook; if we cached that legacy-layout result here, DevCheck would see
+    // the host cores as separate clusters forever. Defer until a cluster
+    // layout is actually available, so the next read builds the correct
+    // fake.
+    if (ComputeSpoofTotalCores() <= 0) return;
+
     std::string raw;
     if (!ReadWholeFile("/proc/cpuinfo", &raw)) return;
     std::string out;
     RewriteCpuinfoContent(raw, &out);
-    if (!out.empty()) g_rdc_fake = out;
+    if (out.empty()) return;
+    g_rdc_fake = out;
+    g_rdc_fake_ready = true;
 }
 
 static ssize_t MyRead(int fd, void* buf, size_t count) {
