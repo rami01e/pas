@@ -1,83 +1,18 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.4).
+// hide_antiemu.cpp - ANTI-EMU native layer (v2.9.6).
 //
-// v2.9.4 additions over v2.9.2 (AppDome hardening, evidence JJ capture):
-//  - ROOT-PATH ENOENT: the target access()-probed /system/xbin/su FOUR
-//    times in its first second (classic root check; MuMu ships su in
-//    /system/xbin). The standard root/artifact paths now answer ENOENT
-//    while ANTI-EMU is on. System callers never reach these wrappers
-//    (the bytehook caller filter excludes them), so nothing outside the
-//    scoped process is affected.
-//  - /proc/self/status (+ /proc/<own-pid>/status, task variants) is served
-//    with TracerPid zeroed - the standard anti-debug check.
-//  - /sys/fs/selinux/enforce is served as "1" - MuMu boots permissive and
-//    the enforcing state is a first-line RASP check.
-//  - /proc maps/mounts content filter tokens += kernelsu, trustme, hp15,
-//    javahelper (KernelSU manager, injected SSL module, MuMu sidecars).
-//
-// Masks the emulator fingerprints that bundled ad SDKs - and AppDome-grade
-// RASP inside protected games - probe outside the Java Build.* surface.
-//
-// Evidence base (MuMu 15 / MUMU15, June's Journey 4.15.6):
-//   - the ROM's own cpuinfo bind-mount FAILS in the game process:
-//     "nativebridge: Failed to bind-mount /system/etc/cpuinfo.x86_64.txt as
-//     /proc/cpuinfo" -> every reader sees real Intel cpuinfo
-//   - HP (MuMu game hook): "mAbi = x86_64"; ART: "Unexpected CPU variant
-//     for x86: x86_64" -> uname/abilist/isa props all say x86
-//   - 60 nemu*/nemud* props enumerate through __system_property_foreach
-//     even with get/find hooked (v2.9.0 gap)
-//   - com.mumu.* priv-app tmpfs mounts and houdini/libnb lines are visible
-//     in /proc/{self,<pid>}/{mounts,mountinfo} and {maps,smaps}
-//   - VMOSCloud (real ARM) passes AppDome because none of the above exist
-//     there; v2.9.1 closes exactly that delta.
-//
-// v2.9.1 additions over v2.9.0:
-//   - /proc CONTENT spoof engine: /proc/cpuinfo is served from a generated
-//     kona (SM8350) AArch64 cpuinfo; /proc/{self,<pid>}/{maps,smaps} and
-//     /proc/mounts, /proc/{self,<pid>}/{mounts,mountinfo,mountstats} are
-//     re-served line-filtered (nemu/mumu/houdini/xposed/magisk/frida/...).
-//     Both are delivered as a memfd returned by the open() family, so
-//     fopen/fread, read, pread, lseek, mmap and std::ifstream all see the
-//     clean content with zero per-read overhead and no fd bookkeeping.
-//   - ABI props are REWRITTEN, not blanked: ro.*.product.cpu.abi(list),
-//     ro.bionic.arch, ro.bionic.2nd_arch, ro.bionic.cpu_variant,
-//     ro.dalvik.vm.isa.arm{,64}, ro.board.platform, ro.hardware now answer
-//     with genuine kona values (blank = "prop missing" reads as tampering).
-//   - __system_property_foreach: emulator props vanish from enumeration.
-//   - __system_property_read_callback: sanitized too, so code holding a
-//     cached prop_info* cannot bypass the get/find hooks.
-//   - uname(2): machine x86_64/i386/i686 -> aarch64.
-//   - File-existence rules extended: houdini / ndk_translation / libnb /
-//     /system/lib{,64}/{arm,arm64,x86_64} trees + /com.mumu /com.nemu
-//     priv-app trees. x86/arm64 ENOENT rules apply ONLY under /system,
-//     /vendor, /apex, /odm, /product - never under /data/app/**, because
-//     the game's own lib/x86_64/*.so files must stay visible or integrity
-//     checks would flag the app itself as tampered.
-//
-// v2.9.2 fixes over v2.9.1 (CPU spoofing regression):
-//   - MyPropGet() consulted ArmAbiValue() WITHOUT the g_anti_emu gate. The
-//     anti-emu prop hook is installed LAST on __system_property_get (stage5b,
-//     after InstallPropSpoofHooks), so it runs FIRST and short-circuited
-//     ro.hardware -> "qcom", ro.board.platform -> "kona" and the
-//     ro.product.cpu.abi* / ro.bionic.* / ro.dalvik.vm.isa.arm* props to
-//     hardcoded arm64 values in EVERY process - even with the ANTI-EMU
-//     toggle OFF. That shadowed hide_props.cpp (one stage earlier: it could
-//     never win the chain) and broke the CPU profile's vendor value and the
-//     abi toggle's mode-driven ABI props. The rewrite is now gated on
-//     g_anti_emu; with the toggle OFF this whole layer is a pure
-//     pass-through, byte-for-byte 2.8.4 behavior on every surface.
-//   - /proc/cpuinfo ownership: while the CPU toggle is on, hide_fs.cpp's
-//     profile engine (ServeSysfsSpoofFd / RewriteCpuinfoContent) stays the
-//     single owner of /proc/cpuinfo, exactly as in 2.8.4 - the user's CPU
-//     name / vendor / core layout wins over the static kona text. Anti-emu
-//     only serves its generated cpuinfo when the CPU toggle is off.
-//   - ArmAbiValue() defers ro.hardware to the CPU engine while
-//     CpuSpoofActive() (hide_props spoofs it from the profile); the pure ABI
-//     props stay anti-emu's while its toggle is on, per the documented
-//     ownership split in spoofcore.kt.
-//
-// v2.9.0 history (kept): #include <jni.h> fix; MyFstatAt CALL_PREV casing;
-// O_TMPFILE varargs composite test; dmi/goldfish/ranchu/vbox/geny/nemu/mumu
-// path trees and prop substrings.
+// v2.9.6 changes over v2.9.4:
+//  - /proc/self/status: Seccomp, Seccomp_filters and NoNewPrivs are rewritten
+//    alongside TracerPid. MuMu runs the app with seccomp disabled; AppDome-grade
+//    RASP treats "Seccomp: 0" as an emulator/debug signal.
+//  - maps/mounts line filter: "nativebridge" and "vaddress" added. The old
+//    filter removed houdini/libnb but left libnativebridge*.so lines visible.
+//  - Root-path hiding: /data/adb/** prefix, and Magisk paths under /sbin,
+//    /bin, /system/bin, /system/xbin. JJ probes /sbin/.magisk, /bin/magiskhide,
+//    /sbin/magiskinit, etc.; those were not covered by the exact list.
+//  - Property consistency: ro.build.host, service.adb.root, ro.boot.hardware,
+//    ro.hardware.egl, ro.arch, ro.product.board, ro.board.platform and
+//    ro.hardware now follow the active CPU profile where applicable. This
+//    prevents "Exynos 2100 CPU profile + kona/Samsung props + MuMu host hash".
 //
 // Runtime-gated on g_anti_emu; the toggle is delivered from Kotlin via
 // nativeSetAntiEmu(). Caller filter is the standard module one
@@ -179,6 +114,20 @@ static bool IsAntiEmuPath(const char* path) {
     };
     for (const char* p : kExact) {
         if (strcmp(path, p) == 0) return true;
+    }
+
+    // v2.9.6: all children of /data/adb (modules, ksu, magisk, ...)
+    if (strncmp(path, "/data/adb/", 10) == 0) return true;
+
+    // v2.9.6: Magisk paths under common root locations. JJ probes
+    // /sbin/.magisk, /bin/magiskhide, /sbin/magiskinit, etc.
+    if (strncmp(path, "/sbin/", 6) == 0 ||
+        strncmp(path, "/bin/", 5) == 0 ||
+        strncmp(path, "/system/bin/", 12) == 0 ||
+        strncmp(path, "/system/xbin/", 13) == 0) {
+        if (strstr(path, "magisk") != nullptr || strstr(path, ".magisk") != nullptr) {
+            return true;
+        }
     }
 
     // Basename patterns (some ROMs relocate these or symlink them)
@@ -329,6 +278,7 @@ static int RawMemFd(const char* name) {
 static bool LineHasToken(const char* line, size_t len) {
     static const char* const kTokens[] = {
         "nemu", "mumu", "houdini", "libnb", "ndk_translation",
+        "nativebridge", "vaddress",
         "goldfish", "ranchu", "vbox", "geny", "qemu",
         "xposed", "edxposed", "lsposed", "zygisk", "magisk", "riru",
         "frida", "gadget", "dobby", "sandhook", "whale",
@@ -382,18 +332,24 @@ static void RewriteVersionArch(std::string& s) {
     }
 }
 
-// v2.9.4: zero every TracerPid field in a /proc/<self>/status body.
-static void ZeroTracerPid(std::string& s) {
-    static const char kKey[] = "TracerPid:";
-    size_t p = s.find(kKey);
-    while (p != std::string::npos) {
-        size_t q = p + sizeof(kKey) - 1;
-        while (q < s.size() && (s[q] == ' ' || s[q] == '\t')) q++;
-        size_t d = q;
-        while (d < s.size() && s[d] >= '0' && s[d] <= '9') d++;
-        if (d > q) s.replace(q, d - q, "0");
-        p = s.find(kKey, p + sizeof(kKey) - 1);
-    }
+// v2.9.6: set a "Key:\tvalue" field in /proc/self/status. Used for
+// TracerPid, Seccomp, Seccomp_filters and NoNewPrivs.
+static void SetStatusField(std::string& s, const char* key, const char* value) {
+    size_t p = s.find(key);
+    if (p == std::string::npos) return;
+    size_t e = s.find('\n', p);
+    if (e == std::string::npos) e = s.size();
+    size_t vstart = p + strlen(key);
+    while (vstart < e && (s[vstart] == ' ' || s[vstart] == '\t')) vstart++;
+    s.replace(vstart, e - vstart, value);
+}
+
+// v2.9.6: TracerPid zeroed, seccomp present, no_new_privs set.
+static void SanitizeStatus(std::string& s) {
+    SetStatusField(s, "TracerPid:", "0");
+    SetStatusField(s, "Seccomp:", "2");
+    SetStatusField(s, "Seccomp_filters:", "1");
+    SetStatusField(s, "NoNewPrivs:", "1");
 }
 
 static bool BuildFiltered(const char* path, std::string& out) {
@@ -447,7 +403,7 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
         content = "1\n";
     } else if (kind == kProcStatus) {
         if (!RawReadAll(path, content)) return -1;
-        ZeroTracerPid(content);
+        SanitizeStatus(content);
     } else if (kind == kProcVersion) {
         if (!RawReadAll(path, content)) return -1;
         RewriteVersionArch(content);
@@ -615,6 +571,15 @@ static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 // property filter - Appsflyer / Mintegral / AppDome-grade probes
 // ---------------------------------------------------------------------------
 
+// v2.9.6: if the CPU toggle is active, follow the user's CPU profile for
+// hardware-ish properties. Otherwise keep the previous kona fallbacks.
+static const char* CpuHwOr(const char* fallback) {
+    if (!CpuSpoofActive()) return fallback;
+    static std::string v;
+    v = CpuSpoofHardware();
+    return v.empty() ? fallback : v.c_str();
+}
+
 // Props whose value on MuMu is x86 but whose value on a genuine kona
 // (SM-G991B) device is ARM. Rewritten, not blanked: a blank reads as
 // "property missing", which is itself tamper evidence on a Samsung build.
@@ -633,7 +598,7 @@ static const char* ArmAbiValue(const char* name) {
     static const char kAbiList32[] = "armeabi-v7a,armeabi";
     const size_t n = strlen(name);
     if (n <= 3 || strncmp(name, "ro.", 3) != 0) return nullptr;
-    if (CpuSpoofActive() && strcmp(name, "ro.hardware") == 0) return nullptr;
+
     auto suffixIs = [&](const char* s) {
         size_t l = strlen(s);
         return n >= l && strcmp(name + (n - l), s) == 0;
@@ -647,8 +612,20 @@ static const char* ArmAbiValue(const char* name) {
     if (strcmp(name, "ro.bionic.cpu_variant") == 0) return "kryo";
     if (strcmp(name, "ro.dalvik.vm.isa.arm") == 0) return "arm";
     if (strcmp(name, "ro.dalvik.vm.isa.arm64") == 0) return "arm64";
-    if (strcmp(name, "ro.board.platform") == 0) return "kona";
-    if (strcmp(name, "ro.hardware") == 0) return "qcom";
+
+    // v2.9.6: keep hardware props consistent with the active CPU profile.
+    if (strcmp(name, "ro.product.board") == 0) return CpuHwOr("exynos2100");
+    if (strcmp(name, "ro.boot.hardware") == 0) return CpuHwOr("exynos2100");
+    if (strcmp(name, "ro.hardware.egl") == 0) return CpuHwOr("exynos2100");
+    if (strcmp(name, "ro.arch") == 0) return CpuHwOr("exynos2100");
+    if (strcmp(name, "ro.board.platform") == 0) return CpuHwOr("exynos2100");
+    if (strcmp(name, "ro.hardware") == 0) return CpuHwOr("qcom");
+
+    // v2.9.6: root/debug and build-host leaks. HookAntiEmu already patches
+    // Java Build.HOST/USER; native reads need the same values.
+    if (strcmp(name, "ro.build.host") == 0) return "SWDD5907";
+    if (strcmp(name, "ro.build.user") == 0) return "dpi";
+    if (strcmp(name, "service.adb.root") == 0) return "0";
     return nullptr;
 }
 
