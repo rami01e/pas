@@ -5,6 +5,7 @@ import io.github.libxposed.api.XposedModule
 import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
+import com.kimera.pas.pasClassLoader
 import com.kimera.pas.spoof.SpoofState
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -38,6 +39,45 @@ class HookSslUnpin : XHook {
 
     override val targetKlass: String
         get() = "okhttp3.CertificatePinner"
+
+    /**
+     * Resolve a class through the scoped app's own classloader first.
+     *
+     * The libxposed module classloader is isolated from the app's dex: it
+     * sees framework (boot) classes but NOT classes shipped in the app's
+     * APK. Every hook whose target lives in the app (okhttp3.*) therefore
+     * fails with ClassNotFoundException unless pasClassLoader - captured from
+     * onPackageReady - is used. Verified on com.twitter.android 12.35.0: the
+     * app ships okhttp3.CertificatePinner in its dex, yet the plain
+     * Class.forName lookup threw and the pinner hook silently disappeared
+     * (5/7 surfaces), so CertificatePinner kept throwing "Certificate
+     * pinning failure!" against the intercepted chain.
+     */
+    private fun resolveClass(name: String): Class<*> {
+        val loaders = ArrayList<ClassLoader?>(3)
+        loaders.add(pasClassLoader)
+        loaders.add(
+            try {
+                // Hidden API on purpose: use reflection like the rest of the
+                // module (android.app.ActivityThread is not in the SDK jar).
+                val at = Class.forName("android.app.ActivityThread")
+                val app = at.getMethod("currentApplication").invoke(null)
+                (app as? android.app.Application)?.classLoader
+            } catch (t: Throwable) {
+                null
+            }
+        )
+        loaders.add(javaClass.classLoader)
+        for (l in loaders) {
+            if (l == null) continue
+            try {
+                return Class.forName(name, false, l)
+            } catch (_: Throwable) {
+                // try the next loader
+            }
+        }
+        return Class.forName(name)
+    }
 
     /** Permissive trust manager: accepts every chain. Installed into every
      *  app SSLContext via the init hook below. */
@@ -75,7 +115,7 @@ class HookSslUnpin : XHook {
     private fun hookOkHttpPinner(module: XposedModule): Boolean {
         var any = false
         hookSafe(module, "ssl-pin okhttp CertificatePinner") {
-            val cls = Class.forName("okhttp3.CertificatePinner")
+            val cls = resolveClass("okhttp3.CertificatePinner")
             for (name in arrayOf("check", "check\$okhttp")) {
                 for (m in cls.declaredMethods) {
                     if (m.name != name) continue
@@ -103,7 +143,7 @@ class HookSslUnpin : XHook {
     private fun hookOkHostnameVerifier(module: XposedModule): Boolean {
         var any = false
         hookSafe(module, "ssl-pin OkHostnameVerifier") {
-            val cls = Class.forName("okhttp3.internal.tls.OkHostnameVerifier")
+            val cls = resolveClass("okhttp3.internal.tls.OkHostnameVerifier")
             for (m in cls.declaredMethods) {
                 if (m.name != "verify") continue
                 if (m.parameterTypes.size != 2) continue
@@ -129,7 +169,7 @@ class HookSslUnpin : XHook {
     private fun hookConscryptTrustManager(module: XposedModule): Boolean {
         var any = false
         hookSafe(module, "ssl-pin Conscrypt TrustManagerImpl") {
-            val cls = Class.forName("com.android.org.conscrypt.TrustManagerImpl")
+            val cls = resolveClass("com.android.org.conscrypt.TrustManagerImpl")
             for (m in cls.declaredMethods) {
                 if (m.name != "checkTrustedRecursive" && m.name != "verifyChain") continue
                 m.isAccessible = true
@@ -154,7 +194,7 @@ class HookSslUnpin : XHook {
     private fun hookNetworkSecurityTrustManager(module: XposedModule): Boolean {
         var any = false
         hookSafe(module, "ssl-pin NetworkSecurityTrustManager") {
-            val cls = Class.forName("android.security.net.config.NetworkSecurityTrustManager")
+            val cls = resolveClass("android.security.net.config.NetworkSecurityTrustManager")
             for (m in cls.declaredMethods) {
                 when (m.name) {
                     "checkServerTrusted" -> {
@@ -198,10 +238,10 @@ class HookSslUnpin : XHook {
     private fun hookHttpsHostnameVerifier(module: XposedModule): Boolean {
         var any = false
         hookSafe(module, "ssl-pin default HostnameVerifier") {
-            val cls = Class.forName("javax.net.ssl.HttpsURLConnection")
+            val cls = resolveClass("javax.net.ssl.HttpsURLConnection")
             val setDefault = cls.getMethod(
                 "setDefaultHostnameVerifier",
-                Class.forName("javax.net.ssl.HostnameVerifier")
+                resolveClass("javax.net.ssl.HostnameVerifier")
             )
             setDefault.isAccessible = true
             module.hook(setDefault).intercept { chain ->
@@ -219,7 +259,7 @@ class HookSslUnpin : XHook {
     private fun hookWebViewSslHandler(module: XposedModule): Boolean {
         var any = false
         hookSafe(module, "ssl-pin SslErrorHandler.cancel->proceed") {
-            val cls = Class.forName("android.webkit.SslErrorHandler")
+            val cls = resolveClass("android.webkit.SslErrorHandler")
             val cancel = cls.getDeclaredMethod("cancel")
             val proceed = cls.getDeclaredMethod("proceed")
             cancel.isAccessible = true
