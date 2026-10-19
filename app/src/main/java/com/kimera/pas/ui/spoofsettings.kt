@@ -22,7 +22,7 @@ object SpoofSettings {
     private val KEYS = arrayOf(
         "native_enabled", "safe_mode",
         "sdk_enabled", "sdk_value", "sdk_java_enabled",
-        "abi_enabled", "abi_value",
+        "abi_enabled", "abi_value", "abi_spoof_blacklist",
         "cpu_enabled", "cpu_value",
         "gpu_enabled", "gpu_value",
         "widevine_enabled", "widevine_id",

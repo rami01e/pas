@@ -35,6 +35,10 @@ object SpoofCore {
     private const val TAG = "PerAppSpoofer"
     const val GROUP = "pas_spoof"
 
+    /** Package of the scoped process, delivered from onPackageReady. Used by
+     *  the ABI-spoof blacklist (see [abiBlacklistMatches]). */
+    private var scopedPackage: String = ""
+
     // vNEXT: kernel identity reported by uname(2) and /proc/version. The
     // native anti-emu layer rewrites both; os.version uses the same release
     // so Java and native readers cannot disagree. Override per device if a
@@ -128,7 +132,8 @@ object SpoofCore {
     // anti-emu toggle. Default ON via adb_spoof_enabled.
     external fun nativeSetAdbSpoof(on: Boolean)
 
-    fun init(module: XposedModule) {
+    fun init(module: XposedModule, packageName: String) {
+        scopedPackage = packageName
         // v2.9.2: apply synchronously. This guarantees nativeSetCpu and
         // nativeSetCpuClusters have run before init() returns, i.e. before
         // the target app's main thread starts touching /proc/cpuinfo. The
@@ -176,6 +181,17 @@ object SpoofCore {
         val sdkOn = prefs.getBoolean("sdk_enabled", false)
         var sdkVal = prefs.getInt("sdk_value", 0)
         val abiOn = prefs.getBoolean("abi_enabled", false)
+        // vNEXT: per-app ABI-spoof blacklist. x86_64-only apps refuse to
+        // start when Build.SUPPORTED_ABIS claims an arm-only device (Play
+        // installs the x86_64 split, the app's own ABI gate then aborts).
+        // Listed packages keep every other spoof but see the real ABI list,
+        // in the Java Build fields and in the native uname/cpu-family hooks.
+        val abiBlacklistRaw = prefs.getString("abi_spoof_blacklist", "") ?: ""
+        val abiBlacklisted = abiBlacklistMatches(abiBlacklistRaw, scopedPackage)
+        val abiOnEff = abiOn && !abiBlacklisted
+        if (abiOn && abiBlacklisted) {
+            Log.i(TAG, "[PAS] spoof: abi spoof skipped for $scopedPackage (blacklist)")
+        }
         val abiMode = when (prefs.getString("abi_value", "x86_64")) {
             "arm64+armeabi" -> 1
             "arm64-v8a", "mixed" -> 2
@@ -324,7 +340,7 @@ object SpoofCore {
         }
 
         runCatching {
-            nativeSetConfig(useSdk, if (useSdk) sdkEff else 0, abiOn, abiMode, compat, nativeOn)
+            nativeSetConfig(useSdk, if (useSdk) sdkEff else 0, abiOnEff, abiMode, compat, nativeOn)
         }
 
         if (!nativeOn) return
@@ -350,7 +366,7 @@ object SpoofCore {
             patch(Build::class.java, "HARDWARE", cpuEntry.hardware, "HARDWARE")
             patch(Build::class.java, "BOARD", cpuEntry.hardware, "BOARD")
         }
-        if (abiOn) {
+        if (abiOnEff) {
             val abi = if (abiMode == 0) "x86_64" else "arm64-v8a"
             val abi2 = if (abiMode == 1) "armeabi-v7a" else "arm64-v8a"
             val all = when (abiMode) {
@@ -375,7 +391,23 @@ object SpoofCore {
             patch(Build::class.java, "SUPPORTED_32_BIT_ABIS", a32, "SUPPORTED_32_BIT_ABIS")
             runCatching { System.setProperty("os.arch", if (abiMode == 0) "x86_64" else "aarch64") }
         }
-        Log.i(TAG, "[PAS] spoof applied: sdk=$useSdk/$sdkEff abi=$abiOn mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat antiEmu=${SpoofState.antiEmuOn} java ok=$ok fail=$fail")
+        Log.i(TAG, "[PAS] spoof applied: sdk=$useSdk/$sdkEff abi=$abiOnEff mode=$abiMode cpu=$cpuOnEff gpu=$gpuOnEff compat=$compat antiEmu=${SpoofState.antiEmuOn} java ok=$ok fail=$fail")
+    }
+
+    /**
+     * Package-name blacklist for the ABI-list spoof. Accepts package names
+     * separated by newlines, commas, semicolons or spaces. A secondary
+     * process (pkg:suffix) matches its base package entry.
+     */
+    private fun abiBlacklistMatches(raw: String, pkg: String): Boolean {
+        if (raw.isBlank() || pkg.isEmpty()) return false
+        for (entry in raw.split('\n', ',', ';', ' ')) {
+            val e = entry.trim()
+            if (e.isEmpty()) continue
+            if (pkg == e) return true
+            if (pkg.startsWith("$e:")) return true
+        }
+        return false
     }
 
     /**

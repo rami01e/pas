@@ -38,6 +38,15 @@ static char g_sdk_release[8] = {0};
 static volatile bool g_abi_on = false;
 static volatile int g_abi_mode = 0;  // 0=x86_64 stock list / 1=arm64+armeabi / 2=arm64-v8a only
 
+// vNEXT: ABI-spoof state for other native layers (anti-emu uname). The ABI
+// toggle is the single owner of ABI identity, so a package on the ABI
+// blacklist (abiOn=false from Kotlin) must not get a spoofed uname.machine
+// either - otherwise an x86_64-only app still sees "aarch64" and refuses to
+// start.
+bool AbiSpoofActive() {
+    return g_abi_on;
+}
+
 // vNEXT: adb-root family (service.adb.root etc) - independent of the sdk/abi/
 // cpu toggles so the emulator/root tell is covered even with everything else
 // off. Delivered from Kotlin via nativeSetAdbSpoof() (default ON).

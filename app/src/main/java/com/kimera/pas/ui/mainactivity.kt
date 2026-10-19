@@ -92,6 +92,8 @@ class MainActivity : Activity() {
     private lateinit var sdkValue: TextView
     private lateinit var abiSw: SwitchView
     private lateinit var abiValue: TextView
+    private lateinit var abiBlacklistValue: TextView
+    private var abiBlacklistRaw: String = ""
     private lateinit var cpuSw: SwitchView
     private lateinit var cpuValue: TextView
     private lateinit var gpuSw: SwitchView
@@ -292,6 +294,30 @@ class MainActivity : Activity() {
         abiValue = valueTextView()
         valueRow(hwBody, true, abiSw, "CPU ABI", abiValue,
             { pickAbi() }, { cycleAbi() }, { clearAbi() })
+
+        // vNEXT: per-app ABI-spoof blacklist. Listed packages keep the real
+        // ABI list (Java Build fields + native uname/cpu-family) so x86_64-only
+        // apps still load, while every other spoof stays active.
+        abiBlacklistValue = valueTextView()
+        addRow(hwBody, false) {
+            val line = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                isClickable = true
+                setOnClickListener { editAbiBlacklist() }
+            }
+            line.addView(
+                TextView(this@MainActivity).apply {
+                    text = "ABI blacklist"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setTextColor(cText)
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            detachIfNeeded(abiBlacklistValue)
+            line.addView(abiBlacklistValue)
+            addView(line)
+        }
 
         cpuSw = SwitchView(this)
         cpuValue = valueTextView()
@@ -931,6 +957,45 @@ class MainActivity : Activity() {
         else -> "arm64-v8a"
     }
 
+    private fun editAbiBlacklist() {
+        val et = EditText(this).apply {
+            setText(abiBlacklistRaw)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.MONOSPACE
+            setTextColor(cText)
+            setSingleLine(false)
+            minLines = 4
+            maxLines = 10
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            hint = "com.example.game\ncom.example.tool"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("ABI blacklist (one package per line)")
+            .setView(et)
+            .setPositiveButton(
+                "OK",
+                DialogInterface.OnClickListener { _, _ ->
+                    abiBlacklistRaw = et.text.toString().trim()
+                    updateAbiBlacklistValue()
+                    updateDirty()
+                }
+            )
+            .setNegativeButton("Cancel", null as DialogInterface.OnClickListener?)
+            .show()
+    }
+
+    private fun updateAbiBlacklistValue() {
+        val entries = abiBlacklistRaw.split('\n', ',', ';', ' ')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        abiBlacklistValue.text =
+            if (entries.isEmpty()) "none" else "${entries.size} app(s)"
+        abiBlacklistValue.setTextColor(if (entries.isEmpty()) cText3 else cAmber)
+    }
+
     private fun updateAbiValue() {
         abiValue.text = abiModeLabel(abiModeSel)
     }
@@ -1288,6 +1353,8 @@ class MainActivity : Activity() {
         sdkSel = sdkIndexFor(sp.getInt("sdk_value", currentSdk))
         updateSdkValue()
         abiSw.checked = sp.getBoolean("abi_enabled", false)
+        abiBlacklistRaw = sp.getString("abi_spoof_blacklist", "") ?: ""
+        updateAbiBlacklistValue()
         abiModeSel = when (sp.getString("abi_value", "x86_64")) {
             "arm64+armeabi" -> 1
             "arm64-v8a", "mixed" -> 2
@@ -1338,6 +1405,7 @@ class MainActivity : Activity() {
         "anti_emu_enabled" to antiEmuSw.checked,
         "sdk_value" to sdkValueSelected(),
         "abi_enabled" to abiSw.checked,
+        "abi_spoof_blacklist" to abiBlacklistRaw.trim(),
         "abi_value" to when (abiModeSel) {
             1 -> "arm64+armeabi"
             2 -> "arm64-v8a"

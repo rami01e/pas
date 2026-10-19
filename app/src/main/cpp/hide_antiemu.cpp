@@ -1123,8 +1123,13 @@ static int MyPropForeach(void (*cb)(const prop_info*, void*), void* cookie) {
 static int MyUname(struct utsname* u) {
     int r = BYTEHOOK_CALL_PREV(MyUname, u);
     if (r == 0 && g_anti_emu && u != nullptr) {
-        if (strstr(u->machine, "x86") != nullptr || strstr(u->machine, "i386") != nullptr ||
-            strstr(u->machine, "i686") != nullptr) {
+        // vNEXT: the machine rewrite follows the ABI toggle (see
+        // AbiSpoofActive) so packages on the ABI blacklist keep the real
+        // x86_64 machine string and still load. Kernel identity below stays
+        // anti-emu owned.
+        if (AbiSpoofActive() &&
+            (strstr(u->machine, "x86") != nullptr || strstr(u->machine, "i386") != nullptr ||
+             strstr(u->machine, "i686") != nullptr)) {
             memset(u->machine, 0, sizeof(u->machine));
             snprintf(u->machine, sizeof(u->machine), "%s", "aarch64");
             static bool s_logged = false;

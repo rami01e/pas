@@ -112,7 +112,7 @@ class XposedInit : XposedModule() {
             } else {
                 log(Log.INFO, TAG, "[PAS] native addon disabled - library not loaded")
             }
-            runCatching { com.kimera.pas.spoof.SpoofCore.init(this) }
+            runCatching { com.kimera.pas.spoof.SpoofCore.init(this, param.packageName) }
         }, "pas-native-init").start()
     }
 }
