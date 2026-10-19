@@ -54,6 +54,9 @@ void StartInitWorker();
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled);
 
+// vNEXT: adb-root family prop spoof (service.adb.root etc, always-on layer)
+void SetAdbSpoof(bool on);
+
 // CPU model / GPU (OpenGL + Vulkan) spoof
 void SetCpuConfig(bool cpuOn, const char* display, const char* mfr, const char* model,
                   const char* part, const char* cpuInfoModel, const char* features, int minKHz,

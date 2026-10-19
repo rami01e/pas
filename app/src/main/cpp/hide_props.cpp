@@ -38,6 +38,11 @@ static char g_sdk_release[8] = {0};
 static volatile bool g_abi_on = false;
 static volatile int g_abi_mode = 0;  // 0=x86_64 stock list / 1=arm64+armeabi / 2=arm64-v8a only
 
+// vNEXT: adb-root family (service.adb.root etc) - independent of the sdk/abi/
+// cpu toggles so the emulator/root tell is covered even with everything else
+// off. Delivered from Kotlin via nativeSetAdbSpoof() (default ON).
+static volatile bool g_adb_spoof_on = false;
+
 void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compatMode,
                     bool nativeEnabled) {
     if (sdkVal < 21 || sdkVal > 45) sdkOn = false;
@@ -73,6 +78,12 @@ void SetSpoofConfig(bool sdkOn, int sdkVal, bool abiOn, int abiMode, bool compat
     // Releases the hook-installation worker: with the native addon disabled it
     // installs nothing at all; compat mode skips only the extended groups.
     SignalSpoofConfigReady(compatMode, nativeEnabled);
+}
+
+// vNEXT: adb-root family toggle.
+void SetAdbSpoof(bool on) {
+    g_adb_spoof_on = on;
+    Log("native: adb-root spoof %s", on ? "on (service.adb.root=0)" : "off");
 }
 
 static bool NameIn(const char* name, const char* const* list, size_t n) {
@@ -114,9 +125,18 @@ static bool IsSpoofTarget(const char* name) {
     // The SDK prop is only spoofed upward-safe: values below 35 break the
     // WebView provider (see spoofcore J1 note), so the native layer falls
     // back to the real value when the requested level is under the floor.
+    static const char* const kAdb[] = {
+        "service.adb.root",       // 1 = rooted/emulator adb (MuMu ships 1)
+        "service.adb.tcp.port",   // 5555 while ADB-over-TCP is armed
+        "persist.adb.tcp.port",
+        "ro.adb.secure",          // 0 on emulators / userdebug
+        "ro.secure",              // 0 on emulators / userdebug
+        "ro.debuggable",          // 1 on emulators / userdebug
+    };
     if (g_sdk_on && NameIn(name, kSdk, sizeof(kSdk) / sizeof(kSdk[0])) && g_sdk_val >= 35) return true;
     if (g_abi_on && NameIn(name, kAbi, sizeof(kAbi) / sizeof(kAbi[0]))) return true;
     if (CpuSpoofActive() && NameIn(name, kSoc, sizeof(kSoc) / sizeof(kSoc[0]))) return true;
+    if (g_adb_spoof_on && NameIn(name, kAdb, sizeof(kAdb) / sizeof(kAdb[0]))) return true;
     return false;
 }
 
@@ -129,7 +149,7 @@ static bool SetStr(char* out, size_t cap, size_t* outLen, const char* v) {
 }
 
 bool SpoofActive() {
-    return g_sdk_on || g_abi_on || CpuSpoofActive();
+    return g_sdk_on || g_abi_on || CpuSpoofActive() || g_adb_spoof_on;
 }
 
 // Recon value logging: while recon is on, record the RAW values (pre-spoof)
@@ -244,7 +264,8 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
 // Rewrites one "key=value" property pair for build.prop-style files. Returns
 // true with outVal filled when the key must present the spoofed value.
 bool SpoofRewritePropsLine(const char* key, const char* origVal, char* outVal, size_t cap) {
-    if (!key || !outVal || (!g_sdk_on && !g_abi_on && !CpuSpoofActive())) return false;
+    if (!key || !outVal ||
+        (!g_sdk_on && !g_abi_on && !CpuSpoofActive() && !g_adb_spoof_on)) return false;
     size_t rl = 0;
     return BuildSpoofValue(key, origVal ? origVal : "", outVal, cap, &rl);
 }
@@ -331,6 +352,14 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
             return SetStr(out, cap, outLen, CpuSpoofHardware().c_str());
         }
     }
+    if (g_adb_spoof_on) {
+        if (strcmp(name, "service.adb.root") == 0)     return SetStr(out, cap, outLen, "0");
+        if (strcmp(name, "service.adb.tcp.port") == 0) return SetStr(out, cap, outLen, "-1");
+        if (strcmp(name, "persist.adb.tcp.port") == 0) return SetStr(out, cap, outLen, "-1");
+        if (strcmp(name, "ro.adb.secure") == 0)        return SetStr(out, cap, outLen, "1");
+        if (strcmp(name, "ro.secure") == 0)            return SetStr(out, cap, outLen, "1");
+        if (strcmp(name, "ro.debuggable") == 0)        return SetStr(out, cap, outLen, "0");
+    }
     return false;
 }
 
@@ -343,7 +372,7 @@ int HidePropGet(const char* name, char* value) {
     if (ReconEnabled() && !ReconPropIgnored(name) && !ReconPropHitOnce("prop", name)) {
         ReconNote("prop", name, 0);
     }
-    const bool active = g_sdk_on || g_abi_on || CpuSpoofActive();
+    const bool active = g_sdk_on || g_abi_on || CpuSpoofActive() || g_adb_spoof_on;
     if (!name || !value || !active || !IsSpoofTarget(name)) {
         int r = BYTEHOOK_CALL_PREV(HidePropGet, name, value);
         if (value != nullptr && value[0] != '\0') ReconPropValue(name, value);
@@ -381,7 +410,8 @@ static void SpoofReadCb(void* cookie, const char* name, const char* value, uint3
     }
     ReconPropValue(name, value);
     auto* ctx = (ReadCbCtx*)cookie;
-    if (name && ((g_sdk_on || g_abi_on || CpuSpoofActive()) && IsSpoofTarget(name))) {
+    if (name &&
+        ((g_sdk_on || g_abi_on || CpuSpoofActive() || g_adb_spoof_on) && IsSpoofTarget(name))) {
         char repl[PROP_VALUE_MAX];
         size_t rl = 0;
         if (BuildSpoofValue(name, value ? value : "", repl, sizeof(repl), &rl)) {
@@ -394,7 +424,7 @@ static void SpoofReadCb(void* cookie, const char* name, const char* value, uint3
 
 int HidePropReadCb(const prop_info* pi, PropReadCallback cb, void* cookie) {
     BYTEHOOK_STACK_SCOPE();
-    if (!cb || (!g_sdk_on && !g_abi_on && !CpuSpoofActive())) {
+    if (!cb || (!g_sdk_on && !g_abi_on && !CpuSpoofActive() && !g_adb_spoof_on)) {
         // Spoofing disabled: pass the callback through untouched so the hook
         // is invisible even to aggressive native code.
         return BYTEHOOK_CALL_PREV(HidePropReadCb, pi, cb, cookie);
@@ -460,4 +490,11 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetConfig(JNIEnv* env, jobject thiz,
     pas::SetSpoofConfig(sdkOn == JNI_TRUE, (int)sdkVal, abiOn == JNI_TRUE,
                         (int)abiMode, compatMode == JNI_TRUE,
                         nativeEnabled == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetAdbSpoof(JNIEnv* env, jobject thiz, jboolean on) {
+    (void)env;
+    (void)thiz;
+    pas::SetAdbSpoof(on == JNI_TRUE);
 }

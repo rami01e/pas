@@ -1,4 +1,4 @@
-//pas.cpp v2.9.0
+//pas.cpp v2.11.0
 // PerAppSpoofer native layer (libpas.so)
 //
 // Hides VPN (tun0-style) interfaces from the scoped app process on all
@@ -686,6 +686,12 @@ static void* InitWorker(void* arg) {
     InstallVulkanHooks();
     InstallVulkanInlineBackstop();
     Log("native: stage0g gpu identity hooks installed early (runtime-gated)");
+    // vNEXT: net hooks (connect-refusal + setsockopt hiding) depend on NO
+    // config - their port/name lists are static. Install them pre-config so
+    // detectors that probe loopback ports during startup (RKN Hardering does)
+    // cannot outrun the hooks. Previously installed at stage5.
+    InstallNetHooks();
+    Log("native: stage0n net hooks installed early (config-independent)");
 
     // The Kotlin side delivers the configuration first: with the native addon
     // disabled nothing is installed at all (module behaves like the original,
@@ -746,10 +752,9 @@ static void* InitWorker(void* arg) {
     } else {
         Log("native: ssl-arm64 hooks skipped");
     }
-    // setsockopt (SO_BINDTODEVICE hiding) is a core hiding primitive and stays
-    // on in every mode, including compatibility mode.
-    InstallNetHooks();
-    Log("native: stage5 net hooks");
+    // vNEXT: net hooks moved to stage0n (config-independent; see stage0g
+    // block above). Nothing left to install here.
+    Log("native: stage5 net hooks already installed at stage0n");
 
     if (!compat) {
         InstallNetlinkHooks();

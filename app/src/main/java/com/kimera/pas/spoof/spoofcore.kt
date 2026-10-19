@@ -112,6 +112,11 @@ object SpoofCore {
     // owner of the Java ABI fields.
     external fun nativeSetAntiEmu(on: Boolean)
 
+    // vNEXT: adb-root family prop spoof (service.adb.root / ro.adb.secure / ...).
+    // Lives in the always-on prop layer (hide_props.cpp), independent of the
+    // anti-emu toggle. Default ON via adb_spoof_enabled.
+    external fun nativeSetAdbSpoof(on: Boolean)
+
     fun init(module: XposedModule) {
         // v2.9.2: apply synchronously. This guarantees nativeSetCpu and
         // nativeSetCpuClusters have run before init() returns, i.e. before
@@ -205,6 +210,10 @@ object SpoofCore {
         runCatching { nativeSetNetCellular(SpoofState.netCellular) }
         runCatching { nativeSetAntiEmu(SpoofState.antiEmuOn) }
         if (SpoofState.antiEmuOn) applyAntiEmuJavaExtras()
+        // vNEXT: adb-root family (default ON) - service.adb.root=1 is an
+        // emulator/root tell; spoof it at the always-on prop layer so it no
+        // longer depends on anti_emu_enabled.
+        runCatching { nativeSetAdbSpoof(prefs.getBoolean("adb_spoof_enabled", true)) }
 
         val procName = try {
             java.io.File("/proc/self/cmdline").readText().replace('\u0000', ' ')

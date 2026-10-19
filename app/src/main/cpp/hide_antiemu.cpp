@@ -940,7 +940,9 @@ static const char* ArmAbiValue(const char* name) {
     // Build.HOST/USER; native reads need the same values.
     if (strcmp(name, "ro.build.host") == 0) return "SWDD5907";
     if (strcmp(name, "ro.build.user") == 0) return "dpi";
-    if (strcmp(name, "service.adb.root") == 0) return "0";
+    // vNEXT: service.adb.root moved to hide_props.cpp (always-on adb-root
+    // family, armed via nativeSetAdbSpoof) so it no longer depends on the
+    // anti-emu toggle.
     return nullptr;
 }
 

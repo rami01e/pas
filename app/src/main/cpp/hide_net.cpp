@@ -53,8 +53,13 @@ static bool IsProxyPort(unsigned short port) {
         1081,   // SOCKS5 alt
         1087,   // SOCKS5 alt
         1088,   // SOCKS5 alt
+        3127,   // Squid alt (RKN Hardering probe list)
         3128,   // Squid HTTP
         4444,   // various tunnels
+        5555,   // ADB over TCP - MuMu guest adbd listens here (emulator tell)
+        8000,   // HTTP dev proxy (RKN Hardering probe list)
+        9000,   // misc admin/tunnel port (RKN Hardering probe list)
+        9150,   // Tor SOCKS alt (RKN Hardering probe list)
         7890,   // Clash HTTP
         7891,   // Clash SOCKS
         7892,   // Clash HTTPs
@@ -159,7 +164,7 @@ int HideSetSockOpt(int fd, int level, int optname, const void* optval, socklen_t
             }
         }
     }
-    return BYTEHOOK_CALL_PREV(HideSetSockOpt, fd, level, optname, optval, optlen);
+    return BYTEHOOK_CALL_PREV(HideSetSockOpt, fd, level, optname, optlen);
 }
 
 void InstallNetHooks() {
