@@ -158,6 +158,13 @@ static void HookSslSym(const char* sym, void* proxy) {
         "webviewchromium", "monochrome",        // chromium webview TLS (v2.3.4)
         "chromium",                             // generic chromium libs
         "mbedtls", "gnutls",                    // alternate TLS stacks
+        "cronet",                               // libcronet.so. Honest note: stock
+                                               // Cronet hides its statically linked
+                                               // BoringSSL, so this only fires for
+                                               // custom builds that export the
+                                               // symbols; stock Cronet is only
+                                               // reachable by the arm64 leg's
+                                               // pattern path.
     };
     for (size_t i = 0; i < sizeof(kOwners) / sizeof(kOwners[0]); i++) {
         bytehook_hook_partial(CallerAllowHooks, nullptr, kOwners[i], sym, proxy, OnSslHooked,
@@ -194,7 +201,7 @@ void InstallSslHooks() {
     HookSslSym("X509_verify_cert", (void*)MyX509VerifyCert);
     HookSslSym("X509_STORE_CTX_get_error", (void*)MyX509StoreCtxGetError);
     HookSslSym("X509_STORE_CTX_set_error", (void*)MyX509StoreCtxSetError);
-    Log("native: ssl unpin hooks installed (verify=NONE, owners=ssl/crypto/boring/webviewchromium/monochrome/chromium/mbedtls/gnutls)");
+    Log("native: ssl unpin hooks installed (verify=NONE, owners=ssl/crypto/boring/webviewchromium/monochrome/chromium/mbedtls/gnutls/cronet)");
 }
 
 void SetSslUnpin(bool on) {
