@@ -1,4 +1,4 @@
-// hide_net.cpp — socket-level network hiding.
+// hide_net.cpp v2.11.0 - socket-level network hiding.
 //
 // Two mechanisms:
 //   1. setsockopt(SO_BINDTODEVICE / SO_BINDTOIFINDEX) is filtered so the
@@ -164,7 +164,7 @@ int HideSetSockOpt(int fd, int level, int optname, const void* optval, socklen_t
             }
         }
     }
-    return BYTEHOOK_CALL_PREV(HideSetSockOpt, fd, level, optname, optlen);
+    return BYTEHOOK_CALL_PREV(HideSetSockOpt, fd, level, optname, optval, optlen);
 }
 
 void InstallNetHooks() {
