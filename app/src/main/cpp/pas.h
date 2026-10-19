@@ -142,6 +142,11 @@ void InstallAntiEmuHooks();
 void SetAntiEmu(bool on);
 bool AntiEmuEnabled();
 
+// vNEXT: kernel identity for native readers (uname release/version and the
+// /proc/version body). Values must stay consistent with the Java os.version
+// spoof so signal collectors cannot cross-reference a mismatch.
+void SetAntiEmuKernel(bool on, const char* release, const char* version);
+
 void SetRecon(bool on);
 bool ReconEnabled();
 int WebRtcMode();
@@ -177,6 +182,13 @@ bool SslUnpinActive();
 void InstallSslArm64Hooks();
 void SetSslArm64(bool on);
 bool SslArm64Active();
+
+// vNEXT: x86_64 static-SSL verdict patch. Pattern-locates the hidden
+// BoringSSL verify entry point inside statically linked carriers
+// (libflutter.so) and rewrites its entry to a constant-return stub. Covers
+// the one class the PLT engine cannot reach: no exported symbols, no PLT
+// call. No-op on non-x86_64 ABIs.
+void InstallSslX64Patch();
 
 void TrackNetlinkFd(int fd, int protocol);
 ssize_t FilterNetlinkRecv(int fd, void* buf, ssize_t len);

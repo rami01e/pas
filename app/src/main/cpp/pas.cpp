@@ -752,6 +752,14 @@ static void* InitWorker(void* arg) {
     } else {
         Log("native: ssl-arm64 hooks skipped");
     }
+    // vNEXT: x86_64 static-SSL verdict pass. Pattern-locates the hidden
+    // BoringSSL verify entry (libflutter.so class of carriers) and rewrites
+    // it to a constant-return stub - the one pinning case the PLT engine
+    // cannot reach on this ABI. No-op on arm64/x86.
+    if (SslUnpinActive()) {
+        InstallSslX64Patch();
+        Log("native: stage4f ssl-x64 verdict pass");
+    }
     // vNEXT: net hooks moved to stage0n (config-independent; see stage0g
     // block above). Nothing left to install here.
     Log("native: stage5 net hooks already installed at stage0n");

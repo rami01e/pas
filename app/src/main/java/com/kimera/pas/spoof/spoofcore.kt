@@ -35,6 +35,13 @@ object SpoofCore {
     private const val TAG = "PerAppSpoofer"
     const val GROUP = "pas_spoof"
 
+    // vNEXT: kernel identity reported by uname(2) and /proc/version. The
+    // native anti-emu layer rewrites both; os.version uses the same release
+    // so Java and native readers cannot disagree. Override per device if a
+    // specific profile needs an exact vendor string.
+    private const val ANTI_EMU_KERNEL_RELEASE = "5.4.163-perf+"
+    private const val ANTI_EMU_KERNEL_VERSION = "#1 SMP PREEMPT Tue Oct 15 09:12:33 UTC 2024"
+
     external fun nativeSetConfig(
         sdkOn: Boolean,
         sdkVal: Int,
@@ -105,6 +112,10 @@ object SpoofCore {
     external fun nativeSetSslUnpin(on: Boolean)
 
     external fun nativeSetSslArm64(on: Boolean)
+
+    // vNEXT: kernel identity for native readers (uname release/version and
+    // /proc/version). Must match the Java os.version spoof below.
+    external fun nativeSetKernelSpoof(on: Boolean, release: String, version: String)
 
     // v2.9.0: master switch for the native ANTI-EMU layer (hide_antiemu.cpp).
     // Java-side extras live in applyAntiEmuJavaExtras(); there is deliberately
@@ -209,6 +220,13 @@ object SpoofCore {
         SpoofState.netCellularNative = SpoofState.netCellular
         runCatching { nativeSetNetCellular(SpoofState.netCellular) }
         runCatching { nativeSetAntiEmu(SpoofState.antiEmuOn) }
+        runCatching {
+            nativeSetKernelSpoof(
+                SpoofState.antiEmuOn,
+                ANTI_EMU_KERNEL_RELEASE,
+                ANTI_EMU_KERNEL_VERSION
+            )
+        }
         if (SpoofState.antiEmuOn) applyAntiEmuJavaExtras()
         // vNEXT: adb-root family (default ON) - service.adb.root=1 is an
         // emulator/root tell; spoof it at the always-on prop layer so it no
@@ -372,7 +390,7 @@ object SpoofCore {
      */
     private fun applyAntiEmuJavaExtras() {
         runCatching {
-            System.setProperty("os.version", "5.4.163-perf+")
+            System.setProperty("os.version", ANTI_EMU_KERNEL_RELEASE)
             System.setProperty("os.name", "Linux")
         }.onFailure {
             Log.w(TAG, "[PAS] spoof: anti-emu java extras failed: ${it.message}")

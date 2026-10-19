@@ -105,6 +105,27 @@ static const bool PAS_F_HOOK_SYSCALL      = true;
 // ---------------------------------------------------------------------------
 static volatile bool g_anti_emu = false;
 
+// vNEXT: kernel identity shown to native readers. MuMu's real values
+// (release "6.1.90-perf+", version "#2 SMP PREEMPT_DYNAMIC Wed Aug 26
+// 07:46:48 UTC 2026") are among the strongest emulator tells a signal SDK
+// can collect: Prelude/DroidGuard read them through uname(2) and
+// /proc/version, where the Java os.version spoof is invisible. Kept in sync
+// with the Java os.version value in spoofcore.kt by construction.
+static volatile bool g_kernel_spoof = true;
+static char g_kernel_release[65] = "5.4.163-perf+";
+static char g_kernel_version[65] = "#1 SMP PREEMPT Tue Oct 15 09:12:33 UTC 2024";
+
+void SetAntiEmuKernel(bool on, const char* release, const char* version) {
+    g_kernel_spoof = on;
+    if (release != nullptr && release[0] != '\0') {
+        snprintf(g_kernel_release, sizeof(g_kernel_release), "%s", release);
+    }
+    if (version != nullptr && version[0] != '\0') {
+        snprintf(g_kernel_version, sizeof(g_kernel_version), "%s", version);
+    }
+    Log("native: anti-emu kernel spoof=%d release=%s", (int)on, g_kernel_release);
+}
+
 // Seccomp per-thread install state.
 static __thread bool t_seccomp_installed = false;
 static __thread bool t_seccomp_failed    = false;
@@ -524,6 +545,31 @@ static void RewriteVersionArch(std::string& s) {
     }
 }
 
+// vNEXT: full kernel identity rewrite for /proc/version. The body looks like
+//   Linux version <release> (<builder>) (<compiler>) #<N> SMP ... <date>
+// Replace the release token and everything from the " #" version marker to
+// the end of the line, so the file agrees with uname(2) (MyUname) and with
+// the Java os.version spoof instead of leaking MuMu's 6.1.90-perf+ / "#2 SMP
+// PREEMPT_DYNAMIC Wed Aug 26 07:46:48 UTC 2026".
+static void RewriteKernelIdentity(std::string& s) {
+    const std::string kPrefix = "Linux version ";
+    size_t p = s.find(kPrefix);
+    if (p != std::string::npos) {
+        size_t rs = p + kPrefix.size();
+        size_t re = s.find(' ', rs);
+        if (re != std::string::npos && re > rs) {
+            s.replace(rs, re - rs, g_kernel_release);
+        }
+    }
+    size_t vpos = s.find(" #");
+    if (vpos != std::string::npos) {
+        size_t eol = s.find('\n', vpos);
+        if (eol == std::string::npos) eol = s.size();
+        s.replace(vpos + 1, eol - (vpos + 1), g_kernel_version);
+    }
+    RewriteVersionArch(s);
+}
+
 static void SetStatusField(std::string& s, const char* key, const char* value) {
     size_t p = s.find(key);
     if (p == std::string::npos) return;
@@ -610,7 +656,7 @@ static int ServeProcFd(ProcSpoofKind kind, const char* path) {
         SanitizeStatus(content);
     } else if (kind == kProcVersion) {
         if (!RawReadAll(path, content)) return -1;
-        RewriteVersionArch(content);
+        RewriteKernelIdentity(content);
     } else {
         if (!BuildFiltered(kind, path, content)) return -1;
     }
@@ -1087,6 +1133,19 @@ static int MyUname(struct utsname* u) {
                 Log("native: anti-emu uname machine -> aarch64");
             }
         }
+        // vNEXT: release/version carry the emulator kernel (6.1.90-perf+ /
+        // "#2 SMP PREEMPT_DYNAMIC ..."). Native collectors read them here,
+        // bypassing every Java-side spoof, so rewrite both fields too.
+        if (g_kernel_spoof) {
+            snprintf(u->release, sizeof(u->release), "%s", g_kernel_release);
+            snprintf(u->version, sizeof(u->version), "%s", g_kernel_version);
+            static bool s_klogged = false;
+            if (!s_klogged) {
+                s_klogged = true;
+                Log("native: anti-emu uname release/version -> %s / %s", g_kernel_release,
+                    g_kernel_version);
+            }
+        }
     }
     return r;
 }
@@ -1143,4 +1202,19 @@ Java_com_kimera_pas_spoof_SpoofCore_nativeSetAntiEmu(JNIEnv* env, jobject thiz, 
     (void)env;
     (void)thiz;
     pas::SetAntiEmu(on == JNI_TRUE);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_kimera_pas_spoof_SpoofCore_nativeSetKernelSpoof(JNIEnv* env, jobject thiz,
+                                                         jboolean on,
+                                                         jstring release,
+                                                         jstring version) {
+    (void)thiz;
+    const char* rel = nullptr;
+    const char* ver = nullptr;
+    if (release != nullptr) rel = env->GetStringUTFChars(release, nullptr);
+    if (version != nullptr) ver = env->GetStringUTFChars(version, nullptr);
+    pas::SetAntiEmuKernel(on == JNI_TRUE, rel, ver);
+    if (rel != nullptr) env->ReleaseStringUTFChars(release, rel);
+    if (ver != nullptr) env->ReleaseStringUTFChars(version, ver);
 }
