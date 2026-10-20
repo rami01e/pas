@@ -27,13 +27,41 @@ jobs:
         run: chmod +x ./gradlew
 
       - name: Set up NDK and CMake
+        timeout-minutes: 15
         run: |
           set -e
-          rm -rf "$ANDROID_HOME/ndk/27.0.12077973"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;27.0.12077973" "cmake;3.22.1" > /dev/null
-          test -f "$ANDROID_HOME/ndk/27.0.12077973/source.properties" || {
-            echo "NDK install verification failed"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          NDK_DIR="$ANDROID_HOME/ndk/27.0.12077973"
+          CMAKE_DIR="$ANDROID_HOME/cmake/3.22.1"
+
+          if [ -f "$NDK_DIR/source.properties" ]; then
+            echo "NDK present, skipping download: $(grep -i '^Pkg.Revision' "$NDK_DIR/source.properties" || true)"
+          else
+            echo "NDK missing - installing with retries"
+            yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+            for i in 1 2 3; do
+              if timeout 420 "$SDKMANAGER" --install "ndk;27.0.12077973" > /tmp/ndk-install.log 2>&1; then break; fi
+              echo "attempt $i failed:"; tail -n 20 /tmp/ndk-install.log || true
+              sleep 15
+            done
+          fi
+
+          if [ -d "$CMAKE_DIR" ]; then
+            echo "CMake 3.22.1 present, skipping download"
+          else
+            for i in 1 2 3; do
+              if timeout 240 "$SDKMANAGER" --install "cmake;3.22.1" > /tmp/cmake-install.log 2>&1; then break; fi
+              echo "attempt $i failed:"; tail -n 20 /tmp/cmake-install.log || true
+              sleep 15
+            done
+          fi
+
+          test -f "$NDK_DIR/source.properties" || {
+            echo "NDK install verification failed (ndk;27.0.12077973 not present)"
+            exit 1
+          }
+          test -d "$CMAKE_DIR" || {
+            echo "CMake install verification failed (cmake;3.22.1 not present)"
             exit 1
           }
 
