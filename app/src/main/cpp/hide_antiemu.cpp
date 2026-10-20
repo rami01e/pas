@@ -1,28 +1,4 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (v2.12.7).
-//
-// v2.12.7 changes over v2.10.2 (com.playnearn / RootBeer-style capture):
-//
-//  - SuperSU / Superuser daemon family masked. The target's dex carries the
-//    full RootBeer vocabulary: checkForBinary() walks Const.suPaths + $PATH
-//    probing for "su", "daemonsu", "supersu", "superuser", "sugote",
-//    "busybox", "magisk", "xposed". The kExact list already covered
-//    su/busybox/magisk but had NO daemonsu entry and none of the SuperSU
-//    daemon markers (.has_su_daemon, .installed_su_daemon,
-//    99SuperSUDaemon, /system/bin/.ext/.su, sugote). All of them are ENOENT
-//    now, and a basename rule keeps the family covered wherever it is
-//    repackaged under the classic root prefixes.
-//
-//  - /system/usr/we-need-root (a RootBeer suPaths entry) and
-//    /system/xbin/which (RootBeer's checkSuExists execs
-//    "/system/xbin/which su"; a stock user build ships no /system/xbin at
-//    all) hidden.
-//
-//  - /proc/mounts, /proc/self/mounts, mountinfo: the rw mount option is
-//    rewritten to ro for the classic root partitions (/system,
-//    /system/bin, /system/xbin, /sbin, ...). RootBeer-style
-//    checkForRWPaths parsers treat any rw on those mount points as root.
-//    /data is deliberately left untouched - it is rw on every real device
-//    too, so rewriting it would be the anomaly.
+// hide_antiemu.cpp - ANTI-EMU native layer (v2.10.2).
 //
 // v2.9.7 changes over v2.9.6:
 //
@@ -101,7 +77,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 #include <string>
 #include <sys/prctl.h>
 #include <sys/stat.h>
@@ -303,36 +278,6 @@ static bool IsAntiEmuPath(const char* path) {
         "/system/bin/ksud",
         "/cache/magisk.log",
 
-        // v2.12.7: SuperSU daemon + Superuser family (RootBeer
-        // checkForBinary / knownRootAppsFiles vocabulary).
-        "/system/xbin/daemonsu",
-        "/system/bin/daemonsu",
-        "/sbin/daemonsu",
-        "/data/local/daemonsu",
-        "/su/bin/daemonsu",
-        "/system/bin/.ext",
-        "/system/bin/.ext/.su",
-        "/system/bin/.ext/su",
-        "/system/bin/failsafe/su",
-        "/system/usr/we-need-root",
-        "/system/usr/we-need-root/su-backup",
-        "/system_ext/bin/su",
-        "/cache/su",
-        "/data/su",
-        "/dev/su",
-        "/su/bin/sugote",
-        "/system/xbin/sugote-mksh",
-        "/system/xbin/supersu",
-        "/system/xbin/superuser",
-        "/system/etc/init.d/99SuperSUDaemon",
-        "/system/etc/.has_su_daemon",
-        "/system/etc/.installed_su_daemon",
-        "/system/app/.installed_su_daemon",
-        "/system/app/Superuser.apk.placeholder",
-        // RootBeer checkSuExists() execs /system/xbin/which su; stock user
-        // builds ship no /system/xbin at all.
-        "/system/xbin/which",
-
         // Writability-probe targets
         "/data/local/tmp",
         "/debug_ramdisk",
@@ -345,10 +290,6 @@ static bool IsAntiEmuPath(const char* path) {
     // All children of /data/adb (modules, ksu, magisk, ...)
     if (strncmp(path, "/data/adb/", 10) == 0) return true;
 
-    // v2.12.7: children of the legacy we-need-root dir (RootBeer suPaths
-    // entry "/system/usr/we-need-root/" - su-backup and friends).
-    if (StartsWithPrefixSeg(path, "/system/usr/we-need-root", 24)) return true;
-
     // Magisk paths under common root locations (JJ probes /sbin/.magisk,
     // /bin/magiskhide, /sbin/magiskinit, etc.)
     if (strncmp(path, "/sbin/", 6) == 0 ||
@@ -357,34 +298,6 @@ static bool IsAntiEmuPath(const char* path) {
         strncmp(path, "/system/xbin/", 13) == 0) {
         if (strstr(path, "magisk") != nullptr || strstr(path, ".magisk") != nullptr) {
             return true;
-        }
-    }
-
-    // v2.12.7: root-tool basenames under the RootBeer suPaths roots.
-    // checkForBinary("su"|"busybox"|"magisk") probes every suPaths entry
-    // plus $PATH, and repackaged daemons/supersu/sugote land in the same
-    // places. Match the basename exactly (case-insensitive) so only the
-    // tool file itself vanishes - never an app data dir that merely
-    // contains the token mid-path.
-    static const char* const kRootPrefixes[] = {
-        "/data/local/", "/sbin/", "/su/bin/", "/system/bin/", "/system/xbin/",
-        "/system/sd/", "/system/usr/", "/system_ext/bin/", "/system_ext/odm/bin/",
-        "/cache/", "/data/", "/dev/",
-        "/vendor/bin/", "/odm/bin/", "/product/bin/",
-    };
-    for (const char* pref : kRootPrefixes) {
-        size_t pl = strlen(pref);
-        if (strncmp(path, pref, pl) != 0) continue;
-        const char* slash = strrchr(path, '/');
-        const char* base = (slash != nullptr) ? slash + 1 : nullptr;
-        if (base == nullptr || *base == '\0') continue;
-        static const char* const kNames[] = {
-            "su", ".su", "daemonsu", "supersu", "superuser", "sugote",
-            "sugote-mksh", "busybox", "magisk", "magiskhide", "magiskinit",
-            "xposed",
-        };
-        for (const char* nm : kNames) {
-            if (strcasecmp(base, nm) == 0) return true;
         }
     }
 
@@ -547,6 +460,11 @@ static bool LineHasToken(const char* line, size_t len) {
         "goldfish", "ranchu", "vbox", "geny", "qemu",
         "xposed", "edxposed", "lsposed", "zygisk", "magisk", "riru",
         "frida", "gadget", "dobby", "sandhook", "whale",
+        // vNEXT: our own hook engine's mapping names. ByteHook labels every
+        // patched PLT page "[anon:bytehook-plt-trampolines]"; com.playnearn
+        // polls /proc/self/maps every 2 s and flagged exactly that line as a
+        // hooking framework (server mark: Rooted_device_detected).
+        "bytehook", "shadowhook", "plt-trampoline",
         "kimera", "libpas", "lspd", "/data/adb",
         "kernelsu", "trustme", "hp15", "javahelper",
         "/system/lib64/arm64/", "/system/lib/arm64/",
@@ -595,65 +513,6 @@ static void RewriteMapsLine(std::string& line) {
     if (in_apk) {
         rep(line, "split_config.x86_64.apk", "split_config.arm64_v8a.apk");
         rep(line, "split_config.x86.apk",    "split_config.armeabi_v7a.apk");
-    }
-}
-
-// v2.12.7: RootBeer-style checkForRWPaths parsers split the mount table and
-// flag any classic root partition mounted with the rw option. Rewrite the
-// rw token to ro for exactly those mount points so the table reads like a
-// stock user build. /data stays untouched (rw /data is what every real
-// phone shows, so rewriting it would be the anomaly). Handles both the
-// /proc/mounts layout (dev point type opts -> fields 1 / 3) and the
-// /proc/self/mountinfo layout (id parent maj:min root point opts -> fields
-// 4 / 5). Anything else (mountstats prose) passes through unchanged.
-static bool IsRootMountPoint(const std::string& p) {
-    static const char* const kPoints[] = {
-        "/system", "/system/bin", "/system/sbin", "/system/xbin", "/system/sd",
-        "/system/etc", "/system/bin/failsafe", "/system_ext", "/sbin",
-    };
-    for (const char* k : kPoints) {
-        if (p == k) return true;
-    }
-    return false;
-}
-
-static void RewriteMountsLine(std::string& line) {
-    size_t fStart[8];
-    size_t fEnd[8];
-    int n = 0;
-    const size_t len = line.size();
-    size_t i = 0;
-    while (i < len && n < 8) {
-        while (i < len && (line[i] == ' ' || line[i] == '\t')) ++i;
-        if (i >= len || line[i] == '\n') break;
-        size_t s = i;
-        while (i < len && line[i] != ' ' && line[i] != '\t' && line[i] != '\n') ++i;
-        fStart[n] = s;
-        fEnd[n] = i;
-        ++n;
-    }
-
-    int pointIdx;
-    if (n >= 4 && line[fStart[0]] == '/') {
-        pointIdx = 1;                    // /proc/mounts: dev point type opts
-    } else if (n >= 6 && line[fStart[0]] >= '0' && line[fStart[0]] <= '9') {
-        pointIdx = 4;                    // /proc/mountinfo: id parent maj:min root point opts
-    } else {
-        return;
-    }
-    const int optsIdx = pointIdx + ((pointIdx == 1) ? 2 : 1);
-    if (optsIdx >= n) return;
-
-    const std::string point(line, fStart[pointIdx], fEnd[pointIdx] - fStart[pointIdx]);
-    if (!IsRootMountPoint(point)) return;
-
-    size_t os = fStart[optsIdx];
-    const size_t oe = fEnd[optsIdx];
-    if (os < len && line[os] == '(') ++os;   // tolerate option wrappers
-    if (os + 3 <= oe && line.compare(os, 3, "rw,") == 0) {
-        line.replace(os, 2, "ro");           // "rw," -> "ro,"
-    } else if (os + 2 == oe && line.compare(os, 2, "rw") == 0) {
-        line.replace(os, 2, "ro");           // bare "rw"
     }
 }
 
@@ -753,10 +612,6 @@ static bool BuildFiltered(ProcSpoofKind kind, const char* path, std::string& out
             if (kind == kProcMaps) {
                 std::string line(all.c_str() + start, next - start);
                 RewriteMapsLine(line);
-                out += line;
-            } else if (kind == kProcMounts) {
-                std::string line(all.c_str() + start, next - start);
-                RewriteMountsLine(line);
                 out += line;
             } else {
                 out.append(all, start, next - start);
