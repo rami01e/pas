@@ -16,6 +16,7 @@ import com.kimera.pas.hooks.HookNetworkInterface
 import com.kimera.pas.hooks.HookNetworkRequestBuilder
 import com.kimera.pas.hooks.HookRecon
 import com.kimera.pas.hooks.HookSslUnpin
+import com.kimera.pas.hooks.HookSettings
 import com.kimera.pas.hooks.HookAntiEmu
 import com.kimera.pas.hooks.HookSweep
 
@@ -80,6 +81,7 @@ class XposedInit : XposedModule() {
                 HookGsfId(),
                 HookGpu(),
                 HookRecon(),
+                HookSettings(),
                 HookAntiEmu(),
                 HookSweep(),
             )

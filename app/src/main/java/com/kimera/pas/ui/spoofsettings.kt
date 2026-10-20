@@ -30,7 +30,7 @@ object SpoofSettings {
         "recon_enabled", "webrtc_mode", "webrtc_localip", "gpu_chain", "gpu_vulkan",
         "ssl_unpin_enabled", "ssl_unpin_mode",
         "net_cellular",
-        "anti_emu_enabled"
+        "anti_emu_enabled", "hidden_packages"
     )
 
     @Volatile
