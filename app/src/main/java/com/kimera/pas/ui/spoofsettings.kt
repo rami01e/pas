@@ -22,7 +22,7 @@ object SpoofSettings {
     private val KEYS = arrayOf(
         "native_enabled", "safe_mode",
         "sdk_enabled", "sdk_value", "sdk_java_enabled",
-        "abi_enabled", "abi_value", "abi_spoof_blacklist",
+        "abi_enabled", "abi_value", "abi_spoof_blacklist", "hidden_packages",
         "cpu_enabled", "cpu_value",
         "gpu_enabled", "gpu_value",
         "widevine_enabled", "widevine_id",
@@ -30,7 +30,7 @@ object SpoofSettings {
         "recon_enabled", "webrtc_mode", "webrtc_localip", "gpu_chain", "gpu_vulkan",
         "ssl_unpin_enabled", "ssl_unpin_mode",
         "net_cellular",
-        "anti_emu_enabled", "hidden_packages"
+        "anti_emu_enabled"
     )
 
     @Volatile

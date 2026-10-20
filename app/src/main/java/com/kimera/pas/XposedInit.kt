@@ -6,7 +6,6 @@ import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.util.concurrent.atomic.AtomicBoolean
 import com.kimera.pas.hooks.HookConnectivityManager
-import com.kimera.pas.hooks.HookExec
 import com.kimera.pas.hooks.HookGsfId
 import com.kimera.pas.hooks.HookGpu
 import com.kimera.pas.hooks.HookLinkProperties
@@ -17,7 +16,7 @@ import com.kimera.pas.hooks.HookNetworkInterface
 import com.kimera.pas.hooks.HookNetworkRequestBuilder
 import com.kimera.pas.hooks.HookRecon
 import com.kimera.pas.hooks.HookSslUnpin
-import com.kimera.pas.hooks.HookSettings
+import com.kimera.pas.hooks.HookUsageStats
 import com.kimera.pas.hooks.HookAntiEmu
 import com.kimera.pas.hooks.HookSweep
 
@@ -79,13 +78,12 @@ class XposedInit : XposedModule() {
                 HookLinkProperties(),
                 HookMediaDrm(),
                 HookSslUnpin(),
+                HookUsageStats(),
                 HookGsfId(),
                 HookGpu(),
                 HookRecon(),
-                HookSettings(),
                 HookAntiEmu(),
                 HookSweep(),
-                HookExec(),
             )
 
         hooks.forEach {
