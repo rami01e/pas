@@ -48,7 +48,7 @@ import com.kimera.pas.spoof.SpoofState
  *   setenforce                   -> /system/bin/false        (exit 1 = denied)
  *   su / which <root binary>     -> /system/bin/false        (exit 1, no output =
  *                                    exactly what "not found" looks like)
- *   cat /proc/*mount*            -> /system/bin/true
+ *   cat /proc/<mount files>      -> /system/bin/true
  *   sh -c "<root vocabulary>"    -> true/false depending on the probe kind
  * Identity-critical getprop keys (ro.build.fingerprint, ro.product.*,
  * ro.build.tags, ...) are answered with the SAME values the in-process
