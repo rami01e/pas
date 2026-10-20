@@ -322,7 +322,7 @@ class HookExec : XHook {
             "ro.build.id" to Build.ID,
             "ro.build.display.id" to Build.DISPLAY,
             "ro.build.version.incremental" to Build.VERSION.INCREMENTAL,
-            "ro.build.characteristics" to Build.CHARACTERISTICS,
+            "ro.build.characteristics" to "default",
             "ro.product.model" to Build.MODEL,
             "ro.product.brand" to Build.BRAND,
             "ro.product.device" to Build.DEVICE,
