@@ -371,9 +371,10 @@ class MainActivity : Activity() {
             advChev.text = if (show) "\u25BE" else "\u25B8"
         }
         advBodyRef = advBody
-        // Explicit: Advanced starts unfolded, chevron pointing down.
-        advBody.visibility = View.VISIBLE
-        advChev.text = "\u25BE"
+        // Explicit: Advanced starts folded, chevron pointing right.
+        advBody.visibility = View.GONE
+        advChev.text = "\u25B8"
+
         addPanel(advPanel)
 
         nativeSw = SwitchView(this)
