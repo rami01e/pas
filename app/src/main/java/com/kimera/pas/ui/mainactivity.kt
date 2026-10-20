@@ -371,6 +371,9 @@ class MainActivity : Activity() {
             advChev.text = if (show) "\u25BE" else "\u25B8"
         }
         advBodyRef = advBody
+        // Explicit: Advanced starts unfolded, chevron pointing down.
+        advBody.visibility = View.VISIBLE
+        advChev.text = "\u25BE"
         addPanel(advPanel)
 
         nativeSw = SwitchView(this)
@@ -1467,6 +1470,7 @@ class MainActivity : Activity() {
             "anti_emu_enabled" to sp.getBoolean("anti_emu_enabled", false),
             "sdk_value" to sp.getInt("sdk_value", currentSdk),
             "abi_enabled" to sp.getBoolean("abi_enabled", false),
+            "abi_spoof_blacklist" to (sp.getString("abi_spoof_blacklist", "") ?: "").trim(),
             "abi_value" to (sp.getString("abi_value", "x86_64") ?: "x86_64"),
             "cpu_enabled" to sp.getBoolean("cpu_enabled", false),
             "cpu_value" to DeviceCatalog.cpu(sp.getString("cpu_value", null)).display,
