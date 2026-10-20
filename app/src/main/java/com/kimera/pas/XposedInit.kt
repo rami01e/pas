@@ -61,7 +61,7 @@ class XposedInit : XposedModule() {
         pasClassLoader = param.classLoader
         log(Log.INFO, TAG, "[PAS] onPackageReady: ${param.packageName} - installing hooks")
 
-        initNativeAddon()
+        initNativeAddon(param.packageName)
 
         // JAVA profile ("webrtc_mode" = "java"): the native layer runs in
         // passthrough and ONLY the Java network hooks spoof - use it to
@@ -94,7 +94,7 @@ class XposedInit : XposedModule() {
      * only when enabled; the spoof config is always delivered so the
      * Java-level features (Widevine / GSF) work independently of the addon.
      */
-    private fun initNativeAddon() {
+    private fun initNativeAddon(packageName: String) {
         Thread({
             val nativeOn = try {
                 getRemotePreferences("pas_spoof").getBoolean("native_enabled", true)
@@ -112,7 +112,7 @@ class XposedInit : XposedModule() {
             } else {
                 log(Log.INFO, TAG, "[PAS] native addon disabled - library not loaded")
             }
-            runCatching { com.kimera.pas.spoof.SpoofCore.init(this, param.packageName) }
+            runCatching { com.kimera.pas.spoof.SpoofCore.init(this, packageName) }
         }, "pas-native-init").start()
     }
 }

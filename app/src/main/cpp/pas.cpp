@@ -771,12 +771,16 @@ static void* InitWorker(void* arg) {
     } else {
         Log("native: compat mode - extended hooks skipped (netlink/ioctl/props)");
     }
-    // v2.9.0: ANTI-EMU (hide_antiemu.cpp) - runtime-gated on the Kotlin
-    // toggle (SpoofCore.nativeSetAntiEmu), so they stay inert until the
-    // per-app config turns them on. Installed in every mode, like the net
-    // hooks: the toggle is the switch, not compat mode.
-    InstallAntiEmuHooks();
-    Log("native: stage5b anti-emu hooks (runtime-gated)");
+    // v2.9.0/vNEXT: ANTI-EMU (hide_antiemu.cpp). Off by default, and its
+    // hooks put a trampoline on every open/stat/syscall of the scoped
+    // process, so install them only when the toggle is actually on: with
+    // anti-emu off the module now has literally zero effect from this layer.
+    if (AntiEmuEnabled()) {
+        InstallAntiEmuHooks();
+        Log("native: stage5b anti-emu hooks");
+    } else {
+        Log("native: stage5b anti-emu off - hooks not installed");
+    }
     Log("native: all hooks installed");
     return nullptr;
 }

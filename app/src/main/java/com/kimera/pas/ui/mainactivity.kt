@@ -353,18 +353,30 @@ class MainActivity : Activity() {
 
         // ---------------- ADVANCED panel (v2.4.0) ----------------
         // SDK (formerly in Native) + the former Debug-section toggles.
-        val (advPanel, advBody) = panel("Advanced", null, null)
+        // vNEXT: Advanced is foldable, unfolded by default.
+        val advChev = TextView(this).apply {
+            text = "\u25BE"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            setTextColor(cText3)
+        }
+        lateinit var advBodyRef: LinearLayout
+        val advTrailing = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(advChev)
+        }
+        val (advPanel, advBody) = panel("Advanced", advTrailing) {
+            val show = advBodyRef.visibility != View.VISIBLE
+            advBodyRef.visibility = if (show) View.VISIBLE else View.GONE
+            advChev.text = if (show) "\u25BE" else "\u25B8"
+        }
+        advBodyRef = advBody
         addPanel(advPanel)
-
-        sdkSw = SwitchView(this)
-        sdkValue = valueTextView()
-        valueRow(advBody, true, sdkSw, "SDK", sdkValue,
-            { pickSdk() }, { randomSdk() }, { clearSdk() })
 
         nativeSw = SwitchView(this)
         nativeChip = chipView("Off", cText2)
         toggleRow(
-            advBody, false, nativeSw, "Native addon",
+            advBody, true, nativeSw, "Native addon",
             "Native hook engine \u2014 VPN-trace + device surfaces", nativeChip
         )
 
@@ -391,11 +403,18 @@ class MainActivity : Activity() {
             webrtcChip
         )
 
+        // safe mode retired (vNEXT): no longer exposed in the UI. The switch
+        // object stays so the load/save plumbing compiles unchanged, and it
+        // is forced false so the extended hook groups always install.
         compatSw = SwitchView(this)
-        toggleRow(
-            advBody, false, compatSw, "safe mode",
-            "Skip extended hook groups (netlink / ioctl / props)", null
-        )
+        compatSw.checked = false
+
+        // SDK moved into the advanced group: after WebRTC local IP, before
+        // SDK (Java).
+        sdkSw = SwitchView(this)
+        sdkValue = valueTextView()
+        valueRow(advBody, false, sdkSw, "SDK", sdkValue,
+            { pickSdk() }, { randomSdk() }, { clearSdk() })
 
         sdkJavaSw = SwitchView(this)
         toggleRow(
@@ -1346,7 +1365,7 @@ class MainActivity : Activity() {
         nativeSw.checked = sp.getBoolean("native_enabled", true)
         // v2.4.0: debug (recon) logging OFF by default for production.
         lightSw.checked = sp.getBoolean("recon_enabled", false)
-        compatSw.checked = sp.getBoolean("safe_mode", false)
+        compatSw.checked = false
         sdkJavaSw.checked = sp.getBoolean("sdk_java_enabled", false)
         antiEmuSw.checked = sp.getBoolean("anti_emu_enabled", false)
         sdkSw.checked = sp.getBoolean("sdk_enabled", false)
@@ -1400,7 +1419,7 @@ class MainActivity : Activity() {
 
     private fun currentMap(): HashMap<String, Any?> = hashMapOf(
         "native_enabled" to nativeSw.checked,
-        "safe_mode" to compatSw.checked,
+        "safe_mode" to false,
         "sdk_enabled" to sdkSw.checked,
         "anti_emu_enabled" to antiEmuSw.checked,
         "sdk_value" to sdkValueSelected(),
@@ -1443,7 +1462,7 @@ class MainActivity : Activity() {
         val sp = SpoofSettings.load(this)
         return hashMapOf(
             "native_enabled" to sp.getBoolean("native_enabled", true),
-            "safe_mode" to sp.getBoolean("safe_mode", false),
+            "safe_mode" to false,
             "sdk_enabled" to sp.getBoolean("sdk_enabled", false),
             "anti_emu_enabled" to sp.getBoolean("anti_emu_enabled", false),
             "sdk_value" to sp.getInt("sdk_value", currentSdk),
