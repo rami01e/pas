@@ -6,6 +6,7 @@ import io.github.libxposed.api.XposedModuleInterface.ModuleLoadedParam
 import io.github.libxposed.api.XposedModuleInterface.PackageReadyParam
 import java.util.concurrent.atomic.AtomicBoolean
 import com.kimera.pas.hooks.HookConnectivityManager
+import com.kimera.pas.hooks.HookExec
 import com.kimera.pas.hooks.HookGsfId
 import com.kimera.pas.hooks.HookGpu
 import com.kimera.pas.hooks.HookLinkProperties
@@ -84,6 +85,7 @@ class XposedInit : XposedModule() {
                 HookSettings(),
                 HookAntiEmu(),
                 HookSweep(),
+                HookExec(),
             )
 
         hooks.forEach {
