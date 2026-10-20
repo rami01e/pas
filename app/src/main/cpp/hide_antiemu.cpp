@@ -1123,24 +1123,13 @@ static int MyPropForeach(void (*cb)(const prop_info*, void*), void* cookie) {
 static int MyUname(struct utsname* u) {
     int r = BYTEHOOK_CALL_PREV(MyUname, u);
     if (r == 0 && g_anti_emu && u != nullptr) {
-        // vNEXT: the machine rewrite follows the ABI toggle (see
-        // AbiSpoofActive) so packages on the ABI blacklist keep the real
-        // x86_64 machine string and still load. Kernel identity below stays
-        // anti-emu owned.
-        if (AbiSpoofActive() &&
-            (strstr(u->machine, "x86") != nullptr || strstr(u->machine, "i386") != nullptr ||
-             strstr(u->machine, "i686") != nullptr)) {
-            memset(u->machine, 0, sizeof(u->machine));
-            snprintf(u->machine, sizeof(u->machine), "%s", "aarch64");
-            static bool s_logged = false;
-            if (!s_logged) {
-                s_logged = true;
-                Log("native: anti-emu uname machine -> aarch64");
-            }
-        }
+        // NOTE: utsname.machine is owned by the ABI layer (HideUname in
+        // hide_props.cpp, gated on g_abi_on). Deliberately not rewritten
+        // here: a package on the ABI blacklist must keep the real machine
+        // string, and two writers would fight over it.
         // vNEXT: release/version carry the emulator kernel (6.1.90-perf+ /
         // "#2 SMP PREEMPT_DYNAMIC ..."). Native collectors read them here,
-        // bypassing every Java-side spoof, so rewrite both fields too.
+        // bypassing every Java-side spoof, so rewrite both fields.
         if (g_kernel_spoof) {
             snprintf(u->release, sizeof(u->release), "%s", g_kernel_release);
             snprintf(u->version, sizeof(u->version), "%s", g_kernel_version);
