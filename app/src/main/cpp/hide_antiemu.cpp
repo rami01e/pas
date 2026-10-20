@@ -597,6 +597,46 @@ static void SanitizeStatus(std::string& s) {
     SetStatusField(s, "NoNewPrivs:", "1");
 }
 
+// vNEXT: unnamed rwx anon mapping. Hook engines and instrumentation
+// allocate executable+writable pages and often leave them nameless, while
+// every legitimate entry carries a name ([anon:...], [stack], a path) or a
+// size suffix. com.playnearn polls /proc/self/maps every 2 s; after the
+// bytehook token landed the only remaining anomaly in its view was these
+// bare rwx lines (4 vs 1 in an unscoped app), so a permission-based
+// tamper check still fired. Dropping them is safe: nothing in the app can
+// address them by name anyway.
+static bool IsUnnamedRwxLine(const char* line, size_t len) {
+    // perms field starts after "start-end "
+    const char* sp = (const char*)memchr(line, ' ', len);
+    if (sp == nullptr) return false;
+    size_t off = (size_t)(sp - line) + 1;
+    if (off + 3 > len) return false;
+    if (line[off] != 'r' || line[off + 1] != 'w' || line[off + 2] != 'x') return false;
+    // fields: range perms offset dev inode [pathname]
+    // walk to the 4th separator (end of the dev field), then consume the
+    // inode token; anything after it that is not whitespace is a name/path.
+    int spaces = 0;
+    size_t i = 0;
+    for (; i < len; ++i) {
+        if (line[i] == ' ') {
+            spaces++;
+            if (spaces == 4) {
+                ++i;
+                break;
+            }
+        }
+    }
+    if (spaces < 4) return false;
+    while (i < len && line[i] != ' ' && line[i] != '\t' && line[i] != '\n' && line[i] != '\r') {
+        ++i;
+    }
+    for (; i < len; ++i) {
+        char c = line[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r' && c != '\0') return false;
+    }
+    return true;
+}
+
 static bool BuildFiltered(ProcSpoofKind kind, const char* path, std::string& out) {
     std::string all;
     if (!RawReadAll(path, all)) return false;
@@ -610,6 +650,10 @@ static bool BuildFiltered(ProcSpoofKind kind, const char* path, std::string& out
 
         if (!LineHasToken(all.c_str() + start, next - start)) {
             if (kind == kProcMaps) {
+                if (IsUnnamedRwxLine(all.c_str() + start, next - start)) {
+                    start = next;
+                    continue;
+                }
                 std::string line(all.c_str() + start, next - start);
                 RewriteMapsLine(line);
                 out += line;
