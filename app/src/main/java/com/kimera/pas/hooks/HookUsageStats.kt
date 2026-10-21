@@ -10,21 +10,27 @@ import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 
 /**
- * v2.12.13 USAGE-STATS FILTER.
+ * v2.12.14 USAGE-STATS FILTER.
  *
- * Root cause of the 2026-10-21 Snakzy leak (per-app log
- * "usage queryEvents: mStringPool null — passthrough"):
+ * Root cause chased through v2.12.12 -> v2.12.13 -> v2.12.14:
  *
- *   - v2.12.12 rebuilt UsageEvents via the hidden (List, String[]) ctor
- *     and refused to proceed when mStringPool was null.
- *   - On Android 15 / MuMu, queryEvents returns a UsageEvents whose events
- *     carry direct String package names and whose mStringPool is genuinely
- *     null, so the ctor path was always taken, always rejected, and the
- *     original object was returned unfiltered. Every hidden pkg leaked.
+ *   v2.12.12: read mEvents ?: mEventsToWrite via runCatching helper. On MuMu
+ *             SDK 35, mEvents is ABSENT, so fallback to mEventsToWrite
+ *             succeeded - but then mStringPool was null, so it bailed with
+ *             "mStringPool null - passthrough". Result: unfiltered leak.
  *
- * v2.12.13 fix: mutate the returned UsageEvents in place. Set mEvents /
- * mEventCount / mIndex on the SAME object, leave mStringPool alone (null
- * or not). No ctor, no pool dependency, no re-parcel corruption.
+ *   v2.12.13: hard getDeclaredField("mEvents"). On MuMu SDK 35 the field
+ *             does not exist, so the call threw NoSuchFieldException and
+ *             the whole filter was a passthrough. Result: unfiltered leak.
+ *
+ *   v2.12.14: (a) discover the events field by probing candidates and, as a
+ *             last resort, by scanning declared fields for List<Event>;
+ *             (b) mutate that field in place, update mEventCount and reset
+ *             mIndex, never touch mStringPool; (c) belt-and-braces hook
+ *             getNextEvent(Event) and getNextEventOrNull() so callers that
+ *             iterate via the public API are filtered on the fly even if
+ *             no field can be touched; (d) log the actual declared fields
+ *             of UsageEvents once per process for future diagnosis.
  *
  * Surfaces covered:
  *   queryUsageStats(int, long, long)              -> List<UsageStats>
@@ -32,6 +38,8 @@ import com.kimera.pas.hookSafe
  *   queryEvents(long, long)                       -> UsageEvents
  *   queryEventsForSelf(long, long)                -> UsageEvents
  *   queryEventStats(int, long, long)              -> List<EventStats>
+ *   UsageEvents.getNextEvent(Event)               -> Boolean
+ *   UsageEvents.getNextEventOrNull()              -> Event?  (API 33+)
  *
  * Gated on anti_emu_enabled; off = nothing installed.
  */
@@ -42,7 +50,8 @@ class HookUsageStats : XHook {
 
     private var hidden: Set<String> = emptySet()
     private var eventsRebuildLogged = false
-    private var eventStatsRebuildLogged = false
+    private var fieldsLogged = false
+    private var getNextEventLogged = false
 
     override fun injectHook(module: XposedModule) {
         val antiEmu = try {
@@ -63,6 +72,8 @@ class HookUsageStats : XHook {
         hookQueryEvents(module)
         hookQueryEventsForSelf(module)
         hookQueryEventStats(module)
+        hookGetNextEvent(module)
+        hookGetNextEventOrNull(module)
     }
 
     // ------------------------------------------------------------------
@@ -207,22 +218,103 @@ class HookUsageStats : XHook {
 
     // ------------------------------------------------------------------
     /**
-     * Mutates `src` in place - no new UsageEvents, no ctor, no string pool.
+     * Belt-and-braces: filter at the public iteration API. Works no matter
+     * what internal field names the OEM used, as long as the caller uses
+     * the documented getNextEvent pattern. Zero overhead when filterEvents
+     * already mutated the underlying list - the events we see will not
+     * match isHidden() and we return on the first proceed().
+     */
+    private fun hookGetNextEvent(module: XposedModule) {
+        hookSafe(module, "usage getNextEvent") {
+            val m = try {
+                UsageEvents::class.java.getMethod(
+                    "getNextEvent",
+                    UsageEvents.Event::class.java
+                )
+            } catch (t: Throwable) {
+                return@hookSafe
+            }
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                var r = chain.proceed() as? Boolean ?: return@intercept chain.proceed()
+                if (!r || hidden.isEmpty()) return@intercept r
+                val eventOut = chain.getArg(0) as? UsageEvents.Event
+                    ?: return@intercept r
+
+                var iterations = 0
+                while (true) {
+                    val pkg = runCatching { eventOut.packageName }.getOrNull()
+                    if (pkg == null || !SweepList.isHidden(pkg, hidden)) {
+                        return@intercept true
+                    }
+                    SweepList.logHit(module, "usage getNextEvent", pkg)
+                    if (iterations++ > 100000) return@intercept false
+                    r = runCatching { chain.proceed() }.getOrNull() as? Boolean
+                        ?: return@intercept false
+                    if (!r) return@intercept false
+                }
+                @Suppress("UNREACHABLE_CODE")
+                false
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    private fun hookGetNextEventOrNull(module: XposedModule) {
+        hookSafe(module, "usage getNextEventOrNull") {
+            val m = try {
+                UsageEvents::class.java.getMethod("getNextEventOrNull")
+            } catch (t: Throwable) {
+                return@hookSafe
+            }
+            m.isAccessible = true
+            module.hook(m).intercept { chain ->
+                var r = chain.proceed() as? UsageEvents.Event
+                    ?: return@intercept chain.proceed()
+                if (hidden.isEmpty()) return@intercept r
+
+                var iterations = 0
+                while (true) {
+                    val pkg = runCatching { r.packageName }.getOrNull()
+                    if (pkg == null || !SweepList.isHidden(pkg, hidden)) {
+                        return@intercept r
+                    }
+                    SweepList.logHit(module, "usage getNextEventOrNull", pkg)
+                    if (iterations++ > 100000) return@intercept null
+                    r = runCatching { chain.proceed() }.getOrNull() as? UsageEvents.Event
+                        ?: return@intercept null
+                }
+                @Suppress("UNREACHABLE_CODE")
+                null
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    /**
+     * Filter the UsageEvents in place.
      *
-     * Why in-place, not rebuild:
-     *  - Android 15 queryEvents returns UsageEvents with mStringPool == null
-     *    when events carry direct String package names. The hidden
-     *    (List, String[]) ctor requires a non-null pool on some builds and
-     *    is fragile on others. In-place mutation sidesteps both.
-     *  - getNextEvent() reads mEvents / mEventCount / mIndex only.
-     *  - If the caller re-parcels the object, writeToParcel() on API 35 also
-     *    reads mEvents / mEventCount / mStringPool - all already consistent
-     *    because we filtered the exact list that was already there.
+     * Strategy:
+     *   1. Probe known field names: mEvents, mEventsToWrite, mEventList,
+     *      events, mEventQueue. Pick whichever is a List and non-empty
+     *      (or, failing that, whichever is a List at all).
+     *   2. If none of the known names exist, scan every declared field for
+     *      a List<Event>-shaped value. This is what catches OEM renames.
+     *   3. Filter that list, set it back to the SAME field.
+     *   4. Update mEventCount and reset mIndex if present.
+     *   5. Never touch mStringPool - if the framework put null there it is
+     *      because events carry direct String package names, and null is
+     *      what the framework's own getNextEvent() expects.
+     *
+     * Diagnostics:
+     *   - Logs the full declared-field list of UsageEvents once per process
+     *     so a future framework change is visible in the log immediately
+     *     instead of requiring another test cycle to diagnose.
      *
      * Return contract:
-     *  - null          -> caller returns the untouched result
-     *  - src (mutated) -> caller returns src as the result (filtered)
-     *  - src (unmutated, removed == 0) -> no-op, same as returning result
+     *   null   -> caller returns the untouched result (passthrough)
+     *   src    -> caller returns src, which is now filtered (or unchanged
+     *             if removed == 0)
      */
     private fun filterEvents(
         module: XposedModule,
@@ -231,34 +323,62 @@ class HookUsageStats : XHook {
     ): UsageEvents? = runCatching {
         val cls = UsageEvents::class.java
 
-        val fEvents = cls.getDeclaredField("mEvents").apply { isAccessible = true }
-        val fEventsToWrite = runCatching {
-            cls.getDeclaredField("mEventsToWrite").apply { isAccessible = true }
-        }.getOrNull()
-        val fEventCount = cls.getDeclaredField("mEventCount").apply { isAccessible = true }
-        val fIndex = runCatching {
-            cls.getDeclaredField("mIndex").apply { isAccessible = true }
-        }.getOrNull()
+        // One-shot field diagnostic - the fastest way to know what this
+        // particular MuMu build actually declares.
+        if (!fieldsLogged) {
+            fieldsLogged = true
+            val declared = runCatching {
+                cls.declaredFields.joinToString(", ") { "${it.name}:${it.type.simpleName}" }
+            }.getOrElse { "error: $it" }
+            module.log(Log.INFO, TAG, "[PAS] $label: UsageEvents fields = [$declared]")
+        }
 
-        @Suppress("UNCHECKED_CAST")
-        val readSide = fEvents.get(src) as? List<UsageEvents.Event>
+        // 1. Find the events container.
+        val preferred = listOf("mEvents", "mEventsToWrite", "mEventList", "events", "mEventQueue")
+        var bestField: java.lang.reflect.Field? = null
+        var bestList: List<UsageEvents.Event>? = null
 
-        @Suppress("UNCHECKED_CAST")
-        val writeSide = fEventsToWrite?.get(src) as? List<UsageEvents.Event>
+        for (name in preferred) {
+            val f = runCatching { cls.getDeclaredField(name).apply { isAccessible = true } }.getOrNull() ?: continue
+            val value = runCatching { f.get(src) }.getOrNull() as? List<*> ?: continue
+            @Suppress("UNCHECKED_CAST")
+            val list = value as List<UsageEvents.Event>
+            if (bestList == null || list.size > bestList.size) {
+                bestField = f
+                bestList = list
+            }
+        }
 
-        val source = readSide ?: writeSide ?: run {
+        // 2. Last resort: scan declared fields for a List<Event> shape.
+        if (bestField == null) {
+            for (f in cls.declaredFields) {
+                if (!List::class.java.isAssignableFrom(f.type) && f.type != ArrayList::class.java) continue
+                runCatching { f.isAccessible = true }
+                val value = runCatching { f.get(src) }.getOrNull() as? List<*> ?: continue
+                if (value.isNotEmpty() && value[0] is UsageEvents.Event) {
+                    @Suppress("UNCHECKED_CAST")
+                    bestField = f
+                    @Suppress("UNCHECKED_CAST")
+                    bestList = value as List<UsageEvents.Event>
+                    break
+                }
+            }
+        }
+
+        if (bestField == null || bestList == null) {
             if (!eventsRebuildLogged) {
                 eventsRebuildLogged = true
-                module.log(Log.INFO, TAG, "[PAS] $label: no mEvents/mEventsToWrite — passthrough")
+                module.log(Log.INFO, TAG, "[PAS] $label: no events container found — passthrough")
             }
             return@runCatching null
         }
 
-        if (source.isEmpty()) return@runCatching src
+        if (bestList.isEmpty()) return@runCatching src
 
-        val kept = ArrayList<UsageEvents.Event>(source.size)
+        // 3. Filter.
+        val kept = ArrayList<UsageEvents.Event>(bestList.size)
         var removed = 0
-        for (e in source) {
+        for (e in bestList) {
             val pkg = runCatching { e.packageName }.getOrNull()
             if (pkg != null && SweepList.isHidden(pkg, hidden)) {
                 removed++
@@ -269,20 +389,26 @@ class HookUsageStats : XHook {
         }
         if (removed == 0) return@runCatching src
 
-        // Mutate the SAME object the framework gave us. This keeps every
-        // other internal field (mStringPool, mParcel, whatever OEMs added)
-        // exactly as the framework produced it.
-        fEvents.set(src, kept)
-        if (writeSide != null && fEventsToWrite != null) {
-            fEventsToWrite.set(src, kept)
+        // 4. Write back to the SAME field we read from. Do NOT populate
+        //    mEvents if we read from mEventsToWrite, or vice versa - that
+        //    is exactly the inconsistency that caused v2.12.12/13 to leak.
+        bestField.set(src, kept)
+
+        // 5. Cursor / count consistency.
+        runCatching {
+            cls.getDeclaredField("mEventCount").apply { isAccessible = true }
+                .setInt(src, kept.size)
         }
-        fEventCount.setInt(src, kept.size)
-        fIndex?.setInt(src, 0)
+        runCatching {
+            cls.getDeclaredField("mIndex").apply { isAccessible = true }
+                .setInt(src, 0)
+        }
 
         if (!eventsRebuildLogged) {
             eventsRebuildLogged = true
             module.log(Log.INFO, TAG,
-                "[PAS] $label: filtered in place ($removed hidden, ${kept.size} kept)")
+                "[PAS] $label: filtered field '${bestField.name}' " +
+                    "($removed hidden, ${kept.size} kept)")
         }
         src
     }.onFailure {
