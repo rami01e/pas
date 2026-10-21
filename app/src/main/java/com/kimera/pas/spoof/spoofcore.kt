@@ -1,4 +1,4 @@
-// spoofcore.kt v2.9.2
+// spoofcore.kt v2.12.16
 
 package com.kimera.pas.spoof
 
@@ -207,7 +207,7 @@ object SpoofCore {
         SpoofState.gsfOn = prefs.getBoolean("gsf_enabled", false)
         SpoofState.gsfId = (prefs.getString("gsf_id", "") ?: "").trim()
         SpoofState.netCellular = prefs.getBoolean("net_cellular", false)
-        SpoofState.antiEmuOn = prefs.getBoolean("anti_emu_enabled", false)
+        SpoofState.antiEmuOn = prefs.getBoolean("anti_emu_enabled", true)
 
         val reconOn = prefs.getBoolean("recon_enabled", false)
         SpoofState.reconOn = reconOn

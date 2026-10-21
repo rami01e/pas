@@ -5,7 +5,7 @@ import io.github.libxposed.api.XposedModule
 import com.kimera.pas.TAG
 
 /**
- * v2.12.15 shared hidden-package list.
+ * v2.12.16 shared hidden-package list.
  *
  * Design goals (this is our equivalent of HMA-OSS's "powerful presets"):
  *
@@ -29,6 +29,12 @@ object SweepList {
     const val GROUP = "pas_spoof"
     const val PREF_HIDDEN = "hidden_packages"  // user ADDITIONS, merged with defaults
     const val PREF_ALLOW  = "allowed_packages" // user WHITELIST, overrides token match
+
+    /** v2.12.16: dedicated blacklist for the usage-stats filter (UI row
+     *  "Usage stats blacklist"). Merged only into [loadUsage], so a package
+     *  listed here disappears from UsageStatsManager results without being
+     *  hidden from PackageManager. */
+    const val PREF_USAGE_BLACKLIST = "usage_stats_blacklist"
 
     /**
      * Always-hidden baseline. Curated. Do NOT add system apps here unless
@@ -112,6 +118,23 @@ object SweepList {
             if (pkg.contains(t, ignoreCase = true)) return true
         }
         return false
+    }
+
+    /**
+     * v2.12.16: effective hidden set for the usage-stats filter. Identical to
+     * [load] plus the dedicated `usage_stats_blacklist` entries, so users can
+     * hide usage-stat surfaces without touching the PackageManager list.
+     */
+    fun loadUsage(module: XposedModule): Set<String> {
+        val base = load(module)
+        val extra = try {
+            module.getRemotePreferences(GROUP)
+                .getString(PREF_USAGE_BLACKLIST, "") ?: ""
+        } catch (t: Throwable) {
+            ""
+        }
+        if (extra.isEmpty()) return base
+        return base + parse(extra)
     }
 
     private fun parse(s: String): Set<String> =

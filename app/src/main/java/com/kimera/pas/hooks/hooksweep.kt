@@ -8,7 +8,7 @@ import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 
 /**
- * v2.9.4 SWEEP SHIELD - hides configured packages from the scoped app's
+ * v2.12.16 SWEEP SHIELD - hides configured packages from the scoped app's
  * PackageManager view.
  *
  * Evidence (June's Journey / AppDome, JJ capture 19:24): the target ran its
@@ -42,7 +42,7 @@ class HookSweep : XHook {
 
     override fun injectHook(module: XposedModule) {
         val antiEmu = try {
-            module.getRemotePreferences(PREF_GROUP).getBoolean("anti_emu_enabled", false)
+            module.getRemotePreferences(PREF_GROUP).getBoolean("anti_emu_enabled", true)
         } catch (t: Throwable) {
             false
         }

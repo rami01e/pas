@@ -10,7 +10,7 @@ import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 
 /**
- * v2.12.14 USAGE-STATS FILTER.
+ * v2.12.16 USAGE-STATS FILTER.
  *
  * Root cause chased through v2.12.12 -> v2.12.13 -> v2.12.14:
  *
@@ -56,7 +56,7 @@ class HookUsageStats : XHook {
     override fun injectHook(module: XposedModule) {
         val antiEmu = try {
             module.getRemotePreferences(SweepList.GROUP)
-                .getBoolean("anti_emu_enabled", false)
+                .getBoolean("anti_emu_enabled", true)
         } catch (t: Throwable) {
             false
         }
@@ -64,7 +64,7 @@ class HookUsageStats : XHook {
             module.log(Log.INFO, TAG, "[PAS] usage-stats filter: anti-emu off - inert")
             return
         }
-        hidden = SweepList.load(module)
+        hidden = SweepList.loadUsage(module)
         module.log(Log.INFO, TAG, "[PAS] usage-stats filter on (${hidden.size} hidden names)")
 
         hookQueryUsageStats(module)

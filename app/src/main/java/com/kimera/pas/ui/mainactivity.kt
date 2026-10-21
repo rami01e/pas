@@ -94,6 +94,8 @@ class MainActivity : Activity() {
     private lateinit var abiValue: TextView
     private lateinit var abiBlacklistValue: TextView
     private var abiBlacklistRaw: String = ""
+    private lateinit var usageBlacklistValue: TextView
+    private var usageBlacklistRaw: String = ""
     private lateinit var cpuSw: SwitchView
     private lateinit var cpuValue: TextView
     private lateinit var gpuSw: SwitchView
@@ -351,6 +353,40 @@ class MainActivity : Activity() {
         valueRow(swBody, false, sslSw, "Unpin SSL", sslValue,
             { pickSslMode() }, { cycleSslMode() }, { clearSslMode() })
 
+        // v2.12.16: ANTI-EMU moved from Advanced to Software, first-run
+        // default ON (a stored "off" from an earlier session still wins).
+        antiEmuSw = SwitchView(this)
+        toggleRow(
+            swBody, false, antiEmuSw, "ANTI-EMU",
+            "Hide emulator identity from the target app (Build.* patched, qemu / DMI / nemu paths and props masked)",
+            null
+        )
+
+        // v2.12.16: usage-stats blacklist - same interaction as the ABI
+        // blacklist. Listed packages disappear from UsageStatsManager
+        // queries (queryUsageStats / queryAndAggregateUsageStats /
+        // queryEvents / queryEventStats) for the scoped app.
+        usageBlacklistValue = valueTextView()
+        addRow(swBody, false) {
+            val line = LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                isClickable = true
+                setOnClickListener { editUsageBlacklist() }
+            }
+            line.addView(
+                TextView(this@MainActivity).apply {
+                    text = "Usage stats blacklist"
+                    setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+                    setTextColor(cText)
+                },
+                LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            detachIfNeeded(usageBlacklistValue)
+            line.addView(usageBlacklistValue)
+            addView(line)
+        }
+
         // ---------------- ADVANCED panel (v2.4.0) ----------------
         // SDK (formerly in Native) + the former Debug-section toggles.
         // vNEXT: Advanced is foldable, unfolded by default.
@@ -426,12 +462,7 @@ class MainActivity : Activity() {
             "Patch Build.VERSION.SDK_INT in-app (may break modern WebView apps)", null
         )
 
-        antiEmuSw = SwitchView(this)
-        toggleRow(
-            advBody, false, antiEmuSw, "ANTI-EMU",
-            "Hide emulator identity from the target app (Build.* patched, qemu / DMI / nemu paths and props masked)",
-            null
-        )
+        // v2.12.16: ANTI-EMU moved to the Software panel.
 
         // Net type: per-app WIFI / CELLULAR source selection.
         netSw = SwitchView(this)
@@ -1019,6 +1050,46 @@ class MainActivity : Activity() {
         abiBlacklistValue.setTextColor(if (entries.isEmpty()) cText3 else cAmber)
     }
 
+    private fun editUsageBlacklist() {
+        val et = EditText(this).apply {
+            setText(usageBlacklistRaw)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            typeface = Typeface.MONOSPACE
+            setTextColor(cText)
+            setSingleLine(false)
+            minLines = 4
+            maxLines = 10
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            inputType = InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_FLAG_MULTI_LINE or
+                InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            hint = "com.example.tracker"
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Usage stats blacklist (one package per line)")
+            .setMessage("Hidden from UsageStatsManager queries inside the scoped app.")
+            .setView(et)
+            .setPositiveButton(
+                "OK",
+                DialogInterface.OnClickListener { _, _ ->
+                    usageBlacklistRaw = et.text.toString().trim()
+                    updateUsageBlacklistValue()
+                    updateDirty()
+                }
+            )
+            .setNegativeButton("Cancel", null as DialogInterface.OnClickListener?)
+            .show()
+    }
+
+    private fun updateUsageBlacklistValue() {
+        val entries = usageBlacklistRaw.split('\n', ',', ';', ' ')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+        usageBlacklistValue.text =
+            if (entries.isEmpty()) "none" else "${entries.size} app(s)"
+        usageBlacklistValue.setTextColor(if (entries.isEmpty()) cText3 else cAmber)
+    }
+
     private fun updateAbiValue() {
         abiValue.text = abiModeLabel(abiModeSel)
     }
@@ -1371,13 +1442,15 @@ class MainActivity : Activity() {
         lightSw.checked = sp.getBoolean("recon_enabled", false)
         compatSw.checked = false
         sdkJavaSw.checked = sp.getBoolean("sdk_java_enabled", false)
-        antiEmuSw.checked = sp.getBoolean("anti_emu_enabled", false)
+        antiEmuSw.checked = sp.getBoolean("anti_emu_enabled", true)
         sdkSw.checked = sp.getBoolean("sdk_enabled", false)
         sdkSel = sdkIndexFor(sp.getInt("sdk_value", currentSdk))
         updateSdkValue()
         abiSw.checked = sp.getBoolean("abi_enabled", false)
         abiBlacklistRaw = sp.getString("abi_spoof_blacklist", "") ?: ""
         updateAbiBlacklistValue()
+        usageBlacklistRaw = sp.getString("usage_stats_blacklist", "") ?: ""
+        updateUsageBlacklistValue()
         abiModeSel = when (sp.getString("abi_value", "x86_64")) {
             "arm64+armeabi" -> 1
             "arm64-v8a", "mixed" -> 2
@@ -1429,6 +1502,7 @@ class MainActivity : Activity() {
         "sdk_value" to sdkValueSelected(),
         "abi_enabled" to abiSw.checked,
         "abi_spoof_blacklist" to abiBlacklistRaw.trim(),
+        "usage_stats_blacklist" to usageBlacklistRaw.trim(),
         "abi_value" to when (abiModeSel) {
             1 -> "arm64+armeabi"
             2 -> "arm64-v8a"
@@ -1468,10 +1542,11 @@ class MainActivity : Activity() {
             "native_enabled" to sp.getBoolean("native_enabled", true),
             "safe_mode" to false,
             "sdk_enabled" to sp.getBoolean("sdk_enabled", false),
-            "anti_emu_enabled" to sp.getBoolean("anti_emu_enabled", false),
+            "anti_emu_enabled" to sp.getBoolean("anti_emu_enabled", true),
             "sdk_value" to sp.getInt("sdk_value", currentSdk),
             "abi_enabled" to sp.getBoolean("abi_enabled", false),
             "abi_spoof_blacklist" to (sp.getString("abi_spoof_blacklist", "") ?: "").trim(),
+            "usage_stats_blacklist" to (sp.getString("usage_stats_blacklist", "") ?: "").trim(),
             "abi_value" to (sp.getString("abi_value", "x86_64") ?: "x86_64"),
             "cpu_enabled" to sp.getBoolean("cpu_enabled", false),
             "cpu_value" to DeviceCatalog.cpu(sp.getString("cpu_value", null)).display,
