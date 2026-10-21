@@ -10,7 +10,21 @@ import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 
 /**
- * vNEXT USAGE-STATS FILTER — v2 (Android 15 / SDK 35).
+ * v2.12.13 USAGE-STATS FILTER.
+ *
+ * Root cause of the 2026-10-21 Snakzy leak (per-app log
+ * "usage queryEvents: mStringPool null — passthrough"):
+ *
+ *   - v2.12.12 rebuilt UsageEvents via the hidden (List, String[]) ctor
+ *     and refused to proceed when mStringPool was null.
+ *   - On Android 15 / MuMu, queryEvents returns a UsageEvents whose events
+ *     carry direct String package names and whose mStringPool is genuinely
+ *     null, so the ctor path was always taken, always rejected, and the
+ *     original object was returned unfiltered. Every hidden pkg leaked.
+ *
+ * v2.12.13 fix: mutate the returned UsageEvents in place. Set mEvents /
+ * mEventCount / mIndex on the SAME object, leave mStringPool alone (null
+ * or not). No ctor, no pool dependency, no re-parcel corruption.
  *
  * Surfaces covered:
  *   queryUsageStats(int, long, long)              -> List<UsageStats>
@@ -18,15 +32,6 @@ import com.kimera.pas.hookSafe
  *   queryEvents(long, long)                       -> UsageEvents
  *   queryEventsForSelf(long, long)                -> UsageEvents
  *   queryEventStats(int, long, long)              -> List<EventStats>
- *
- * UsageEvents rebuild note (the bug that made v1 a silent no-op):
- *   On SDK 35 the hidden ctor `UsageEvents(List<Event>, String[])` sets ONLY
- *   mEventsToWrite / mEventCount / mStringPool. mEvents stays null, so
- *   getNextEvent() iterates nothing, and writeToParcel() serialises
- *   mEventsToWrite (which we hadn't set). We therefore run the ctor and then
- *   force-set mEvents, mEventsToWrite, mEventCount, mIndex, mStringPool so
- *   both read and write paths are consistent. Skipping any one of these is
- *   why the snakzy/playnearn reports never actually changed after v1.
  *
  * Gated on anti_emu_enabled; off = nothing installed.
  */
@@ -136,8 +141,6 @@ class HookUsageStats : XHook {
     }
 
     // ------------------------------------------------------------------
-    // Returns only this app's events; kept for symmetry / future-proofing.
-    // ------------------------------------------------------------------
     private fun hookQueryEventsForSelf(module: XposedModule) {
         hookSafe(module, "usage queryEventsForSelf") {
             val m = try {
@@ -159,9 +162,6 @@ class HookUsageStats : XHook {
         }
     }
 
-    // ------------------------------------------------------------------
-    // EventStats: package field is `mPackage` on SDK 35. If the field
-    // doesn't exist (some OEM builds), the filter is a no-op — safe.
     // ------------------------------------------------------------------
     private fun hookQueryEventStats(module: XposedModule) {
         hookSafe(module, "usage queryEventStats") {
@@ -202,11 +202,28 @@ class HookUsageStats : XHook {
             f.isAccessible = true
             (f.get(e) as? String)?.let { return@runCatching it }
         }
-        // public getter fallback
         runCatching { cls.getMethod("getPackageName").invoke(e) as? String }.getOrNull()
     }.getOrNull()
 
     // ------------------------------------------------------------------
+    /**
+     * Mutates `src` in place - no new UsageEvents, no ctor, no string pool.
+     *
+     * Why in-place, not rebuild:
+     *  - Android 15 queryEvents returns UsageEvents with mStringPool == null
+     *    when events carry direct String package names. The hidden
+     *    (List, String[]) ctor requires a non-null pool on some builds and
+     *    is fragile on others. In-place mutation sidesteps both.
+     *  - getNextEvent() reads mEvents / mEventCount / mIndex only.
+     *  - If the caller re-parcels the object, writeToParcel() on API 35 also
+     *    reads mEvents / mEventCount / mStringPool - all already consistent
+     *    because we filtered the exact list that was already there.
+     *
+     * Return contract:
+     *  - null          -> caller returns the untouched result
+     *  - src (mutated) -> caller returns src as the result (filtered)
+     *  - src (unmutated, removed == 0) -> no-op, same as returning result
+     */
     private fun filterEvents(
         module: XposedModule,
         src: UsageEvents,
@@ -214,88 +231,60 @@ class HookUsageStats : XHook {
     ): UsageEvents? = runCatching {
         val cls = UsageEvents::class.java
 
-        // 1. Read source events (read side OR write side).
-        val original: List<*>? =
-            readListField(cls, src, "mEvents")
-                ?: readListField(cls, src, "mEventsToWrite")
+        val fEvents = cls.getDeclaredField("mEvents").apply { isAccessible = true }
+        val fEventsToWrite = runCatching {
+            cls.getDeclaredField("mEventsToWrite").apply { isAccessible = true }
+        }.getOrNull()
+        val fEventCount = cls.getDeclaredField("mEventCount").apply { isAccessible = true }
+        val fIndex = runCatching {
+            cls.getDeclaredField("mIndex").apply { isAccessible = true }
+        }.getOrNull()
 
-        if (original == null) {
+        @Suppress("UNCHECKED_CAST")
+        val readSide = fEvents.get(src) as? List<UsageEvents.Event>
+
+        @Suppress("UNCHECKED_CAST")
+        val writeSide = fEventsToWrite?.get(src) as? List<UsageEvents.Event>
+
+        val source = readSide ?: writeSide ?: run {
             if (!eventsRebuildLogged) {
                 eventsRebuildLogged = true
                 module.log(Log.INFO, TAG, "[PAS] $label: no mEvents/mEventsToWrite — passthrough")
             }
             return@runCatching null
         }
-        if (original.isEmpty()) return@runCatching src
 
-        // 2. Filter.
-        val kept = ArrayList<Any?>(original.size)
+        if (source.isEmpty()) return@runCatching src
+
+        val kept = ArrayList<UsageEvents.Event>(source.size)
         var removed = 0
-        for (e in original) {
-            val pkg = runCatching { (e as? UsageEvents.Event)?.packageName }.getOrNull()
+        for (e in source) {
+            val pkg = runCatching { e.packageName }.getOrNull()
             if (pkg != null && SweepList.isHidden(pkg, hidden)) {
                 removed++
                 SweepList.logHit(module, label, pkg)
-                continue
+            } else {
+                kept.add(e)
             }
-            kept.add(e)
         }
         if (removed == 0) return@runCatching src
 
-        val keptTyped = kept.mapNotNull { it as? UsageEvents.Event }
-
-        // 3. String pool is required for getPackageName() to work on the
-        //    rebuilt object. On SDK 35 it's always non-null for queryEvents
-        //    results, but we never rebuild blind.
-        val stringPool: Array<String>? = runCatching {
-            cls.getDeclaredField("mStringPool")
-                .apply { isAccessible = true }
-                .get(src) as? Array<String>
-        }.getOrNull()
-
-        if (stringPool == null) {
-            if (!eventsRebuildLogged) {
-                eventsRebuildLogged = true
-                module.log(Log.INFO, TAG, "[PAS] $label: mStringPool null — passthrough")
-            }
-            return@runCatching null
+        // Mutate the SAME object the framework gave us. This keeps every
+        // other internal field (mStringPool, mParcel, whatever OEMs added)
+        // exactly as the framework produced it.
+        fEvents.set(src, kept)
+        if (writeSide != null && fEventsToWrite != null) {
+            fEventsToWrite.set(src, kept)
         }
-
-        // 4. Canonical rebuild.
-        var path = "ctor"
-        var out: UsageEvents? = runCatching {
-            val ctor = cls.getDeclaredConstructor(
-                List::class.java,
-                Array<String>::class.java
-            ).apply { isAccessible = true }
-            ctor.newInstance(keptTyped, stringPool) as UsageEvents
-        }.getOrNull()
-
-        // 5. Fallback: field-based rebuild (older/OEM builds).
-        if (out == null) {
-            path = "fields"
-            out = runCatching {
-                val ctor = cls.getDeclaredConstructor().apply { isAccessible = true }
-                ctor.newInstance() as UsageEvents
-            }.getOrNull()
-        }
-        if (out == null) return@runCatching null
-
-        // 6. Normalise the four state fields. Without mEvents the read path
-        //    returns nothing; without mEventsToWrite writeToParcel() empties
-        //    the object over IPC.
-        forceSetField(cls, out, "mEvents", ArrayList(keptTyped))
-        forceSetField(cls, out, "mEventsToWrite", ArrayList(keptTyped))
-        forceSetIntField(cls, out, "mEventCount", keptTyped.size)
-        forceSetIntField(cls, out, "mIndex", 0)
-        forceSetField(cls, out, "mStringPool", stringPool)
+        fEventCount.setInt(src, kept.size)
+        fIndex?.setInt(src, 0)
 
         if (!eventsRebuildLogged) {
             eventsRebuildLogged = true
             module.log(Log.INFO, TAG,
-                "[PAS] $label: rebuilt ($removed hidden, ${keptTyped.size} kept, via=$path)")
+                "[PAS] $label: filtered in place ($removed hidden, ${kept.size} kept)")
         }
-        out
+        src
     }.onFailure {
         if (!eventsRebuildLogged) {
             eventsRebuildLogged = true
@@ -303,26 +292,4 @@ class HookUsageStats : XHook {
                 "[PAS] $label: passthrough (${it::class.simpleName}: ${it.message})")
         }
     }.getOrNull()
-
-    // ------------------------------------------------------------------
-    @Suppress("UNCHECKED_CAST")
-    private fun readListField(cls: Class<*>, obj: Any, name: String): List<*>? =
-        runCatching {
-            val f = cls.getDeclaredField(name).apply { isAccessible = true }
-            f.get(obj) as? List<*>
-        }.getOrNull()
-
-    private fun forceSetField(cls: Class<*>, obj: Any, name: String, value: Any?) {
-        runCatching {
-            val f = cls.getDeclaredField(name).apply { isAccessible = true }
-            f.set(obj, value)
-        }
-    }
-
-    private fun forceSetIntField(cls: Class<*>, obj: Any, name: String, value: Int) {
-        runCatching {
-            val f = cls.getDeclaredField(name).apply { isAccessible = true }
-            f.setInt(obj, value)
-        }
-    }
 }
