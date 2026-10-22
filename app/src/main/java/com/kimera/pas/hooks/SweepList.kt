@@ -5,7 +5,7 @@ import io.github.libxposed.api.XposedModule
 import com.kimera.pas.TAG
 
 /**
- * v2.12.16 shared hidden-package list.
+ * v2.12.15 shared hidden-package list.
  *
  * Design goals (this is our equivalent of HMA-OSS's "powerful presets"):
  *
@@ -35,6 +35,14 @@ object SweepList {
      *  listed here disappears from UsageStatsManager results without being
      *  hidden from PackageManager. */
     const val PREF_USAGE_BLACKLIST = "usage_stats_blacklist"
+
+    /**
+     * v2.12.17: extra names hidden from usage stats ONLY. The system VPN
+     * consent helper is a dead giveaway in a usage report (it only runs when
+     * a VPN was brought up), but it must stay visible to PackageManager so
+     * VPN clients keep working.
+     */
+    private const val USAGE_DEFAULT_HIDDEN = "com.android.vpndialogs"
 
     /**
      * Always-hidden baseline. Curated. Do NOT add system apps here unless
@@ -133,8 +141,8 @@ object SweepList {
         } catch (t: Throwable) {
             ""
         }
-        if (extra.isEmpty()) return base
-        return base + parse(extra)
+        if (extra.isEmpty()) return base + parse(USAGE_DEFAULT_HIDDEN)
+        return base + parse(USAGE_DEFAULT_HIDDEN) + parse(extra)
     }
 
     private fun parse(s: String): Set<String> =

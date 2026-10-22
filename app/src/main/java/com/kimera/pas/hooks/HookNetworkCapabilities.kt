@@ -16,10 +16,30 @@ class HookNetworkCapabilities : XHook {
 
     override fun injectHook(module: XposedModule) {
         hookHasTransport(module)
+        hookGetTransportTypes(module)
         hookGetCapabilities(module)
         hookHasCapability(module)
         hookToString(module)
         hookGetTransportInfo(module)
+    }
+
+    /**
+     * v2.12.17: hasTransport(VPN) was already forced false, but
+     * getTransportTypes() returns the raw int[] and let detectors see
+     * TRANSPORT_VPN anyway. Strip it here as well.
+     */
+    private fun hookGetTransportTypes(module: XposedModule) {
+        hookSafe(module, "NetworkCapabilities.getTransportTypes") {
+            val m = runCatching {
+                NetworkCapabilities::class.java.getMethod("getTransportTypes")
+            }.getOrNull() ?: return@hookSafe
+            module.hook(m).intercept { chain ->
+                val result = chain.proceed() as? IntArray ?: return@intercept chain.proceed()
+                if (!result.contains(NetworkCapabilities.TRANSPORT_VPN)) return@intercept result
+                module.log(Log.INFO, TAG, "NetworkCapabilities.getTransportTypes -> VPN stripped")
+                result.filter { it != NetworkCapabilities.TRANSPORT_VPN }.toIntArray()
+            }
+        }
     }
 
     private fun hookHasTransport(module: XposedModule) {

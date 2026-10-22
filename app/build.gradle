@@ -12,8 +12,8 @@ android {
         applicationId "com.kimera.pas"
         minSdkVersion 26
         targetSdkVersion 34
-        versionCode 221
-        versionName "2.12.16"
+        versionCode 222
+        versionName "2.12.17"
 
         ndk {
             abiFilters 'x86_64', 'x86', 'arm64-v8a'
