@@ -35,6 +35,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.kimera.pas.spoof.DeviceCatalog
+import com.kimera.pas.spoof.SystemModLink
 import java.io.File
 import java.security.SecureRandom
 
@@ -615,6 +616,14 @@ class MainActivity : Activity() {
         buildSdkOptions()
         SpoofSettings.ensureListener(this)
         loadSaved()
+        // v2.13.0: KSU SystemMod link - repair /data/local/SystemMod_config/
+        // spoof_hardware.txt on launch when it is missing or empty (created
+        // from the saved CPU selection; an existing non-empty file is left
+        // untouched). No-op until a CPU model has actually been selected.
+        val savedCpu = SpoofSettings.load(this).getString("cpu_value", "") ?: ""
+        if (savedCpu.isNotBlank()) {
+            SystemModLink.ensure(DeviceCatalog.cpu(savedCpu).hardware)
+        }
         attachListeners()
         updateDirty()
         refreshSpoofStatus()
@@ -1663,6 +1672,14 @@ class MainActivity : Activity() {
 
         val err = SpoofSettings.save(this, currentMap())
         SpoofSettings.ensureListener(this) // apply & reconnect
+        // v2.13.0: KSU SystemMod link - mirror the selected CPU's catalog
+        // hardware value (s5e9945 for Samsung Exynos 2400, qcom for every
+        // Qualcomm SoC, ...) into /data/local/SystemMod_config/spoof_
+        // hardware.txt so the KernelSU module spoofs ro.hardware /
+        // ro.board.platform system-wide, matching the per-app CPU spoof.
+        SystemModLink.sync(
+            DeviceCatalog.CPUS.getOrElse(cpuSel) { DeviceCatalog.CPUS[0] }.hardware
+        )
         toast(err ?: "Saved \u2713 - takes effect when the scoped app restarts")
         appliedChip.visibility = View.VISIBLE
         ui.removeCallbacks(hideApplied)
