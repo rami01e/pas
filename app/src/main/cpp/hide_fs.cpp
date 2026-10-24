@@ -883,6 +883,71 @@ static bool CpuTopologySpoofValue(const char* path, char* out, size_t cap) {
     return false;
 }
 
+// ---------------------------------------------------------------------------
+// v3.1.0 (Duck arm64CpuIdentity): serve the ARM64 MIDR_EL1 sysfs identity.
+//
+// Duck's kernelcheck "arm64CpuIdentity" method reads the per-core register
+// identity from /sys/devices/system/cpu/cpuN/regs/identification/midr_el1
+// (raw openat) and derives the same value from the /proc/cpuinfo blocks
+// ("CPU implementer/variant/part/revision"), then compares the two. On an
+// x86_64 host those sysfs nodes do not exist, so an ARM-presenting ABI list
+// left the check with "cached identity unavailable / Unsupported ABI".
+//
+// The value is SYNTHESIZED from the same profile data the cpuinfo rewrite
+// renders (CpuSpoofImplementer / per-cluster part / rXpY revision), so the
+// sysfs node and the cpuinfo block can never disagree. Gated on the ABI list
+// feature presenting an ARM profile AND the CPU profile being active - with
+// any other configuration this answers false and nothing changes (the abi
+// list functionality itself is untouched: this only ADDS content for files
+// that do not exist on the host).
+// ---------------------------------------------------------------------------
+static bool CpuMidrSpoofValue(const char* path, char* out, size_t cap) {
+    if (!AbiArmSpoofActive() || !CpuSpoofActive() || path == nullptr) return false;
+    static const char kPre[] = "/sys/devices/system/cpu/cpu";
+    static const char kSuf[] = "/regs/identification/midr_el1";
+    const size_t pl = sizeof(kPre) - 1;
+    const size_t sl = sizeof(kSuf) - 1;
+    const size_t n = strlen(path);
+    if (n <= pl + sl || strncmp(path, kPre, pl) != 0 ||
+        strncmp(path + n - sl, kSuf, sl) != 0) {
+        return false;
+    }
+    int core = 0;
+    bool hasCore = false;
+    for (size_t i = pl; i + sl < n; i++) {
+        char c = path[i];
+        if (c < '0' || c > '9') return false;
+        core = core * 10 + (c - '0');
+        hasCore = true;
+    }
+    if (!hasCore) return false;
+    const int total = ComputeSpoofTotalCores();
+    if (total <= 0 || core < 0 || core >= total) return false;
+
+    const PasCpuCluster* cl =
+        (CpuClusterTableSize() > 0) ? CpuClusterForCore(core, nullptr) : nullptr;
+    std::string partStr = (cl != nullptr && cl->part[0] != '\0') ? std::string(cl->part)
+                                                                 : CpuSpoofPart();
+    std::string implStr = CpuSpoofImplementer();
+    const char* rev = (cl != nullptr) ? cl->revision : "";
+    if (partStr.empty() || implStr.empty()) return false;
+
+    unsigned long impl = strtoul(implStr.c_str(), nullptr, 0);  // "0x41"
+    unsigned long part = strtoul(partStr.c_str(), nullptr, 0);  // "0xd4e"
+    if (impl == 0 || part == 0) return false;
+    unsigned long variant = 0;
+    unsigned long revision = 1;  // matches the cpuinfo rewrite default
+    if (rev != nullptr && rev[0] == 'r') {
+        variant = strtoul(rev + 1, nullptr, 16);
+        const char* p = strchr(rev, 'p');
+        if (p != nullptr) revision = strtoul(p + 1, nullptr, 10);
+    }
+    unsigned long midr = ((impl & 0xffUL) << 24) | ((variant & 0xfUL) << 20) |
+                         ((part & 0xfffUL) << 4) | (revision & 0xfUL);
+    snprintf(out, cap, "0x%08lx\n", midr);
+    return true;
+}
+
 static long ServeSysfsSpoofFd(const char* path, int flags) {
     if (!CpuSpoofActive() || path == nullptr) return -1;
     if (strcmp(path, "/proc/cpuinfo") == 0) {
@@ -895,7 +960,8 @@ static long ServeSysfsSpoofFd(const char* path, int flags) {
         return mfd;
     }
     char val[64];
-    if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
+    if (CpuMidrSpoofValue(path, val, sizeof(val)) ||
+        CpuFreqSpoofValue(path, val, sizeof(val)) ||
         CpuGovernorSpoofValue(path, val, sizeof(val)) ||
         CpuTopologySpoofValue(path, val, sizeof(val))) {
         return CreateMemfdWith(val, strlen(val), flags);
@@ -936,7 +1002,8 @@ static bool HandleSpecialOpen(const char* path, int flags, int* fdOut) {
         }
         if (CpuSpoofActive() && (flags & O_ACCMODE) == O_RDONLY) {
             char val[64];
-            if (CpuFreqSpoofValue(path, val, sizeof(val)) ||
+            if (CpuMidrSpoofValue(path, val, sizeof(val)) ||
+                CpuFreqSpoofValue(path, val, sizeof(val)) ||
                 CpuGovernorSpoofValue(path, val, sizeof(val)) ||
                 CpuTopologySpoofValue(path, val, sizeof(val))) {
                 int mfd = CreateMemfdWith(val, strlen(val), flags);

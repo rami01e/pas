@@ -68,6 +68,24 @@ import com.kimera.pas.spoof.SpoofState
  * Build patch already shows the app, so the child process agrees with the
  * spoofed identity instead of leaking the emulator's real one.
  *
+ * v3.1.0 (Duck items 2 + 8): two NEW aligned channels close the remaining
+ * source-mismatch leaks:
+ *   - getprop (bare dump) is no longer silenced to empty output. Duck's
+ *     systemproperties probe parses ONE exec'd dump and cross-checks it
+ *     against the in-process reads; an empty dump reads as "unavailable",
+ *     a raw dump as "adb" while reflection/native libc answer "mtp".
+ *     The dump now runs through a sed that applies the SAME alignment the
+ *     native prop layer does (init.svc.adbd stopped->running,
+ *     persist.sys.usb.config adb->mtp), so all three sources agree.
+ *   - `uname` (any arg set) pipes through a sed that strips
+ *     "@[A-Za-z0-9_]+" mentions - exactly Duck kernelcheck's MENTION_REGEX
+ *     - so the exec'd `uname -a` identity agrees with the sanitized
+ *     /proc/version + utsname views (hide_antiemu.cpp). Release/version
+ *     numbers are untouched.
+ * Both replacements carry the PAS_ALIGN marker so payloadVerdict passes
+ * them through on the double-fire (Runtime.exec funnel ->
+ * ProcessBuilder.start) instead of silencing the aligned output.
+ *
  * Failure philosophy: analysis bugs and immutable command lists fail OPEN
  * (the original command runs untouched) - this shield must never break a
  * legitimate exec and never throws from an interceptor body (Vector's
@@ -237,8 +255,20 @@ class HookExec : XHook {
         val rest = cmd.drop(1)
         return when (base) {
             "getprop" -> when {
-                rest.isEmpty() -> listOf(TRUE_BIN)
+                rest.isEmpty() -> listOf(SH_BIN, "-c", GETPROP_ALIGN_SH)
                 else -> PROP_SPOOF[rest[0]]?.let { listOf(ECHO_BIN, it) }
+            }
+            "uname" -> {
+                // v3.1.0 (item 2): the exec'd kernel identity must agree
+                // with the sanitized in-process views. Only plain flag/word
+                // args (-a, -r, -s, ...) are rewritten; anything exotic
+                // passes through untouched.
+                if (rest.all { it.matches(SAFE_UNAME_ARG) }) {
+                    val inner = (listOf("uname") + rest).joinToString(" ")
+                    listOf(SH_BIN, "-c", "$inner | $UNAME_SANITIZE_SH")
+                } else {
+                    null
+                }
             }
             "ls" -> {
                 // v3.0.0 (P5): a listing of Android/data|obb is answered by
@@ -277,6 +307,10 @@ class HookExec : XHook {
      * (su, which, setenforce) - silenced to exit 1.
      */
     private fun payloadVerdict(payload: String): Int {
+        // v3.1.0: our own aligned dump/sanitize pipelines carry the marker
+        // and pass through untouched (the double-fire second analysis would
+        // otherwise silence them to TRUE_BIN).
+        if (payload.contains(PAS_ALIGN_MARKER)) return 0
         val parts = payload.split(Regex("[^A-Za-z0-9_./-]+")).filter { it.isNotEmpty() }
         val hit = parts.any { it in SHELL_TOKENS } || SHELL_PATHS.any { payload.contains(it) }
         if (!hit) return 0
@@ -299,6 +333,36 @@ class HookExec : XHook {
         private const val TRUE_BIN = "/system/bin/true"
         private const val FALSE_BIN = "/system/bin/false"
         private const val ECHO_BIN = "/system/bin/echo"
+        private const val SH_BIN = "/system/bin/sh"
+
+        /**
+         * v3.1.0: marker embedded in the aligned sh -c pipelines so the
+         * second hook of a delegating exec lets them pass.
+         */
+        private const val PAS_ALIGN_MARKER = "# PAS_ALIGN"
+
+        /**
+         * v3.1.0 (item 8): Duck parses ONE exec'd `getprop` dump and
+         * cross-checks it against reflection + native libc reads. The sed
+         * applies the exact same alignment the native prop layer
+         * (hide_antiemu.cpp AntiEmuPropRewrite) serves in-process, so all
+         * three sources agree. Real values pass through untouched.
+         */
+        private const val GETPROP_ALIGN_SH =
+            "getprop | sed -E " +
+                "-e 's/^\\[init\\.svc\\.adbd\\]: \\[stopped\\]/[init.svc.adbd]: [running]/' " +
+                "-e 's/^\\[persist\\.sys\\.usb\\.config\\]: \\[adb\\]/[persist.sys.usb.config]: [mtp]/' " +
+                PAS_ALIGN_MARKER
+
+        /**
+         * v3.1.0 (item 2): strip maintainer-style mentions from the exec'd
+         * kernel identity - exactly Duck kernelcheck's MENTION_REGEX
+         * "@[A-Za-z0-9_]+". Release/version numbers stay raw.
+         */
+        private const val UNAME_SANITIZE_SH = "sed -E 's/@[A-Za-z0-9_]+//g' $PAS_ALIGN_MARKER"
+
+        /** Plain flag/word uname args ("-a", "-r", ...) safe to re-spawn. */
+        private val SAFE_UNAME_ARG = Regex("^[A-Za-z0-9_-]{1,16}$")
 
         /**
          * v3.0.0 (P5): ignorable Unicode codepoints Duck's Android/data
@@ -375,6 +439,8 @@ class HookExec : XHook {
             "ro.build.display.id" to Build.DISPLAY,
             "ro.build.version.incremental" to Build.VERSION.INCREMENTAL,
             "ro.build.characteristics" to "default",
+            "persist.sys.usb.config" to "mtp",
+            "init.svc.adbd" to "running",
             "ro.product.model" to Build.MODEL,
             "ro.product.brand" to Build.BRAND,
             "ro.product.device" to Build.DEVICE,
