@@ -50,6 +50,19 @@ import com.kimera.pas.spoof.SpoofState
  *                                    exactly what "not found" looks like)
  *   cat /proc/<mount files>      -> /system/bin/true
  *   sh -c "<root vocabulary>"    -> true/false depending on the probe kind
+ *
+ * v3.0.0 (P5): Duck Detector's "Android/data Ignorable CodePoint Bypass"
+ * probes run ProcessBuilder("ls", <path with an invisible codepoint>) -
+ * "/sdcard/Android/data\u200B/", "/sdcard\u00AD/Android/data", ...
+ * The inserted ignorable Unicode codepoints make exact-byte path matching
+ * miss while the kernel still resolves the same directory (MuMu's FUSE is
+ * only partially patched against CVE-2024-43093), so the listing leaks the
+ * hidden packages' storage dirs. The `ls` argv path is normalized (ignorable
+ * codepoints stripped) before matching, and `ls` (direct or as a
+ * toybox/busybox applet) targeting Android/data|obb is answered with
+ * /system/bin/false - exit 1, no output - which is exactly what the FUSE
+ * denial on a patched device looks like (the kernelcheck probe grades that
+ * "blocked" = patch present, the dangerousapps probe gets an empty list).
  * Identity-critical getprop keys (ro.build.fingerprint, ro.product.*,
  * ro.build.tags, ...) are answered with the SAME values the in-process
  * Build patch already shows the app, so the child process agrees with the
@@ -227,6 +240,22 @@ class HookExec : XHook {
                 rest.isEmpty() -> listOf(TRUE_BIN)
                 else -> PROP_SPOOF[rest[0]]?.let { listOf(ECHO_BIN, it) }
             }
+            "ls" -> {
+                // v3.0.0 (P5): a listing of Android/data|obb is answered by
+                // FUSE on a patched device; MuMu's partially patched FUSE
+                // can be talked into listing it (CVE-2024-43093 class),
+                // which leaks hidden packages. Answer with exit 1 / no
+                // output - the exact "denied" signature of a patched FUSE.
+                // The path is normalized first so codepoint-mangled variants
+                // ("/sdcard/Android/data\u200B/") match the same rule.
+                val target = rest.firstOrNull { it.startsWith("/") } ?: return null
+                val n = normalizeIgnorable(target).trimEnd('/')
+                if (FUSE_DATA_DIRS.any { n == it || n.startsWith("$it/") }) {
+                    listOf(FALSE_BIN)
+                } else {
+                    null
+                }
+            }
             "mount", "umount" -> listOf(TRUE_BIN)
             "getenforce" -> listOf(ECHO_BIN, "Enforcing")
             "setenforce" -> listOf(FALSE_BIN)
@@ -270,6 +299,29 @@ class HookExec : XHook {
         private const val TRUE_BIN = "/system/bin/true"
         private const val FALSE_BIN = "/system/bin/false"
         private const val ECHO_BIN = "/system/bin/echo"
+
+        /**
+         * v3.0.0 (P5): ignorable Unicode codepoints Duck's Android/data
+         * bypass inserts into probe paths. Superset of the detector's lists
+         * (soft hyphen, combining grapheme joiner, hangul fillers, Mongolian
+         * vowel separator, ZW* family, directional marks/isolates, word
+         * joiners, variation selectors, BOM, interlinear annotations).
+         */
+        private val IGNORABLE_CP = Regex(
+            "[\\u00AD\\u034F\\u061C\\u115F\\u1160\\u17B4\\u17B5\\u180E" +
+                "\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u2064\\u2066-\\u206F" +
+                "\\u3164\\uFE00-\\uFE0F\\uFEFF\\uFFA0\\uFFF9-\\uFFFB]"
+        )
+
+        private fun normalizeIgnorable(s: String): String = IGNORABLE_CP.replace(s, "")
+
+        /** External-storage app-data roots whose listing is FUSE-gated. */
+        private val FUSE_DATA_DIRS = listOf(
+            "/sdcard/Android/data",
+            "/sdcard/Android/obb",
+            "/storage/emulated/0/Android/data",
+            "/storage/emulated/0/Android/obb",
+        )
 
         /** Root binaries a `which` / `ls` probe may look for. */
         private val ROOT_BINARIES = setOf(

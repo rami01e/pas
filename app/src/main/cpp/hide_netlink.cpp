@@ -11,6 +11,18 @@
 //   NETLINK_ROUTE      - RTM_NEWLINK / RTM_NEWADDR / RTM_NEWROUTE / RTM_NEWRULE
 //   NETLINK_SOCK_DIAG  - SOCK_DIAG_BY_FAMILY (inet_diag_msg entries)
 //
+// v3.0.0 (P6): the send side is now covered as well. AOSP SELinux policy
+// (kernel commit b4563881284b, "ANDROID: selinux: modify RTM_GETLINK
+// permission") denies RTM_GETLINK dumps to apps targeting SDK 30+ on
+// Android 11/12 and to every app from Android 13, and denies RTM_GETNEIGH
+// from Android 13 for targetSdk 32+ - CTS checks both. Detectors use the
+// denial as a permission-boundary probe: an ANSWERED dump leaks the wlan0
+// hardware MAC (RTM_GETLINK) and the LAN neighbour table (RTM_GETNEIGH) and
+// grades the device "boundary not enforced". sendto/sendmsg on a tracked
+// NETLINK_ROUTE socket whose request type is RTM_GETLINK or RTM_GETNEIGH now
+// fail with EACCES - the exact errno SELinux produces and the exact signal
+// the boundary probe expects ("enforced").
+//
 // v2.3.10 fix: the "not tracked" sentinel was 0, which collides with
 // NETLINK_ROUTE (also 0). Every route/link/rule filter was short-circuiting
 // out of FilterNetlinkBuffer and letting the kernel's response pass through
@@ -424,12 +436,59 @@ ssize_t HideRecvMsg(int fd, struct msghdr* msg, int flags) {
     return n;
 }
 
+// ---------------------------------------------------------------------------
+// v3.0.0 (P6): SELinux boundary emulation on the request side.
+//
+// Both detectors (RTM_GETLINK for the NIC MAC, RTM_GETNEIGH for the ARP
+// table) send a standard dump request with sendto/sendmsg and expect the
+// kernel to answer with EACCES when the appdomain is not allowed nlmsg_read.
+// MuMu's policy is permissive, so the request used to be answered - the
+// boundary probe then read the physical MAC / a LAN neighbour straight out
+// of the response. The check is deliberately narrow: only tracked
+// NETLINK_ROUTE sockets, only the two GET request types, nothing else is
+// touched (route dumps, rule dumps, RTM_GETADDR etc. keep working).
+// ---------------------------------------------------------------------------
+
+static bool RouteRequestDenied(const void* buf, size_t len) {
+    if (buf == nullptr || len < sizeof(struct nlmsghdr)) return false;
+    const struct nlmsghdr* nh = (const struct nlmsghdr*)buf;
+    if (nh->nlmsg_len < sizeof(struct nlmsghdr) || nh->nlmsg_len > len) return false;
+    return nh->nlmsg_type == RTM_GETLINK || nh->nlmsg_type == RTM_GETNEIGH;
+}
+
+ssize_t HideSendTo(int fd, const void* buf, size_t len, int flags,
+                   const struct sockaddr* addr, socklen_t addrlen) {
+    BYTEHOOK_STACK_SCOPE();
+    if (len >= sizeof(struct nlmsghdr) && TrackedProtocol(fd) == NETLINK_ROUTE &&
+        RouteRequestDenied(buf, len)) {
+        errno = EACCES;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(HideSendTo, fd, buf, len, flags, addr, addrlen);
+}
+
+ssize_t HideSendMsg(int fd, const struct msghdr* msg, int flags) {
+    BYTEHOOK_STACK_SCOPE();
+    if (msg != nullptr && msg->msg_iovlen >= 1 && msg->msg_iov != nullptr &&
+        msg->msg_iov[0].iov_base != nullptr &&
+        msg->msg_iov[0].iov_len >= sizeof(struct nlmsghdr) &&
+        TrackedProtocol(fd) == NETLINK_ROUTE &&
+        RouteRequestDenied(msg->msg_iov[0].iov_base, msg->msg_iov[0].iov_len)) {
+        errno = EACCES;
+        return -1;
+    }
+    return BYTEHOOK_CALL_PREV(HideSendMsg, fd, msg, flags);
+}
+
 void InstallNetlinkHooks() {
     HookLibcSym("socket", (void*)HideSocket);
     HookLibcSym("close", (void*)HideClose);
     HookLibcSym("recv", (void*)HideRecv);
     HookLibcSym("recvfrom", (void*)HideRecvFrom);
     HookLibcSym("recvmsg", (void*)HideRecvMsg);
+    // v3.0.0 (P6): request-side boundary (RTM_GETLINK / RTM_GETNEIGH).
+    HookLibcSym("sendto", (void*)HideSendTo);
+    HookLibcSym("sendmsg", (void*)HideSendMsg);
 }
 
 }  // namespace pas
