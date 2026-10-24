@@ -18,6 +18,7 @@ add_library(pas SHARED
     hide_vulkan.cpp
     hide_ssl.cpp
     hide_antiemu.cpp
+    hide_mediadrm.cpp
     hook_ssl_arm64.cpp
     hook_ssl_x64.cpp)
 

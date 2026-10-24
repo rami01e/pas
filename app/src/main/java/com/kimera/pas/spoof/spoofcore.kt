@@ -1,4 +1,4 @@
-// spoofcore.kt v2.12.16
+// spoofcore.kt v3.0.0
 
 package com.kimera.pas.spoof
 
@@ -16,10 +16,15 @@ import java.lang.reflect.Field
  *
  * v2.9.1: ANTI-EMU does NOT duplicate the ABI spoof. The "abi_enabled"
  * toggle stays the single owner of Build.CPU_ABI / CPU_ABI2 /
- * SUPPORTED_*_ABIS / os.arch. The anti-emu Java layer only masks what no
- * other toggle covers (os.version / os.name). For a coherent arm64 story
- * run with BOTH toggles ON: anti-emu owns the native side (props, /proc
- * content, uname), the abi toggle owns the Java Build fields.
+ * SUPPORTED_*_ABIS / os.arch.
+ *
+ * v3.0.0: ANTI-EMU lost its kernel-identity and os.version/os.name extras
+ * entirely - the raw kernel is reported consistently from every source and
+ * the ROM/KSU layer owns the real identity. Arming is now race-free:
+ * nativeSetAntiEmu(true) installs the native hooks itself, and a remote-prefs
+ * change listener re-applies the whole spoof block whenever the manager saves
+ * (late scope-adds and saves racing process start no longer leave the
+ * process on stale defaults until the next restart).
  *
  * v2.9.2: init() now runs apply(prefs) SYNCHRONOUSLY before returning, so
  * nativeSetCpu / nativeSetCpuClusters have landed before the target app's
@@ -38,13 +43,6 @@ object SpoofCore {
     /** Package of the scoped process, delivered from onPackageReady. Used by
      *  the ABI-spoof blacklist (see [abiBlacklistMatches]). */
     private var scopedPackage: String = ""
-
-    // vNEXT: kernel identity reported by uname(2) and /proc/version. The
-    // native anti-emu layer rewrites both; os.version uses the same release
-    // so Java and native readers cannot disagree. Override per device if a
-    // specific profile needs an exact vendor string.
-    private const val ANTI_EMU_KERNEL_RELEASE = "5.4.163-perf+"
-    private const val ANTI_EMU_KERNEL_VERSION = "#1 SMP PREEMPT Tue Oct 15 09:12:33 UTC 2024"
 
     external fun nativeSetConfig(
         sdkOn: Boolean,
@@ -117,14 +115,15 @@ object SpoofCore {
 
     external fun nativeSetSslArm64(on: Boolean)
 
-    // vNEXT: kernel identity for native readers (uname release/version and
-    // /proc/version). Must match the Java os.version spoof below.
-    external fun nativeSetKernelSpoof(on: Boolean, release: String, version: String)
+    // v3.0.0: widevine NDK-parity layer (hide_mediadrm.cpp). Mirrors the
+    // Java MediaDrm story (securityLevel L1 / HDCP-2.2 / deviceUniqueId) onto
+    // the AMediaDrm_* surface so detectors reading through libmediandk.so see
+    // exactly what the Java hooks report. armed with the widevine toggle.
+    external fun nativeSetWidevineNdk(on: Boolean, idHex: String)
 
     // v2.9.0: master switch for the native ANTI-EMU layer (hide_antiemu.cpp).
-    // Java-side extras live in applyAntiEmuJavaExtras(); there is deliberately
-    // no second ABI toggle here - the abiOn block in apply() remains the only
-    // owner of the Java ABI fields.
+    // v3.0.0: there is deliberately no second ABI toggle here - the abiOn
+    // block in apply() remains the only owner of the Java ABI fields.
     external fun nativeSetAntiEmu(on: Boolean)
 
     // vNEXT: adb-root family prop spoof (service.adb.root / ro.adb.secure / ...).
@@ -157,6 +156,27 @@ object SpoofCore {
             apply(prefs)
         } catch (t: Throwable) {
             Log.w(TAG, "[PAS] spoof: sync apply failed: ${t.message}")
+        }
+
+        // v3.0.0 (P0 fix #2): the remote preferences can sync AFTER the first
+        // apply - a scope added while the manager process was disconnected, or
+        // a save racing this process start, used to leave the process on stale
+        // defaults (anti-emu read OFF in exactly that scenario) until the next
+        // app restart. Re-run the full apply on every remote change so toggles
+        // land live. apply() is idempotent: every value is re-derived from the
+        // current snapshot and every setter is runCatching-guarded; apply()
+        // never writes preferences, so the listener cannot feed back into
+        // itself.
+        runCatching {
+            prefs.registerOnSharedPreferenceChangeListener { _, _ ->
+                try {
+                    apply(prefs)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "[PAS] spoof: prefs-change reapply failed: ${t.message}")
+                }
+            }
+        }.onFailure {
+            Log.i(TAG, "[PAS] spoof: remote prefs change listener unavailable (${it.message})")
         }
 
         // Background short-retry loop: some native setters can land
@@ -236,14 +256,10 @@ object SpoofCore {
         SpoofState.netCellularNative = SpoofState.netCellular
         runCatching { nativeSetNetCellular(SpoofState.netCellular) }
         runCatching { nativeSetAntiEmu(SpoofState.antiEmuOn) }
-        runCatching {
-            nativeSetKernelSpoof(
-                SpoofState.antiEmuOn,
-                ANTI_EMU_KERNEL_RELEASE,
-                ANTI_EMU_KERNEL_VERSION
-            )
-        }
-        if (SpoofState.antiEmuOn) applyAntiEmuJavaExtras()
+        // v3.0.0 (P2): arm the widevine NDK-parity layer with the same toggle
+        // and id the Java MediaDrm hooks use, so the AMediaDrm_* surface
+        // reports the same L1 story (Duck compares the two surfaces).
+        runCatching { nativeSetWidevineNdk(SpoofState.widevineOn, SpoofState.widevineId) }
         // vNEXT: adb-root family (default ON) - service.adb.root=1 is an
         // emulator/root tell; spoof it at the always-on prop layer so it no
         // longer depends on anti_emu_enabled.
@@ -408,25 +424,6 @@ object SpoofCore {
             if (pkg.startsWith("$e:")) return true
         }
         return false
-    }
-
-    /**
-     * v2.9.1 ANTI-EMU Java extras. Deliberately does NOT touch
-     * Build.CPU_ABI / CPU_ABI2 / SUPPORTED_*_ABIS / os.arch - those already
-     * have a single owner (the abiOn block above, driven by its own toggle).
-     * Only the uname-derived java.lang.System properties, which no other
-     * feature covers, are masked here so MuMu's real x86-host kernel string
-     * (6.1.90-perf+) never reaches Java-side probes. System properties are
-     * read live via System.getProperty, so a late set is still effective for
-     * anything that reads them after module init.
-     */
-    private fun applyAntiEmuJavaExtras() {
-        runCatching {
-            System.setProperty("os.version", ANTI_EMU_KERNEL_RELEASE)
-            System.setProperty("os.name", "Linux")
-        }.onFailure {
-            Log.w(TAG, "[PAS] spoof: anti-emu java extras failed: ${it.message}")
-        }
     }
 
     private val unsafe: Any? by lazy {

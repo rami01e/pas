@@ -138,14 +138,11 @@ void InstallCpuDeepHooks();
 
 // v2.9.0: ANTI-EMU native layer (hide_antiemu.cpp). Installed early, gated
 // at runtime on g_anti_emu set from Kotlin via nativeSetAntiEmu().
+// v3.0.0: InstallAntiEmuHooks is idempotent; SetAntiEmu(true) installs the
+// hooks itself, so arming can no longer race the InitWorker stage5b path.
 void InstallAntiEmuHooks();
 void SetAntiEmu(bool on);
 bool AntiEmuEnabled();
-
-// vNEXT: kernel identity for native readers (uname release/version and the
-// /proc/version body). Values must stay consistent with the Java os.version
-// spoof so signal collectors cannot cross-reference a mismatch.
-void SetAntiEmuKernel(bool on, const char* release, const char* version);
 
 void SetRecon(bool on);
 bool ReconEnabled();
