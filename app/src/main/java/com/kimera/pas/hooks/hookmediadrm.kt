@@ -7,14 +7,33 @@ import com.kimera.pas.TAG
 import com.kimera.pas.XHook
 import com.kimera.pas.hookSafe
 import com.kimera.pas.spoof.SpoofState
+import java.security.SecureRandom
 import java.util.UUID
 
 /**
- * Widevine property spoof: reports security level L1, a generated
- * deviceUniqueId and reference-device version / max HDCP strings. This covers
- * the properties that fingerprinting code reads through MediaDrm; it does not
- * create hardware-backed L1 playback (that needs a real L1 CDM), which is not
- * what app/web fingerprinting checks.
+ * Widevine spoof (v3.1.0, option B complete): "report L1, never L3" on BOTH
+ * the property surfaces and the session lifecycle.
+ *
+ * Property surfaces (unchanged): securityLevel -> L1, maxHdcpLevel ->
+ * HDCP-2.2, deviceUniqueId -> spoofed id, version / oemCrypto aligned.
+ *
+ * Session lifecycle (v3.1.0 - the "Session inconclusive / maximum session:
+ * FAILURE / SESSION_OPEN(RUNTIME)" half of the Duck credential card): the
+ * MuMu CDM cannot actually open the session an L1 story advertises, so
+ * detectors that probe the credential graded the whole card inconclusive.
+ * The session surfaces are now completed to match the property story:
+ *   - openSession() / openSession(level) answer a non-empty session id when
+ *     the real CDM fails (the card requires sessionStatus = SUCCESS),
+ *   - getSecurityLevel(session) answers HW_SECURE_ALL when the real read
+ *     fails or reports anything lower (actualSessionSecurityLevel must not
+ *     be "known below HW_SECURE_ALL" while HW_SECURE_ALL capability is
+ *     advertised),
+ *   - getKeyRequest(...) answers a synthetic request on failure (the card
+ *     requires keyRequestStatus = SUCCESS once a session exists),
+ *   - closeSession(...) swallows failures (a fake session id cannot be
+ *     closed by the CDM and that error is pure noise).
+ * Every hook still tries the REAL call first and only substitutes on
+ * failure/empty, so a device with a working CDM keeps its real behaviour.
  */
 class HookMediaDrm : XHook {
 
@@ -27,6 +46,10 @@ class HookMediaDrm : XHook {
         hookIsCryptoSchemeSupported(module)
         hookMaxSecurityLevel(module)
         hookOpenSession(module)
+        hookOpenSessionNoArg(module)
+        hookSessionSecurityLevel(module)
+        hookGetKeyRequest(module)
+        hookCloseSession(module)
         hookChromiumBridge(module)
         val has3 = runCatching {
             MediaDrm::class.java.getMethod(
@@ -181,7 +204,7 @@ class HookMediaDrm : XHook {
                             drm.openSession()
                         } catch (t: Throwable) {
                             module.log(Log.INFO, TAG, "[PAS] default openSession failed: $t")
-                            null
+                            newFakeSessionId()
                         }
                     } else {
                         chain.proceed()
@@ -191,6 +214,116 @@ class HookMediaDrm : XHook {
                 }
             }
         }
+    }
+
+    /**
+     * v3.1.0: the no-arg openSession() is what credential/session probes
+     * actually call (Duck's openMaximumSecuritySession -> openSession()).
+     * The real call fails on an emulator CDM that cannot honor the L1
+     * story; answer a non-empty synthetic session so the caller's session
+     * pipeline continues instead of grading SESSION_OPEN(FAILURE).
+     */
+    private fun hookOpenSessionNoArg(module: XposedModule) {
+        hookSafe(module, "MediaDrm.openSession()") {
+            val method = MediaDrm::class.java.getMethod("openSession")
+            module.hook(method).intercept { chain ->
+                if (!SpoofState.widevineOn) return@intercept chain.proceed()
+                val orig = try {
+                    chain.proceed() as? ByteArray
+                } catch (t: Throwable) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.openSession failed -> synthetic session ($t)")
+                    null
+                }
+                if (orig != null && orig.isNotEmpty()) {
+                    orig
+                } else {
+                    newFakeSessionId()
+                }
+            }
+        }
+    }
+
+    /**
+     * v3.1.0: session-level reads must never report below HW_SECURE_ALL
+     * while the property story advertises L1 + HW_SECURE_ALL capability.
+     * The real read wins when it already answers 5; anything else (throw,
+     * L3/L1 software answers) becomes HW_SECURE_ALL.
+     */
+    private fun hookSessionSecurityLevel(module: XposedModule) {
+        // getSecurityLevel(byte[]) exists on API 28+; skip silently elsewhere.
+        runCatching {
+            MediaDrm::class.java.getMethod("getSecurityLevel", ByteArray::class.java)
+        }.getOrNull()?.let { method ->
+            module.hook(method).intercept { chain ->
+                if (!SpoofState.widevineOn) return@intercept chain.proceed()
+                val orig = try {
+                    chain.proceed() as? Int
+                } catch (t: Throwable) {
+                    null
+                }
+                if (orig == MEDIA_SECURITY_LEVEL_HW_SECURE_ALL) {
+                    orig
+                } else {
+                    module.log(
+                        Log.INFO, TAG,
+                        "[PAS] MediaDrm.getSecurityLevel(orig=$orig) -> HW_SECURE_ALL"
+                    )
+                    MEDIA_SECURITY_LEVEL_HW_SECURE_ALL
+                }
+            }
+        }
+    }
+
+    /**
+     * v3.1.0: a synthetic session cannot produce a real key request; the
+     * real getKeyRequest on a fake id throws, which a probe would grade as
+     * KEY_REQUEST(FAILURE). Answer a synthetic request on failure so the
+     * local key-request step completes like on a working CDM.
+     */
+    private fun hookGetKeyRequest(module: XposedModule) {
+        hookSafe(module, "MediaDrm.getKeyRequest") {
+            val method = MediaDrm::class.java.getMethod(
+                "getKeyRequest", ByteArray::class.java, ByteArray::class.java,
+                String::class.java, Integer.TYPE, java.util.HashMap::class.java
+            )
+            module.hook(method).intercept { chain ->
+                if (!SpoofState.widevineOn) return@intercept chain.proceed()
+                try {
+                    chain.proceed()
+                } catch (t: Throwable) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.getKeyRequest failed -> synthetic ($t)")
+                    MediaDrm.KeyRequest().apply { setData(ByteArray(32)) }
+                }
+            }
+        }
+    }
+
+    /**
+     * v3.1.0: closing a synthetic session id throws in the CDM; that error
+     * is never actionable (and probes record it as SESSION_CLOSE noise).
+     * Swallow it when the widevine story is on.
+     */
+    private fun hookCloseSession(module: XposedModule) {
+        hookSafe(module, "MediaDrm.closeSession") {
+            val method = MediaDrm::class.java.getMethod("closeSession", ByteArray::class.java)
+            module.hook(method).intercept { chain ->
+                if (!SpoofState.widevineOn) return@intercept chain.proceed()
+                try {
+                    chain.proceed()
+                } catch (t: Throwable) {
+                    module.log(Log.INFO, TAG, "[PAS] MediaDrm.closeSession swallowed: $t")
+                    null
+                }
+            }
+        }
+    }
+
+    /** Non-empty, never-all-zero session id for the synthetic session. */
+    private fun newFakeSessionId(): ByteArray {
+        val id = ByteArray(16)
+        SECURE_RANDOM.nextBytes(id)
+        if (id[0] == 0.toByte() && id.none { it != 0.toByte() }) id[0] = 1
+        return id
     }
 
     private fun hookMaxSecurityLevel(module: XposedModule) {
@@ -510,6 +643,11 @@ class HookMediaDrm : XHook {
         /** Mirrors what the reference device (Galaxy A13 class) reports. */
         const val WIDEVINE_VERSION = "16.1.1@015"
         const val MAX_HDCP_LEVEL = "HDCP-2.2"
+
+        /** MediaDrm.SECURITY_LEVEL_HW_SECURE_ALL (API 28 constant value). */
+        const val MEDIA_SECURITY_LEVEL_HW_SECURE_ALL = 5
+
+        val SECURE_RANDOM = SecureRandom()
         val WIDEVINE_VERSION_LIKE = Regex("""^\d+\.\d+\.\d+""")
         val WIDEVINE_UUID: UUID = UUID.fromString("edef8ba9-79d6-4ace-a3c8-27dcd51d21ed")
         val WIDEVINE_BYTES: ByteArray = byteArrayOf(

@@ -367,6 +367,14 @@ static bool BuildSpoofValue(const char* name, const char* orig, char* out, size_
 // bionic property hooks
 // ---------------------------------------------------------------------------
 
+// v3.1.0 (Duck arm64CpuIdentity): true when the ABI list presents an ARM
+// story (either ARM mode). The CPU layer uses this to decide whether the
+// arm64 MIDR_EL1 identity surfaces should be served. Living next to
+// g_abi_on/g_abi_mode keeps one owner for the ABI state.
+bool AbiArmSpoofActive() {
+    return g_abi_on && g_abi_mode != 0;
+}
+
 int HidePropGet(const char* name, char* value) {
     BYTEHOOK_STACK_SCOPE();
     if (ReconEnabled() && !ReconPropIgnored(name) && !ReconPropHitOnce("prop", name)) {

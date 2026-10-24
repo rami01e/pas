@@ -75,6 +75,11 @@ void SetGpuProfile(int confMajor, int confMinor, int confSub, int confPatch,
 
 bool CpuSpoofActive();
 
+// v3.1.0 (Duck arm64CpuIdentity): true while the ABI list feature presents
+// an ARM profile (g_abi_on && abi_mode != 0). Owned by hide_props.cpp; the
+// CPU layer gates the arm64 MIDR_EL1 identity serving on it (hide_fs.cpp).
+bool AbiArmSpoofActive();
+
 // v2.5.9: bounded wait for the GPU config (see hide_gpu.cpp). Early GL /
 // Vulkan identity queries call this so a fast GL init cannot capture the
 // real GPU before the config thread lands.

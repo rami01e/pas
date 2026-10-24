@@ -1,47 +1,61 @@
-// hide_antiemu.cpp - ANTI-EMU native layer (v3.0.0).
+// hide_antiemu.cpp - ANTI-EMU native layer (v3.1.0).
 //
-// v3.0.0 is a deliberate scope reduction + reliability fix. The feature now
-// owns exactly three things, all runtime-gated on g_anti_emu:
+// v3.1.0 keeps the v3.0.0 scope reduction (path masking + prop blanking +
+// adb-runtime alignment, install-on-arm) and adds a second, strictly
+// target-listed hiding engine for the artifact classes Duck Detector's
+// runtime scan still sees in a scoped process. Everything new is gated on
+// g_anti_emu and only ever REMOVES or SANITIZES bytes; no identity is
+// rewritten, and with anti-emu off the process behaves exactly as v3.0.0.
 //
-//   1. Path masking (unchanged rule set). open/openat/fopen/access/faccessat/
-//      stat/lstat/fstatat and the raw syscall() layer answer ENOENT for the
-//      qemu/houdini/root/emulator artifact paths and families.
-//   2. Ignorable-codepoint normalization of every checked path. Duck
-//      Detector's "Android/data Ignorable CodePoint Bypass" inserts invisible
-//      Unicode codepoints (U+200B ZWSP, U+00AD soft hyphen, ...) into a path
-//      so exact-byte filters do not match while the kernel still resolves the
-//      same directory. Every path is now stripped of ignorable codepoints
-//      before the rule set runs, closing that bypass class for this layer.
-//   3. Emulator-artifact property blanking (ro.kernel.qemu family, MuMu/nemu/
-//      goldfish/ranchu/vbox/geny keys) - kept because blanking a value is not
-//      an identity rewrite and is what the feature is named for.
-//      Plus a minimal ADB-runtime alignment pair (see AntiEmuPropRewrite):
-//      init.svc.adbd is reported "running" and persist.sys.usb.config "mtp"
-//      so every reader sees one consistent story (adbd really is running on
-//      MuMu; the previous stopped-vs-socket-vs-TCP split is what Duck's
-//      AdbRuntime detector flags HIGH).
+//   1. Path masking (unchanged rule set from 2.x / v3.0.0).
+//   2. Ignorable-codepoint normalization of every checked path (unchanged).
+//   3. Emulator-artifact property blanking + adb-runtime alignment pair
+//      (unchanged).
+//   4. NEW kernel-identity sanitization: uname() and the /proc/version +
+//      /proc/sys/kernel/{osrelease,version} views are stripped of
+//      maintainer-style "@handle" mentions (Duck's MENTION_REGEX
+//      "@[A-Za-z0-9_]+"). The release/version numbers themselves stay raw -
+//      nothing is contradicted, the builder handles are simply dropped.
+//   5. NEW residue-view filtering (memfd serving for a fixed path set):
+//        /proc/self/{maps,smaps}          -> module/bytehook/houdini/qemu
+//                                            mapping lines dropped
+//        /proc/{,self/}mounts|mountinfo   -> /adb/modules + zygisk + module
+//                                            cache mounts dropped
+//        /proc/{,self/}net/unix           -> lspd / 1spd / xposed socket
+//                                            lines dropped
+//        /proc/self/environ               -> tainted entries blanked
+//        /proc/version + kernel sysctls   -> "@mention" stripped
+//      Whole lines of OTHER mappings are never touched, and app-owned lines
+//      (/data/app/**, split APKs) always survive - this is drop-only
+//      filtering of module/emulator residue, not the maps REWRITING that was
+//      removed in v3.0.0.
+//   6. NEW runtime-channel scrubbing: readlink/readlinkat answers ENOENT for
+//      fd links whose target carries framework residue (the /proc/self/fd
+//      scan), getenv returns an empty value for tainted variables, and the
+//      process environ is blanked in place once at arm time (System.getenv
+//      caches os.environ, so the scrub must happen before first use).
+//   7. FIXED (this is the "anti-emu breaks the CPU spoof" bug, Duck item 9):
+//      MyPropReadCallback violated ByteHook's once-only BYTEHOOK_CALL_PREV
+//      contract - every non-blanked property read called CALL_PREV twice
+//      (once to grab the prop name, once to forward). ByteHook's hook-frame
+//      stack is per-thread and shared by every hooked symbol, so the second
+//      call mis-resolved frames for the whole chain beneath it - including
+//      hide_fs's open/read hooks that serve the spoofed /proc/cpuinfo and
+//      cpufreq views. DevCheck-style consumers therefore lost their spoofed
+//      CPU story exactly when anti-emu armed. The callback now aligns values
+//      through a single CALL_PREV with a shim, like every other hook here.
 //
-// Removed in v3.0.0 (each had a single owner elsewhere or broke apps):
-//   - Kernel identity spoofing (uname release/version rewrite, /proc/version
-//     serving, the Java os.version property). The raw kernel is reported
-//     consistently from every source; contradicting it with a fake release
-//     only manufactured an inconsistency the detector could measure.
-//   - ALL /proc and /sys content serving (the memfd engine: cpuinfo, status,
-//     selinux/enforce, version, maps, smaps, mounts, mountinfo, mountstats).
-//     Rewritten maps/mounts lines lied about the app's own split APKs and
-//     failed integrity checks; the seccomp/NNP install is gone with it.
-//   - The x86 -> ARM property story (ABI/abilist/bionic/dalvik-isa rewrites,
-//     the hardware/board family, ro.build.host/user). The CPU and ABI
-//     toggles own that identity; per-app duplicates only fought them.
+// Removed in v3.0.0 (unchanged): kernel release/version spoofing, all
+// identity /proc-/sys serving, seccomp/NNP, x86->ARM prop rewrites.
 //
-// Arming is now race-free: SetAntiEmu(true) installs the hooks itself
-// (InstallAntiEmuHooks is idempotent), so a late toggle or a lost
-// InitWorker/Java race can no longer leave the gate on with no hooks
-// behind it. InitWorker's stage5b call remains as the early-install path.
+// Arming stays race-free: SetAntiEmu(true) installs the hooks itself
+// (InstallAntiEmuHooks is idempotent). InitWorker's stage5b call remains as
+// the early-install path.
 //
 // Caller filter is the standard module one (CallerAllowHooks), which
-// excludes Houdini / native-bridge libs so their own property reads stay
-// raw and MuMu's injected helpers keep working.
+// excludes Houdini / native-bridge libs AND libpas.so itself - so the
+// raw-syscall reads inside the serving engine below can never re-enter the
+// hooks (same pattern hide_fs.cpp relies on).
 
 #include "pas.h"
 
@@ -54,6 +68,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/system_properties.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 
 #include "bytehook.h"
@@ -87,21 +102,19 @@ static void MyPropReadCallback(const prop_info* pi,
                                void (*cb)(void*, const char*, const char*, uint32_t),
                                void* cookie);
 static int MyPropForeach(void (*cb)(const prop_info*, void*), void* cookie);
+static int MyUname(struct utsname* buf);
+static char* MyGetenv(const char* name);
+static ssize_t MyReadlink(const char* path, char* buf, size_t bufsiz);
+static ssize_t MyReadlinkAt(int dirfd, const char* path, char* buf, size_t bufsiz);
+
+// v3.1.0 environ scrub (defined below, called from SetAntiEmu).
+void ScrubEnvironmentResidue();
 
 // ---------------------------------------------------------------------------
 // hook installation (idempotent + race-safe)
 //
-// v3.0.0: the install is guarded per symbol. InitWorker (stage5b) and
-// SetAntiEmu(true) both funnel through here; whoever arrives first installs,
-// the other is a no-op. This is the P0 fix - previously the hooks were
-// installed only if the toggle happened to be on at the exact moment the
-// worker reached stage5b, and a later nativeSetAntiEmu(true) only flipped
-// the runtime gate, leaving Duck reading every masked surface raw.
-//
 // Each symbol keeps its own stub: if an attempt lands before bytehook_init
-// (Java can arm anti-emu while the InitWorker is still starting), the failed
-// symbols stay unhooked and any later call retries exactly those - no
-// double-hooking, no lost install.
+// the failed symbols stay unhooked and any later call retries exactly those.
 // ---------------------------------------------------------------------------
 struct AeHookSpec {
     const char* sym;
@@ -124,6 +137,10 @@ static AeHookSpec g_ae_hooks[] = {
     {"__system_property_find",           (void*)MyPropFind,         nullptr},
     {"__system_property_read_callback",  (void*)MyPropReadCallback, nullptr},
     {"__system_property_foreach",        (void*)MyPropForeach,      nullptr},
+    {"uname",      (void*)MyUname,      nullptr},
+    {"getenv",     (void*)MyGetenv,     nullptr},
+    {"readlink",   (void*)MyReadlink,   nullptr},
+    {"readlinkat", (void*)MyReadlinkAt, nullptr},
     {"syscall",    (void*)MySyscall,    nullptr},
 };
 
@@ -168,19 +185,17 @@ void SetAntiEmu(bool on) {
     if (on) {
         // v3.0.0 (P0): arming guarantees the hooks exist. Idempotent.
         InstallAntiEmuHooks();
+        // v3.1.0: blank module residue out of the live environ once. libcore
+        // caches os.environ for System.getenv() at first use, so the scrub
+        // has to happen while arming - not lazily per read. Idempotent by
+        // construction (already-blank entries fail the token check).
+        ScrubEnvironmentResidue();
     }
     Log("native: anti-emu %s", on ? "on" : "off");
 }
 
 // ---------------------------------------------------------------------------
-// ignorable-codepoint normalization (v3.0.0, P5)
-//
-// Duck Detector builds probe paths like "/sdcard/Android/data\u200B/" and
-// "/sdcard\u00AD/Android/data" so exact-byte comparisons (the same technique
-// that would defeat any static mask list) miss while the kernel resolves the
-// identical directory. Every ignorable codepoint is stripped into a stack
-// copy before the rule set below runs. The set is a superset of the code
-// points Duck's dangerousapps and kernelcheck probes insert.
+// ignorable-codepoint normalization (v3.0.0, P5 - unchanged)
 // ---------------------------------------------------------------------------
 
 static bool IsIgnorableCp(uint32_t cp) {
@@ -313,6 +328,12 @@ static bool IsAntiEmuPathRaw(const char* path) {
     // All children of /data/adb (modules, ksu, magisk, ...)
     if (strncmp(path, "/data/adb/", 10) == 0) return true;
 
+    // v3.1.0: qemu-context SELinux property files. Duck's "direct device
+    // nodes" probe opens /dev/__properties__/u:object_r:qemu_sf_lcd_density_
+    // prop:s0 directly; the mapping line is already dropped from maps, so
+    // the node itself goes ENOENT for direct openers too.
+    if (strncmp(path, "/dev/__properties__/u:object_r:qemu", 35) == 0) return true;
+
     // Magisk paths under common root locations (JJ probes /sbin/.magisk,
     // /bin/magiskhide, /sbin/magiskinit, etc.)
     if (strncmp(path, "/sbin/", 6) == 0 ||
@@ -402,13 +423,309 @@ static bool IsAntiEmuPath(const char* path) {
 }
 
 // ---------------------------------------------------------------------------
+// v3.1.0 residue token engine
+//
+// Duck's LSPosed probe scans /proc/self/net/unix, /proc/self/fd and the
+// environment for framework residue; its runtime-artifacts scan reads
+// /proc/self/maps + mountinfo; its "Mapped translation library" / bytehook
+// cards read maps. The token lists below are drop-only filters: a line (or
+// env entry, or fd link) carrying one of them vanishes, everything else is
+// byte-identical to the real view. Case-insensitive on purpose - Duck
+// lowercases before matching, and Linux paths reaching these views are
+// lowercase anyway.
+// ---------------------------------------------------------------------------
+
+static char AeLowerChar(char c) {
+    return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+// Case-insensitive substring over a bounded region (no NUL required).
+static bool AeRegionHasToken(const char* start, size_t len, const char* tok) {
+    const size_t tl = strlen(tok);
+    if (tl == 0 || len < tl) return false;
+    const size_t last = len - tl;
+    for (size_t i = 0; i <= last; i++) {
+        size_t k = 0;
+        while (k < tl && AeLowerChar(start[i + k]) == tok[k]) k++;
+        if (k == tl) return true;
+    }
+    return false;
+}
+
+// LSPosed / Xposed / module-manager residue (mirrors Duck's frameworkTokens
+// plus the daemon paths that carry them).
+static bool AeHasFrameworkResidue(const char* s, size_t len) {
+    static const char* const kTokens[] = {
+        "lsposed", "xposed", "edxposed", "lspd", "1spd", "libxposed",
+        "zygisk", "/data/adb", ".cli_sock",
+    };
+    for (const char* t : kTokens) {
+        if (AeRegionHasToken(s, len, t)) return true;
+    }
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// v3.1.0 filtered proc-file serving engine
+//
+// A fixed, hand-picked path set is re-served through a memfd after dropping
+// the residue lines listed above. Nothing else is touched: with anti-emu off
+// AeSpecialFor always answers None and every open reaches the real file (and
+// then hide_fs's own filters) exactly as before.
+// ---------------------------------------------------------------------------
+
+enum AeSpecial {
+    kAeNone = 0,
+    kAeVersion,      // /proc/version                     (@mention strip)
+    kAeSysctlVer,    // /proc/sys/kernel/version          (@mention strip)
+    kAeSysctlRel,    // /proc/sys/kernel/osrelease        (@mention strip)
+    kAeMaps,         // /proc/self/{maps,smaps}           (line drop)
+    kAeMounts,       // /proc/{,self/}mounts              (line drop)
+    kAeMountinfo,    // /proc/{,self/}mountinfo           (line drop)
+    kAeNetUnix,      // /proc/{,self/}net/unix            (line drop)
+    kAeEnviron,      // /proc/self/environ                (entry drop)
+};
+
+static AeSpecial AeSpecialFor(const char* path) {
+    if (!g_anti_emu || path == nullptr || path[0] != '/') return kAeNone;
+    if (strcmp(path, "/proc/version") == 0) return kAeVersion;
+    if (strcmp(path, "/proc/sys/kernel/version") == 0) return kAeSysctlVer;
+    if (strcmp(path, "/proc/sys/kernel/osrelease") == 0) return kAeSysctlRel;
+    if (strcmp(path, "/proc/self/maps") == 0 || strcmp(path, "/proc/self/smaps") == 0) {
+        return kAeMaps;
+    }
+    if (strcmp(path, "/proc/mounts") == 0 || strcmp(path, "/proc/self/mounts") == 0) {
+        return kAeMounts;
+    }
+    if (strcmp(path, "/proc/mountinfo") == 0 || strcmp(path, "/proc/self/mountinfo") == 0) {
+        return kAeMountinfo;
+    }
+    if (strcmp(path, "/proc/net/unix") == 0 || strcmp(path, "/proc/self/net/unix") == 0) {
+        return kAeNetUnix;
+    }
+    if (strcmp(path, "/proc/self/environ") == 0) return kAeEnviron;
+    return kAeNone;
+}
+
+// maps / smaps line filter: module + translation-layer + emulator artifacts.
+// The app's own /data/app/** lines carry none of these tokens and always
+// survive, so split-APK integrity checks keep seeing their real paths.
+static bool AeMapsLineBlocked(const char* s, size_t len) {
+    static const char* const kTokens[] = {
+        "bytehook", "zygisk", "/data/adb", "lspd", "1spd", "lsposed", "xposed",
+        "houdini", "libnb", "ndk_translation", "qemu", "goldfish", "ranchu",
+        "nemu", "/mumu", "vbox", "geny",
+    };
+    for (const char* t : kTokens) {
+        if (AeRegionHasToken(s, len, t)) return true;
+    }
+    return false;
+}
+
+// mounts / mountinfo line filter: module bind mounts (Vector's
+// /adb/modules/zygisk_vector resource-cache view, lspd, magisk overlays).
+static bool AeMountsLineBlocked(const char* s, size_t len) {
+    static const char* const kTokens[] = {
+        "/adb/modules", "zygisk", "/data/adb", "lspd", "1spd", "lsposed",
+        "xposed", "magisk", "resource-cache",
+    };
+    for (const char* t : kTokens) {
+        if (AeRegionHasToken(s, len, t)) return true;
+    }
+    return false;
+}
+
+// /proc/net/unix line filter: the 1spd daemon socket and friends.
+static bool AeNetUnixLineBlocked(const char* s, size_t len) {
+    return AeHasFrameworkResidue(s, len);
+}
+
+// v3.0.0 pattern: raw syscalls inside libpas.so are exempt from the module's
+// own PLT hooks by the CallerAllow skip list, so reading the real file here
+// cannot re-enter MyOpen/MySyscall (same mechanism hide_fs relies on).
+static bool AeReadWhole(const char* path, std::string* out) {
+    int fd = (int)syscall(SYS_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return false;
+    char buf[16384];
+    for (;;) {
+        ssize_t n = syscall(SYS_read, fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;
+        out->append(buf, (size_t)n);
+        if (out->size() > (8u << 20)) break;  // maps can be large; 8 MB cap
+    }
+    syscall(SYS_close, fd);
+    return true;
+}
+
+// "@[A-Za-z0-9_]+" removal - exactly Duck kernelcheck's MENTION_REGEX. The
+// '@' survives when not followed by a token character (the regex would not
+// match it either). Used on kernel-identity strings only.
+static void AeStripAtMentions(std::string* s) {
+    if (s == nullptr || s->empty()) return;
+    std::string out;
+    out.reserve(s->size());
+    size_t i = 0;
+    const size_t n = s->size();
+    while (i < n) {
+        if ((*s)[i] == '@' && i + 1 < n) {
+            size_t j = i + 1;
+            while (j < n) {
+                char c = (*s)[j];
+                if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') || c == '_') {
+                    j++;
+                } else {
+                    break;
+                }
+            }
+            if (j > i + 1) {
+                i = j;  // drop "@handle"
+                continue;
+            }
+        }
+        out.push_back((*s)[i]);
+        i++;
+    }
+    *s = out;
+}
+
+static int AeMemfdFrom(const std::string& content, int flags) {
+#ifdef SYS_memfd_create
+    int mfd = (int)syscall(SYS_memfd_create, "pas-ae",
+                           (flags & O_CLOEXEC) ? MFD_CLOEXEC : 0);
+#else
+    int mfd = -1;
+#endif
+    if (mfd < 0) return -1;
+    size_t off = 0;
+    while (off < content.size()) {
+        ssize_t w = syscall(SYS_write, mfd, content.data() + off, content.size() - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            syscall(SYS_close, mfd);
+            return -1;
+        }
+        off += (size_t)w;
+    }
+    syscall(SYS_lseek, mfd, 0, SEEK_SET);
+    return mfd;
+}
+
+// Newline-delimited drop filter shared by maps/mounts/net-unix.
+static void AeFilterLinesBy(const std::string& raw,
+                            bool (*blocked)(const char*, size_t),
+                            std::string* out) {
+    size_t i = 0;
+    const size_t n = raw.size();
+    while (i < n) {
+        size_t j = raw.find('\n', i);
+        j = (j == std::string::npos) ? n : j + 1;
+        if (!blocked(raw.data() + i, j - i)) {
+            out->append(raw, i, j - i);
+        }
+        i = j;
+    }
+}
+
+// NUL-delimited drop filter for /proc/self/environ.
+static void AeFilterEnvironContent(const std::string& raw, std::string* out) {
+    size_t i = 0;
+    const size_t n = raw.size();
+    while (i < n) {
+        size_t j = i;
+        while (j < n && raw[j] != '\0') j++;
+        if (j > i && !AeHasFrameworkResidue(raw.data() + i, j - i)) {
+            out->append(raw, i, j - i);
+            out->push_back('\0');
+        }
+        i = j + 1;
+    }
+}
+
+// Returns a memfd holding the filtered view, or -1 (caller falls through to
+// the real file; failing open here must never break a reader).
+static int AeServeFilteredFd(const char* path, AeSpecial kind, int flags) {
+    std::string raw;
+    if (!AeReadWhole(path, &raw)) return -1;
+    std::string out;
+    out.reserve(raw.size());
+    switch (kind) {
+        case kAeVersion:
+        case kAeSysctlVer:
+        case kAeSysctlRel:
+            out = raw;
+            AeStripAtMentions(&out);
+            break;
+        case kAeMaps:
+            AeFilterLinesBy(raw, AeMapsLineBlocked, &out);
+            break;
+        case kAeMounts:
+        case kAeMountinfo:
+            AeFilterLinesBy(raw, AeMountsLineBlocked, &out);
+            break;
+        case kAeNetUnix:
+            AeFilterLinesBy(raw, AeNetUnixLineBlocked, &out);
+            break;
+        case kAeEnviron:
+            AeFilterEnvironContent(raw, &out);
+            break;
+        default:
+            return -1;
+    }
+    if (out.empty() && kind != kAeNetUnix) return -1;  // suspicious - stay raw
+    return AeMemfdFrom(out, flags);
+}
+
+// Open-family entry: answers a filtered fd for the special set, else -1.
+static int AeSpecialOpenFd(const char* path, int flags) {
+    AeSpecial kind = AeSpecialFor(path);
+    if (kind == kAeNone) return -1;
+    if ((flags & O_ACCMODE) != O_RDONLY) return -1;
+    return AeServeFilteredFd(path, kind, flags);
+}
+
+// ---------------------------------------------------------------------------
+// v3.1.0 live-environment scrub
+//
+// Called once from SetAntiEmu(true). Entries whose KEY carries framework
+// residue are blanked entirely (getenv treats an entry without '=' as
+// absent); entries whose VALUE carries residue keep the KEY= shape with an
+// empty value. In-place because libcore copies os.environ by pointer at
+// first System.getenv() use.
+// ---------------------------------------------------------------------------
+void ScrubEnvironmentResidue() {
+    for (char** e = environ; e != nullptr && *e != nullptr; e++) {
+        char* entry = *e;
+        if (entry == nullptr) continue;
+        char* eq = strchr(entry, '=');
+        size_t keyLen = eq != nullptr ? (size_t)(eq - entry) : strlen(entry);
+        if (keyLen > 0 && AeHasFrameworkResidue(entry, keyLen)) {
+            entry[0] = '\0';
+            continue;
+        }
+        if (eq != nullptr && AeHasFrameworkResidue(eq + 1, strlen(eq + 1))) {
+            eq[1] = '\0';
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // libc open family - every entry point the SDKs use for File.exists() /
-// FileInputStream / fopen / ifstream
+// FileInputStream / fopen / ifstream. v3.1.0: after the ENOENT mask, the
+// special residue-view set is answered with a filtered memfd (see above).
 // ---------------------------------------------------------------------------
 
 static int MyOpen(const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
+    if (path != nullptr && path[0] == '/') {
+        int sfd = AeSpecialOpenFd(path, flags);
+        if (sfd >= 0) return sfd;
+    }
     mode_t mode = 0;
 #if defined(O_TMPFILE)
     if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
@@ -425,12 +742,20 @@ static int MyOpen(const char* path, int flags, ...) {
 static int MyOpen2(const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
     if (IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
+    if (path != nullptr && path[0] == '/') {
+        int sfd = AeSpecialOpenFd(path, flags);
+        if (sfd >= 0) return sfd;
+    }
     return BYTEHOOK_CALL_PREV(MyOpen2, path, flags);
 }
 
 static int MyOpenAt(int dirfd, const char* path, int flags, ...) {
     BYTEHOOK_STACK_SCOPE();
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
+    if (path != nullptr && path[0] == '/') {
+        int sfd = AeSpecialOpenFd(path, flags);
+        if (sfd >= 0) return sfd;
+    }
     mode_t mode = 0;
 #if defined(O_TMPFILE)
     if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
@@ -447,12 +772,25 @@ static int MyOpenAt(int dirfd, const char* path, int flags, ...) {
 static int MyOpenAt2(int dirfd, const char* path, int flags) {
     BYTEHOOK_STACK_SCOPE();
     if (path && path[0] == '/' && IsAntiEmuPath(path)) { errno = ENOENT; return -1; }
+    if (path != nullptr && path[0] == '/') {
+        int sfd = AeSpecialOpenFd(path, flags);
+        if (sfd >= 0) return sfd;
+    }
     return BYTEHOOK_CALL_PREV(MyOpenAt2, dirfd, path, flags);
 }
 
 static FILE* MyFopen(const char* path, const char* mode) {
     BYTEHOOK_STACK_SCOPE();
     if (IsAntiEmuPath(path)) { errno = ENOENT; return nullptr; }
+    if (path != nullptr && path[0] == '/' && mode != nullptr && mode[0] == 'r' &&
+        strchr(mode, '+') == nullptr) {
+        int sfd = AeSpecialOpenFd(path, O_RDONLY);
+        if (sfd >= 0) {
+            FILE* f = fdopen(sfd, "r");
+            if (f != nullptr) return f;
+            syscall(SYS_close, sfd);
+        }
+    }
     return BYTEHOOK_CALL_PREV(MyFopen, path, mode);
 }
 
@@ -490,15 +828,14 @@ static int MyFstatAt(int dirfd, const char* path, struct stat* buf, int flags) {
 // direct syscall() layer
 //
 // Installed after hide_fs.cpp's syscall hook (pas.cpp stage 4a vs 5b), so
-// this is the OUTER layer: anti-emu paths handled first, then falls through
-// via BYTEHOOK_CALL_PREV to hide_fs.MySyscall (CPU freq / interface hiding)
-// on every other path.
+// this is the OUTER layer: anti-emu paths + residue views handled first,
+// then falls through via BYTEHOOK_CALL_PREV to hide_fs.MySyscall (CPU freq /
+// interface hiding) on every other path.
 //
 // Bytehook's CallerAllowHooks filter excludes Houdini / native-bridge libs
-// (their syscalls are x86_64 host syscalls running ARM-translated code; a
-// vararg mismatch there would corrupt the bridge). App code (x86_64) and
-// the module itself are the only callers that hit this hook, which is
-// exactly what we want.
+// AND libpas.so itself, so the serving engine's raw syscalls can never
+// re-enter this hook. App code (x86_64) and detector libraries are the only
+// callers that hit it - exactly what we want.
 // ---------------------------------------------------------------------------
 static long MySyscall(long number, ...) {
     BYTEHOOK_STACK_SCOPE();
@@ -517,18 +854,26 @@ static long MySyscall(long number, ...) {
 #if defined(__NR_openat)
         if (number == __NR_openat) {
             const char* path = (const char*)a1;
-            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
-                errno = ENOENT;
-                return -1;
+            if (path != nullptr && path[0] == '/') {
+                if (IsAntiEmuPath(path)) {
+                    errno = ENOENT;
+                    return -1;
+                }
+                int sfd = AeSpecialOpenFd(path, (int)a2);
+                if (sfd >= 0) return sfd;
             }
         }
 #endif
 #if defined(__NR_open)
         if (number == __NR_open) {
             const char* path = (const char*)a0;
-            if (path != nullptr && path[0] == '/' && IsAntiEmuPath(path)) {
-                errno = ENOENT;
-                return -1;
+            if (path != nullptr && path[0] == '/') {
+                if (IsAntiEmuPath(path)) {
+                    errno = ENOENT;
+                    return -1;
+                }
+                int sfd = AeSpecialOpenFd(path, (int)a1);
+                if (sfd >= 0) return sfd;
             }
         }
 #endif
@@ -576,22 +921,101 @@ static long MySyscall(long number, ...) {
 }
 
 // ---------------------------------------------------------------------------
+// v3.1.0 runtime-channel hooks
+//
+// uname: strip maintainer-style "@handle" mentions from every identity field
+// (Duck kernelcheck MENTION_REGEX). The release/version numbers themselves
+// stay raw - they agree with every other source, only builder handles are
+// dropped. hide_props' HideUname sits underneath on the same chain and keeps
+// owning the machine-field ABI story.
+// ---------------------------------------------------------------------------
+static int MyUname(struct utsname* buf) {
+    BYTEHOOK_STACK_SCOPE();
+    int rc = BYTEHOOK_CALL_PREV(MyUname, buf);
+    if (rc == 0 && buf != nullptr && g_anti_emu) {
+        char tmp[sizeof(((struct utsname*)nullptr)->version)];
+        char* fields[] = {
+            buf->sysname, buf->nodename, buf->release,
+            buf->version, buf->machine, buf->domainname,
+        };
+        (void)tmp;
+        for (char* f : fields) {
+            if (f == nullptr) continue;
+            if (!strchr(f, '@')) continue;
+            std::string s(f);
+            AeStripAtMentions(&s);
+            if (s.size() < sizeof(tmp)) {
+                memcpy(f, s.c_str(), s.size() + 1);
+            }
+        }
+    }
+    return rc;
+}
+
+// getenv: belt-and-braces over the arm-time environ scrub (covers values
+// set later with setenv/putenv). getenv results must not be modified by the
+// caller, so an empty string literal is returned for tainted values.
+static char* MyGetenv(const char* name) {
+    BYTEHOOK_STACK_SCOPE();
+    char* v = BYTEHOOK_CALL_PREV(MyGetenv, name);
+    if (g_anti_emu && v != nullptr && v[0] != '\0' &&
+        AeHasFrameworkResidue(v, strlen(v))) {
+        return (char*)"";
+    }
+    return v;
+}
+
+// readlink / readlinkat: the /proc/self/fd scan channel. A link whose target
+// carries framework residue answers ENOENT - from the scanner's point of
+// view the descriptor points at nothing readable, which is what an
+// un-hooked clean process shows for closed/transient fds.
+static ssize_t MyReadlink(const char* path, char* buf, size_t bufsiz) {
+    BYTEHOOK_STACK_SCOPE();
+    ssize_t n = BYTEHOOK_CALL_PREV(MyReadlink, path, buf, bufsiz);
+    if (g_anti_emu && n > 0 && buf != nullptr && AeHasFrameworkResidue(buf, (size_t)n)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return n;
+}
+
+static ssize_t MyReadlinkAt(int dirfd, const char* path, char* buf, size_t bufsiz) {
+    BYTEHOOK_STACK_SCOPE();
+    ssize_t n = BYTEHOOK_CALL_PREV(MyReadlinkAt, dirfd, path, buf, bufsiz);
+    if (g_anti_emu && n > 0 && buf != nullptr && AeHasFrameworkResidue(buf, (size_t)n)) {
+        errno = ENOENT;
+        return -1;
+    }
+    return n;
+}
+
+// ---------------------------------------------------------------------------
 // property layer
 //
 // Kept from 2.x: the emulator-artifact key blanking (IsAntiEmuProp). Blanking
 // ro.kernel.qemu & friends is not an identity rewrite - it removes markers
 // that have no business existing on the presented device.
 //
-// New in v3.0.0 (P4): the ADB-runtime alignment pair. MuMu runs adbd outside
-// init (socket + TCP listener alive) while init.svc.adbd reads "stopped" -
-// that three-way contradiction is exactly what Duck's AdbRuntime detector
-// grades HIGH (INIT_STOPPED_WITH_ADB_PROTOCOL / _INIT_SOCKET / _JDWP_SOCKET).
-// MuMu's adb cannot be turned off, so the readable state is aligned to the
-// truth instead: adbd "running" (it is) and persist.sys.usb.config "mtp"
-// (Duck's retail-expected value; adb-over-TCP then reads as ordinary wireless
-// debugging, which Duck treats as plain debugging state, not danger).
-// sys.usb.state is deliberately left raw - it feeds Duck's isAdbActive()
-// only, never a contradiction check.
+// Kept from v3.0.0 (P4): the ADB-runtime alignment pair. MuMu runs adbd
+// outside init (socket + TCP listener alive) while init.svc.adbd reads
+// "stopped" - that three-way contradiction is exactly what Duck's AdbRuntime
+// detector grades HIGH. The readable state is aligned to the truth instead:
+// adbd "running" (it is) and persist.sys.usb.config "mtp" (the retail-
+// expected value; adb-over-TCP then reads as ordinary wireless debugging).
+// sys.usb.state stays raw - it feeds Duck's isAdbActive() only, never a
+// contradiction check. (The exec'd `getprop` dump channel is aligned on the
+// Java side - HookExec's exec shield.)
+//
+// v3.1.0 FIX (Duck item 9 - "anti-emu on breaks the CPU spoof"): the old
+// MyPropReadCallback called BYTEHOOK_CALL_PREV twice per invocation (once
+// with a name-grabbing shim, then again to forward the caller's callback)
+// for every non-blanked property. ByteHook's hook-frame stack is per-thread
+// and shared by ALL hooked symbols, so the second, undocumented call
+// mis-resolved frames chain-wide - hide_fs's open/read serving (the spoofed
+// /proc/cpuinfo + cpufreq views DevCheck renders) lost its layer on threads
+// that had just read a property. The callback now aligns values inside ONE
+// CALL_PREV via PropAlignCb, matching the once-only contract every other
+// hook in the module follows.
 // ---------------------------------------------------------------------------
 
 static bool IsAntiEmuProp(const char* name) {
@@ -663,6 +1087,46 @@ static const prop_info* MyPropFind(const char* name) {
     return BYTEHOOK_CALL_PREV(MyPropFind, name);
 }
 
+// v3.1.0: single-CALL_PREV read-callback shim. The real read callback runs
+// exactly once; the shim decides between the blanked / aligned / raw value
+// before handing the result to the caller's callback.
+struct PropAlign {
+    void (*orig)(void* cookie, const char* name, const char* value, uint32_t serial);
+    void* cookie;
+};
+
+static void PropAlignCb(void* cookie, const char* name, const char* value, uint32_t serial) {
+    PropAlign* a = static_cast<PropAlign*>(cookie);
+    if (a == nullptr) return;
+    if (name != nullptr) {
+        if (IsAntiEmuProp(name)) {
+            a->orig(a->cookie, name, "", serial);
+            return;
+        }
+        if (const char* v = AntiEmuPropRewrite(name)) {
+            a->orig(a->cookie, name, v, serial);
+            return;
+        }
+    }
+    a->orig(a->cookie, name, value, serial);
+}
+
+static void MyPropReadCallback(const prop_info* pi,
+                               void (*cb)(void*, const char*, const char*, uint32_t),
+                               void* cookie) {
+    BYTEHOOK_STACK_SCOPE();
+    if (pi != nullptr && cb != nullptr && g_anti_emu) {
+        PropAlign a;
+        a.orig = cb;
+        a.cookie = cookie;
+        BYTEHOOK_CALL_PREV(MyPropReadCallback, pi, &PropAlignCb, &a);
+        return;
+    }
+    BYTEHOOK_CALL_PREV(MyPropReadCallback, pi, cb, cookie);
+}
+
+// Name-grab shim: the foreach sweep uses it to inspect the property NAME
+// without touching any hook frame.
 struct PropGrab {
     const char* name;
     uint32_t serial;
@@ -671,31 +1135,10 @@ struct PropGrab {
 static void PropGrabCb(void* cookie, const char* name, const char* value, uint32_t serial) {
     PropGrab* g = static_cast<PropGrab*>(cookie);
     (void)value;
-    g->name = name;
-    g->serial = serial;
-}
-
-static void MyPropReadCallback(const prop_info* pi,
-                               void (*cb)(void*, const char*, const char*, uint32_t),
-                               void* cookie) {
-    BYTEHOOK_STACK_SCOPE();
-    if (pi != nullptr && cb != nullptr) {
-        PropGrab g;
-        g.name = nullptr;
-        g.serial = 0;
-        BYTEHOOK_CALL_PREV(MyPropReadCallback, pi, &PropGrabCb, &g);
-        if (g.name != nullptr) {
-            if (IsAntiEmuProp(g.name)) {
-                cb(cookie, g.name, "", g.serial);
-                return;
-            }
-            if (const char* v = AntiEmuPropRewrite(g.name)) {
-                cb(cookie, g.name, v, g.serial);
-                return;
-            }
-        }
+    if (g != nullptr) {
+        g->name = name;
+        g->serial = serial;
     }
-    BYTEHOOK_CALL_PREV(MyPropReadCallback, pi, cb, cookie);
 }
 
 struct PropForeachFwd {
@@ -706,12 +1149,17 @@ struct PropForeachFwd {
 static void PropForeachShim(const prop_info* pi, void* cookie) {
     PropForeachFwd* fwd = static_cast<PropForeachFwd*>(cookie);
     if (pi == nullptr) return;
-    PropGrab g;
-    g.name = nullptr;
-    g.serial = 0;
-    __system_property_read_callback(pi, &PropGrabCb, &g);
-    if (g.name == nullptr) return;
-    if (IsAntiEmuProp(g.name)) return;  // vanish from getprop-style sweeps
+    // Name grab via the plain libc symbol: libpas.so's own PLT entries are
+    // exempt from the module's hooks (CallerAllow skip list), so this runs
+    // the REAL read callback exactly once with no bytehook frame involved -
+    // a hook function must never be invoked outside its trampoline, which
+    // is precisely the once-only discipline this revision restores.
+    PropGrab grab;
+    grab.name = nullptr;
+    grab.serial = 0;
+    __system_property_read_callback(pi, &PropGrabCb, &grab);
+    if (grab.name == nullptr) return;
+    if (IsAntiEmuProp(grab.name)) return;  // vanish from getprop-style sweeps
     // The P4 pair stays in the sweep - it is a normal property on a real
     // device; its VALUE is aligned at read-callback time.
     fwd->cb(pi, fwd->cookie);
@@ -727,8 +1175,6 @@ static int MyPropForeach(void (*cb)(const prop_info*, void*), void* cookie) {
     }
     return BYTEHOOK_CALL_PREV(MyPropForeach, cb, cookie);
 }
-
-// ---------------------------------------------------------------------------
 
 }  // namespace pas
 
