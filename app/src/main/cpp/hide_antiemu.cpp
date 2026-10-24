@@ -593,6 +593,18 @@ static void AeStripAtMentions(std::string* s) {
     *s = out;
 }
 
+// memfd_create is reached through the raw syscall (bionic only exposes the
+// libc wrapper from API 30; PAS targets 26), and the MFD_* request flags are
+// kernel UAPI constants that the NDK sysroot headers do not export. Define
+// them locally with the values from linux/memfd.h, guarded so a sysroot that
+// does export them stays untouched.
+#ifndef MFD_CLOEXEC
+#define MFD_CLOEXEC 0x0001U
+#endif
+#ifndef MFD_ALLOW_SEALING
+#define MFD_ALLOW_SEALING 0x0002U
+#endif
+
 static int AeMemfdFrom(const std::string& content, int flags) {
 #ifdef SYS_memfd_create
     int mfd = (int)syscall(SYS_memfd_create, "pas-ae",

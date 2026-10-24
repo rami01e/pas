@@ -292,7 +292,9 @@ class HookMediaDrm : XHook {
                     chain.proceed()
                 } catch (t: Throwable) {
                     module.log(Log.INFO, TAG, "[PAS] MediaDrm.getKeyRequest failed -> synthetic ($t)")
-                    MediaDrm.KeyRequest().apply { setData(ByteArray(32)) }
+                    // Fall back to the original failure when the runtime
+                    // refuses to hand us a synthetic request instance.
+                    newFakeKeyRequest() ?: throw t
                 }
             }
         }
@@ -317,6 +319,25 @@ class HookMediaDrm : XHook {
             }
         }
     }
+
+    /**
+     * Builds an empty MediaDrm.KeyRequest for the failure path of
+     * getKeyRequest. KeyRequest's constructor is package-private and its
+     * data setter is not part of the public SDK, so the instance is created
+     * and its data field is filled in reflectively (neither member is on the
+     * hidden-API blocklist; both are plain framework-internal visibility).
+     * Returns null when the runtime refuses anything, so the caller can
+     * rethrow the original error and keep the pre-hook behaviour.
+     */
+    private fun newFakeKeyRequest(): MediaDrm.KeyRequest? = runCatching {
+        val ctor = MediaDrm.KeyRequest::class.java.getDeclaredConstructor()
+        ctor.isAccessible = true
+        val request = ctor.newInstance() as MediaDrm.KeyRequest
+        val dataField = MediaDrm.KeyRequest::class.java.getDeclaredField("mData")
+        dataField.isAccessible = true
+        dataField.set(request, ByteArray(32))
+        request
+    }.getOrNull()
 
     /** Non-empty, never-all-zero session id for the synthetic session. */
     private fun newFakeSessionId(): ByteArray {
